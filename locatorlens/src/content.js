@@ -1,0 +1,862 @@
+// LocatorLens – content.js
+// Injected into every page. Handles hover highlight + click capture + locator generation.
+
+(function () {
+  'use strict';
+  if (window.__LocatorLensInjected) return;
+  window.__LocatorLensInjected = true;
+
+  // ── State ──────────────────────────────────────────────────────────────────
+  let isInspecting = false;
+  let hoveredEl = null;
+  let overlay = null;
+  let tooltip = null;
+  let traversalBar = null;
+  let lastRightClickedEl = null;
+
+  // ── Track right-clicked element (always active for context menu) ───────────
+  document.addEventListener('contextmenu', (e) => {
+    lastRightClickedEl = e.target;
+  }, true);
+
+  // ── Styles injected into the page ─────────────────────────────────────────
+  function injectStyles() {
+    if (document.getElementById('ll-styles')) return;
+    const style = document.createElement('style');
+    style.id = 'll-styles';
+    style.textContent = `
+      #ll-overlay {
+        position: fixed !important;
+        pointer-events: none !important;
+        z-index: 2147483646 !important;
+        border: 2px solid #00ff9d !important;
+        background: rgba(0,255,157,0.08) !important;
+        border-radius: 3px !important;
+        transition: all 0.1s ease !important;
+        box-shadow: 0 0 0 1px rgba(0,255,157,0.3), 0 0 12px rgba(0,255,157,0.2) !important;
+      }
+      #ll-tooltip {
+        position: fixed !important;
+        z-index: 2147483647 !important;
+        background: #0a0e1a !important;
+        border: 1px solid #00ff9d !important;
+        border-radius: 8px !important;
+        padding: 8px 12px !important;
+        font-family: 'JetBrains Mono', 'Courier New', monospace !important;
+        font-size: 12px !important;
+        color: #00ff9d !important;
+        pointer-events: none !important;
+        max-width: 320px !important;
+        box-shadow: 0 4px 20px rgba(0,0,0,0.6) !important;
+        line-height: 1.5 !important;
+        white-space: nowrap !important;
+      }
+      #ll-tooltip .ll-tag { color: #82aaff; font-weight: bold; }
+      #ll-tooltip .ll-hint { color: #64748b; font-size: 11px; margin-top: 3px; }
+      body.ll-inspecting * { cursor: crosshair !important; }
+
+      /* ── Traversal Toolbar ── */
+      #ll-traversal-bar {
+        position: fixed !important;
+        z-index: 2147483647 !important;
+        display: flex !important;
+        align-items: center !important;
+        gap: 4px !important;
+        background: #0a0e1a !important;
+        border: 1px solid #00ff9d !important;
+        border-radius: 8px !important;
+        padding: 4px 8px !important;
+        box-shadow: 0 4px 16px rgba(0,0,0,0.7) !important;
+        font-family: 'Courier New', monospace !important;
+        font-size: 11px !important;
+        pointer-events: all !important;
+        user-select: none !important;
+      }
+      #ll-traversal-bar .ll-trav-lbl {
+        color: #64748b !important;
+        font-size: 10px !important;
+        letter-spacing: 0.5px !important;
+        margin-right: 4px !important;
+      }
+      #ll-traversal-bar button {
+        background: #1a2235 !important;
+        border: 1px solid #1e2d45 !important;
+        color: #00ff9d !important;
+        font-size: 11px !important;
+        font-family: 'Courier New', monospace !important;
+        padding: 3px 10px !important;
+        border-radius: 5px !important;
+        cursor: pointer !important;
+        transition: all 0.15s !important;
+        pointer-events: all !important;
+      }
+      #ll-traversal-bar button:hover {
+        background: #00ff9d !important;
+        color: #0a0e1a !important;
+        border-color: #00ff9d !important;
+      }
+      #ll-traversal-bar .ll-trav-hint {
+        color: #334155 !important;
+        font-size: 9px !important;
+        margin-left: 4px !important;
+      }
+
+      /* ── Toast notification ── */
+      #ll-toast {
+        position: fixed !important;
+        bottom: 24px !important;
+        left: 50% !important;
+        transform: translateX(-50%) translateY(0) !important;
+        z-index: 2147483647 !important;
+        background: #0a0e1a !important;
+        border: 1px solid #00ff9d !important;
+        border-radius: 10px !important;
+        padding: 10px 18px !important;
+        font-family: 'JetBrains Mono', 'Courier New', monospace !important;
+        font-size: 12px !important;
+        color: #00ff9d !important;
+        box-shadow: 0 8px 32px rgba(0,0,0,0.7), 0 0 0 1px rgba(0,255,157,0.2) !important;
+        display: flex !important;
+        align-items: center !important;
+        gap: 10px !important;
+        pointer-events: none !important;
+        white-space: nowrap !important;
+        animation: llToastIn 0.25s cubic-bezier(0.34,1.56,0.64,1) both !important;
+      }
+      #ll-toast.ll-toast-out {
+        animation: llToastOut 0.3s ease forwards !important;
+      }
+      #ll-toast .ll-toast-icon { font-size: 14px !important; }
+      #ll-toast .ll-toast-label { color: #64748b !important; font-size: 10px !important; margin-right: 2px !important; }
+      #ll-toast .ll-toast-code { color: #00ff9d !important; max-width: 320px !important; overflow: hidden !important; text-overflow: ellipsis !important; }
+      @keyframes llToastIn {
+        from { opacity: 0; transform: translateX(-50%) translateY(16px); }
+        to   { opacity: 1; transform: translateX(-50%) translateY(0); }
+      }
+      @keyframes llToastOut {
+        from { opacity: 1; transform: translateX(-50%) translateY(0); }
+        to   { opacity: 0; transform: translateX(-50%) translateY(12px); }
+      }
+    `;
+    document.head.appendChild(style);
+  }
+
+  // ── Overlay management ─────────────────────────────────────────────────────
+  function createOverlay() {
+    overlay = document.createElement('div');
+    overlay.id = 'll-overlay';
+    document.body.appendChild(overlay);
+
+    tooltip = document.createElement('div');
+    tooltip.id = 'll-tooltip';
+    document.body.appendChild(tooltip);
+
+    // ── Traversal Bar ──
+    traversalBar = document.createElement('div');
+    traversalBar.id = 'll-traversal-bar';
+    traversalBar.innerHTML = `
+      <span class="ll-trav-lbl">NAVIGATE</span>
+      <button id="ll-trav-parent">▲ Parent</button>
+      <button id="ll-trav-child">▼ Child</button>
+      <span class="ll-trav-hint">↑↓ keys</span>
+    `;
+    document.body.appendChild(traversalBar);
+
+    // Bind traversal button events
+    document.getElementById('ll-trav-parent').addEventListener('click', (e) => {
+      e.preventDefault(); e.stopPropagation();
+      navigateParent();
+    });
+    document.getElementById('ll-trav-child').addEventListener('click', (e) => {
+      e.preventDefault(); e.stopPropagation();
+      navigateChild();
+    });
+  }
+
+  function removeOverlay() {
+    if (overlay) { overlay.remove(); overlay = null; }
+    if (tooltip) { tooltip.remove(); tooltip = null; }
+    if (traversalBar) { traversalBar.remove(); traversalBar = null; }
+  }
+
+  function updateOverlay(el) {
+    if (!overlay || !el) return;
+    const r = el.getBoundingClientRect();
+    overlay.style.cssText = `
+      position: fixed !important;
+      pointer-events: none !important;
+      z-index: 2147483646 !important;
+      border: 2px solid #00ff9d !important;
+      background: rgba(0,255,157,0.08) !important;
+      border-radius: 3px !important;
+      box-shadow: 0 0 0 1px rgba(0,255,157,0.3), 0 0 12px rgba(0,255,157,0.2) !important;
+      left: ${r.left}px !important;
+      top: ${r.top}px !important;
+      width: ${r.width}px !important;
+      height: ${r.height}px !important;
+    `;
+
+    const tag = el.tagName.toLowerCase();
+    const id = el.id ? `#${el.id}` : '';
+    const cls = el.className && typeof el.className === 'string'
+      ? '.' + el.className.trim().split(/\s+/)[0] : '';
+
+    tooltip.innerHTML = `
+      <span class="ll-tag">&lt;${tag}${id || cls}&gt;</span>
+      <div class="ll-hint">Click to analyze · ▲/▼ to navigate · Esc to stop</div>
+    `;
+
+    // Position tooltip: prefer below, fall back to above
+    const TH = 52, TW = 300;
+    let ty = r.bottom + 8;
+    let tx = r.left;
+    if (ty + TH > window.innerHeight) ty = r.top - TH - 8;
+    if (tx + TW > window.innerWidth) tx = window.innerWidth - TW - 8;
+    tx = Math.max(4, tx);
+    ty = Math.max(4, ty);
+
+    tooltip.style.cssText = `
+      position: fixed !important;
+      z-index: 2147483647 !important;
+      background: #0a0e1a !important;
+      border: 1px solid #00ff9d !important;
+      border-radius: 8px !important;
+      padding: 8px 12px !important;
+      font-family: 'JetBrains Mono','Courier New',monospace !important;
+      font-size: 12px !important;
+      color: #00ff9d !important;
+      pointer-events: none !important;
+      max-width: ${TW}px !important;
+      box-shadow: 0 4px 20px rgba(0,0,0,0.6) !important;
+      line-height: 1.5 !important;
+      left: ${tx}px !important;
+      top: ${ty}px !important;
+    `;
+
+    // Position traversal bar at bottom-right of overlay (or near viewport edge)
+    if (traversalBar) {
+      const BW = 200, BH = 32;
+      let bx = r.right - BW;
+      let by = r.bottom + 6;
+      if (by + BH > window.innerHeight) by = r.top - BH - 6;
+      if (bx < 4) bx = 4;
+      if (bx + BW > window.innerWidth) bx = window.innerWidth - BW - 4;
+      traversalBar.style.cssText = `
+        position: fixed !important;
+        z-index: 2147483647 !important;
+        display: flex !important;
+        align-items: center !important;
+        gap: 4px !important;
+        left: ${bx}px !important;
+        top: ${by}px !important;
+        pointer-events: all !important;
+      `;
+    }
+  }
+
+  // ── Traversal helpers ──────────────────────────────────────────────────────
+  function navigateParent() {
+    if (!hoveredEl) return;
+    const parent = hoveredEl.parentElement;
+    if (parent && parent !== document.body && parent !== document.documentElement) {
+      hoveredEl = parent;
+      updateOverlay(hoveredEl);
+    }
+  }
+
+  function navigateChild() {
+    if (!hoveredEl) return;
+    // Find first Element child (not text/comment nodes)
+    const child = Array.from(hoveredEl.childNodes).find(n => n.nodeType === Node.ELEMENT_NODE);
+    if (child) {
+      hoveredEl = child;
+      updateOverlay(hoveredEl);
+    }
+  }
+
+  // ── Toast notification ─────────────────────────────────────────────────────
+  let toastTimer = null;
+  function showToast(locatorCode) {
+    // Remove any existing toast immediately
+    const existing = document.getElementById('ll-toast');
+    if (existing) existing.remove();
+    if (toastTimer) { clearTimeout(toastTimer); toastTimer = null; }
+
+    const toast = document.createElement('div');
+    toast.id = 'll-toast';
+    toast.innerHTML = `
+      <span class="ll-toast-icon">✅</span>
+      <span><span class="ll-toast-label">Copied: </span><span class="ll-toast-code">${locatorCode}</span></span>
+    `;
+    document.body.appendChild(toast);
+
+    // Auto-dismiss after 3s with fade-out
+    toastTimer = setTimeout(() => {
+      toast.classList.add('ll-toast-out');
+      setTimeout(() => toast.remove(), 320);
+    }, 3000);
+  }
+
+  // ── ARIA role lookup ───────────────────────────────────────────────────────
+  const IMPLICIT_ROLES = {
+    a: (el) => el.href ? 'link' : null,
+    button: () => 'button',
+    h1: () => 'heading', h2: () => 'heading', h3: () => 'heading',
+    h4: () => 'heading', h5: () => 'heading', h6: () => 'heading',
+    img: (el) => (el.alt !== undefined ? 'img' : null),
+    input: (el) => {
+      const t = (el.type || 'text').toLowerCase();
+      const map = {
+        text: 'textbox', email: 'textbox', password: 'textbox',
+        search: 'searchbox', tel: 'textbox', url: 'textbox',
+        number: 'spinbutton', checkbox: 'checkbox', radio: 'radio',
+        submit: 'button', reset: 'button', button: 'button',
+        range: 'slider',
+      };
+      return map[t] || null;
+    },
+    select: () => 'combobox',
+    textarea: () => 'textbox',
+    nav: () => 'navigation',
+    main: () => 'main',
+    table: () => 'table',
+    tr: () => 'row',
+    td: () => 'cell',
+    th: () => 'columnheader',
+    ul: () => 'list',
+    ol: () => 'list',
+    li: () => 'listitem',
+    dialog: () => 'dialog',
+    form: () => 'form',
+    article: () => 'article',
+    aside: () => 'complementary',
+    header: () => 'banner',
+    footer: () => 'contentinfo',
+    section: () => 'region',
+    menuitem: () => 'menuitem',
+  };
+
+  function getRole(el) {
+    const explicit = el.getAttribute('role');
+    if (explicit) return explicit.trim().split(' ')[0];
+    const tag = el.tagName.toLowerCase();
+    const fn = IMPLICIT_ROLES[tag];
+    return fn ? fn(el) : null;
+  }
+
+  function getHeadingLevel(el) {
+    const m = el.tagName.match(/^H([1-6])$/i);
+    return m ? parseInt(m[1]) : null;
+  }
+
+  // ── Accessible name computation ────────────────────────────────────────────
+  function getAccessibleName(el) {
+    const ariaLabel = el.getAttribute('aria-label');
+    if (ariaLabel && ariaLabel.trim()) return ariaLabel.trim();
+
+    const labelledBy = el.getAttribute('aria-labelledby');
+    if (labelledBy) {
+      const names = labelledBy.split(' ')
+        .map(id => document.getElementById(id))
+        .filter(Boolean)
+        .map(e => e.textContent.trim())
+        .filter(Boolean);
+      if (names.length) return names.join(' ');
+    }
+
+    const tag = el.tagName.toLowerCase();
+    if (['input', 'select', 'textarea'].includes(tag)) {
+      if (el.id) {
+        const label = document.querySelector(`label[for="${CSS.escape(el.id)}"]`);
+        if (label) return label.textContent.trim();
+      }
+      const parentLabel = el.closest('label');
+      if (parentLabel) {
+        const clone = parentLabel.cloneNode(true);
+        clone.querySelectorAll('input,select,textarea').forEach(e => e.remove());
+        const t = clone.textContent.trim();
+        if (t) return t;
+      }
+    }
+
+    const textRoles = ['button', 'link', 'heading', 'menuitem', 'tab', 'option'];
+    const role = getRole(el);
+    if (role && textRoles.includes(role)) {
+      const t = (el.innerText || el.textContent || '').trim();
+      if (t) return t.slice(0, 80);
+    }
+
+    const title = el.getAttribute('title');
+    if (title && title.trim()) return title.trim();
+
+    if (tag === 'img') {
+      const alt = el.getAttribute('alt');
+      if (alt && alt.trim()) return alt.trim();
+    }
+
+    const ph = el.getAttribute('placeholder');
+    if (ph && ph.trim()) return ph.trim();
+
+    if (tag === 'input' && ['submit', 'button'].includes((el.type || '').toLowerCase())) {
+      const v = el.value;
+      if (v && v.trim()) return v.trim();
+    }
+
+    return null;
+  }
+
+  // ── Check if a string looks auto-generated / unstable ─────────────────────
+  function isUnstableClass(cls) {
+    return /^(sc-|css-|emotion-|makeStyles|jss\d|MuiButton-root-\d|[a-z]{2,4}-[a-zA-Z0-9]{6,}$)/.test(cls)
+      || /[a-zA-Z0-9]{7,}/.test(cls) && /\d{3,}/.test(cls);
+  }
+
+  function hasUnstableClasses(el) {
+    if (!el.className || typeof el.className !== 'string') return false;
+    return el.className.trim().split(/\s+/).some(isUnstableClass);
+  }
+
+  function isUnstableId(id) {
+    if (!id) return false;
+    return /^\d+$/.test(id) || /[_-]\d{3,}$/.test(id) || /\d{5,}/.test(id);
+  }
+
+  // ── Build a reliable CSS selector fallback ─────────────────────────────────
+  function buildCSSSelector(el) {
+    const parts = [];
+    let current = el;
+    while (current && current !== document.body && parts.length < 5) {
+      let part = current.tagName.toLowerCase();
+      if (current.id && !isUnstableId(current.id)) {
+        return `#${current.id}`;
+      }
+      const stableClasses = current.className && typeof current.className === 'string'
+        ? current.className.trim().split(/\s+/).filter(c => c && !isUnstableClass(c))
+        : [];
+      if (stableClasses.length) {
+        part += '.' + stableClasses.slice(0, 2).join('.');
+      }
+      const siblings = current.parentElement
+        ? Array.from(current.parentElement.children).filter(c => c.tagName === current.tagName)
+        : [];
+      if (siblings.length > 1) {
+        const idx = siblings.indexOf(current) + 1;
+        part += `:nth-of-type(${idx})`;
+      }
+      parts.unshift(part);
+      current = current.parentElement;
+    }
+    return parts.join(' > ');
+  }
+
+  // ── Main locator generation engine ────────────────────────────────────────
+  function generateLocators(el) {
+    const locators = [];
+    const tag = el.tagName.toLowerCase();
+    const role = getRole(el);
+    const name = getAccessibleName(el);
+
+    // 1. data-testid / data-qa / data-cy / data-test
+    const testAttrs = ['data-testid', 'data-qa', 'data-cy', 'data-test', 'data-automation-id', 'data-e2e'];
+    for (const attr of testAttrs) {
+      const val = el.getAttribute(attr);
+      if (val) {
+        locators.push({
+          rank: 1,
+          method: 'getByTestId()',
+          matchedAttr: `${attr}="${val}"`,
+          stability: 'BEST',
+          code: `page.getByTestId('${val}')`,
+          fullCode: `await page.getByTestId('${val}').${suggestAction(el)};`,
+          explanation: `Uses the <${attr}> attribute which is purpose-built for testing. This is the most stable locator — it never changes with visual redesigns.`,
+          why: 'Stable test attribute'
+        });
+        break;
+      }
+    }
+
+    // 2. getByRole
+    if (role && name) {
+      const escaped = name.replace(/'/g, "\\'");
+      let codeBase = `page.getByRole('${role}', { name: '${escaped}' })`;
+      let extra = '';
+      if (role === 'heading') {
+        const level = getHeadingLevel(el);
+        if (level) {
+          codeBase = `page.getByRole('${role}', { name: '${escaped}', level: ${level} })`;
+          extra = ` at level ${level}`;
+        }
+      }
+      locators.push({
+        rank: locators.length + 1,
+        method: 'getByRole()',
+        matchedAttr: `role="${role}", name="${name}"${extra}`,
+        stability: locators.length === 0 ? 'BEST' : 'BEST',
+        code: codeBase,
+        fullCode: `await ${codeBase}.${suggestAction(el)};`,
+        explanation: `Finds the element by its ARIA role "${role}" and accessible name "${name}". This is Playwright's most recommended locator — it tests your app the same way screen readers use it.`,
+        why: 'Semantic ARIA role'
+      });
+    } else if (role && !name) {
+      locators.push({
+        rank: locators.length + 1,
+        method: 'getByRole()',
+        matchedAttr: `role="${role}" (no accessible name found)`,
+        stability: 'OK',
+        code: `page.getByRole('${role}')`,
+        fullCode: `await page.getByRole('${role}').${suggestAction(el)};`,
+        explanation: `Finds by role "${role}" but without a name filter — this may match multiple elements. Add an accessible name (aria-label, visible text) to make it unique.`,
+        why: 'Role only — may be ambiguous'
+      });
+    }
+
+    // 3. getByLabel
+    if (['input', 'select', 'textarea'].includes(tag)) {
+      let labelText = null;
+      if (el.id) {
+        const lbl = document.querySelector(`label[for="${CSS.escape(el.id)}"]`);
+        if (lbl) labelText = lbl.textContent.trim();
+      }
+      if (!labelText) {
+        const pLabel = el.closest('label');
+        if (pLabel) {
+          const clone = pLabel.cloneNode(true);
+          clone.querySelectorAll('input,select,textarea').forEach(e => e.remove());
+          labelText = clone.textContent.trim() || null;
+        }
+      }
+      if (!labelText) labelText = el.getAttribute('aria-label') || null;
+      if (labelText) {
+        const escaped = labelText.replace(/'/g, "\\'");
+        locators.push({
+          rank: locators.length + 1,
+          method: 'getByLabel()',
+          matchedAttr: `label text: "${labelText}"`,
+          stability: 'BEST',
+          code: `page.getByLabel('${escaped}')`,
+          fullCode: `await page.getByLabel('${escaped}').${suggestAction(el)};`,
+          explanation: `Finds the ${tag} element by its associated label "${labelText}". Ideal for form inputs — directly reflects what the user sees on screen.`,
+          why: 'Associated label text'
+        });
+      }
+    }
+
+    // 4. getByPlaceholder
+    const placeholder = el.getAttribute('placeholder');
+    if (placeholder && placeholder.trim()) {
+      const escaped = placeholder.trim().replace(/'/g, "\\'");
+      locators.push({
+        rank: locators.length + 1,
+        method: 'getByPlaceholder()',
+        matchedAttr: `placeholder="${placeholder.trim()}"`,
+        stability: 'GOOD',
+        code: `page.getByPlaceholder('${escaped}')`,
+        fullCode: `await page.getByPlaceholder('${escaped}').${suggestAction(el)};`,
+        explanation: `Finds the input by its placeholder text "${placeholder.trim()}". Good when no label is present — but note placeholder text can change with copy updates.`,
+        why: 'Placeholder attribute'
+      });
+    }
+
+    // 5. getByAltText
+    if (tag === 'img') {
+      const alt = el.getAttribute('alt');
+      if (alt && alt.trim()) {
+        const escaped = alt.trim().replace(/'/g, "\\'");
+        locators.push({
+          rank: locators.length + 1,
+          method: 'getByAltText()',
+          matchedAttr: `alt="${alt.trim()}"`,
+          stability: 'GOOD',
+          code: `page.getByAltText('${escaped}')`,
+          fullCode: `await page.getByAltText('${escaped}').${suggestAction(el)};`,
+          explanation: `Finds the image by its alt text "${alt.trim()}". The correct semantic approach for images — also important for accessibility.`,
+          why: 'Alt text attribute'
+        });
+      }
+    }
+
+    // 6. getByTitle
+    const titleAttr = el.getAttribute('title');
+    if (titleAttr && titleAttr.trim()) {
+      const escaped = titleAttr.trim().replace(/'/g, "\\'");
+      locators.push({
+        rank: locators.length + 1,
+        method: 'getByTitle()',
+        matchedAttr: `title="${titleAttr.trim()}"`,
+        stability: 'GOOD',
+        code: `page.getByTitle('${escaped}')`,
+        fullCode: `await page.getByTitle('${escaped}').${suggestAction(el)};`,
+        explanation: `Finds the element by its title attribute "${titleAttr.trim()}". Useful for icon buttons and tooltip elements without visible text.`,
+        why: 'Title attribute'
+      });
+    }
+
+    // 7. getByText
+    const visibleText = (el.innerText || el.textContent || '').trim();
+    if (visibleText && visibleText.length <= 100 && !['input', 'select', 'textarea', 'img'].includes(tag)) {
+      const escaped = visibleText.replace(/'/g, "\\'");
+      const allMatchingText = document.querySelectorAll('*');
+      let textMatchCount = 0;
+      for (const node of allMatchingText) {
+        if ((node.innerText || node.textContent || '').trim() === visibleText) textMatchCount++;
+        if (textMatchCount > 3) break;
+      }
+      const stability = textMatchCount > 2 ? 'OK' : 'GOOD';
+      const warning = textMatchCount > 2 ? ' Warning: this text may match multiple elements — consider using getByRole() instead.' : '';
+      locators.push({
+        rank: locators.length + 1,
+        method: 'getByText()',
+        matchedAttr: `visible text: "${visibleText.slice(0, 60)}"`,
+        stability,
+        code: `page.getByText('${escaped.slice(0, 60)}')`,
+        fullCode: `await page.getByText('${escaped.slice(0, 60)}').${suggestAction(el)};`,
+        explanation: `Finds by visible text content "${visibleText.slice(0, 60)}".${warning} Best used for non-interactive elements like paragraphs and labels.`,
+        why: 'Visible text content'
+      });
+    }
+
+    // 8. locator() by stable ID
+    if (el.id && !isUnstableId(el.id)) {
+      const escaped = el.id.replace(/'/g, "\\'");
+      locators.push({
+        rank: locators.length + 1,
+        method: "locator('#id')",
+        matchedAttr: `id="${el.id}"`,
+        stability: 'OK',
+        code: `page.locator('#${escaped}')`,
+        fullCode: `await page.locator('#${escaped}').${suggestAction(el)};`,
+        explanation: `Uses the element's ID "${el.id}". Acceptable if the ID is hand-written and stable — avoid if IDs are auto-generated (e.g. "btn-47" or "input_1234").`,
+        why: 'ID attribute'
+      });
+    }
+
+    // 9. CSS attribute selectors (name, type combos)
+    const name_attr = el.getAttribute('name');
+    if (name_attr && ['input', 'select', 'textarea'].includes(tag)) {
+      const escaped = name_attr.replace(/'/g, "\\'");
+      locators.push({
+        rank: locators.length + 1,
+        method: "locator('[name]')",
+        matchedAttr: `name="${name_attr}"`,
+        stability: 'OK',
+        code: `page.locator('[name="${escaped}"]')`,
+        fullCode: `await page.locator('[name="${escaped}"]').${suggestAction(el)};`,
+        explanation: `Uses the name attribute "${name_attr}". Moderately stable — name attributes are usually semantic but multiple elements can share the same name (e.g. radio groups).`,
+        why: 'Name attribute'
+      });
+    }
+
+    // 10. CSS selector fallback
+    const cssSelector = buildCSSSelector(el);
+    const hasUnstable = hasUnstableClasses(el);
+    locators.push({
+      rank: locators.length + 1,
+      method: 'locator() CSS',
+      matchedAttr: cssSelector,
+      stability: hasUnstable ? 'AVOID' : 'OK',
+      code: `page.locator('${cssSelector.replace(/'/g, "\\'")}')`,
+      fullCode: `await page.locator('${cssSelector.replace(/'/g, "\\'")}').${suggestAction(el)};`,
+      explanation: hasUnstable
+        ? `This CSS selector contains auto-generated class names (like styled-components or MUI classes) that regenerate on every build. Using this WILL cause your tests to break regularly. Use a semantic locator instead.`
+        : `CSS selector fallback. Use only when semantic locators are not available. Prefer IDs and data attributes over class-based selectors.`,
+      why: 'CSS selector (fallback)'
+    });
+
+    // Re-rank
+    locators.forEach((l, i) => { l.rank = i + 1; });
+
+    // ── Build avoid list ───────────────────────────────────────────────────────
+    const avoidList = [];
+    if (hasUnstableClasses(el)) {
+      const bad = el.className.trim().split(/\s+/).filter(isUnstableClass).slice(0, 3);
+      avoidList.push({
+        locator: `page.locator('.${bad[0]}')`,
+        reason: `"${bad[0]}" is an auto-generated class (styled-components / CSS-in-JS). It changes on every build and will break your tests.`
+      });
+    }
+    if (el.id && isUnstableId(el.id)) {
+      avoidList.push({
+        locator: `page.locator('#${el.id}')`,
+        reason: `The ID "${el.id}" appears auto-generated (contains large numbers). It may change between page loads or deploys.`
+      });
+    }
+    avoidList.push({
+      locator: `page.locator('${tag}:nth-child(n)')`,
+      reason: 'Position-based selectors break immediately when the UI is reordered or new elements are added.'
+    });
+    if (!el.getAttribute('data-testid') && !el.getAttribute('aria-label')) {
+      avoidList.push({
+        locator: 'XPath (//button[...])',
+        reason: 'XPath is verbose and very fragile. It breaks when HTML structure changes. Use getByRole() or getByLabel() instead.'
+      });
+    }
+
+    // ── Collect element metadata ───────────────────────────────────────────
+    const elementData = {
+      tag,
+      type: el.getAttribute('type') || null,
+      id: el.id || null,
+      visibleText: visibleText.slice(0, 80) || null,
+      ariaLabel: el.getAttribute('aria-label') || null,
+      placeholder: placeholder || null,
+      alt: el.getAttribute('alt') || null,
+      testId: el.getAttribute('data-testid') || el.getAttribute('data-qa') || el.getAttribute('data-cy') || null,
+      role: role || tag,
+      title: titleAttr || null,
+      name: name_attr || null,
+      href: tag === 'a' ? el.getAttribute('href') : null,
+      classes: typeof el.className === 'string' ? el.className.trim().split(/\s+/).filter(Boolean).slice(0, 6) : [],
+      hasUnstableClasses,
+    };
+
+    // ── Pro tip based on element ───────────────────────────────────────────
+    let proTip = '';
+    if (!el.getAttribute('data-testid')) {
+      proTip = `Ask your developers to add a <data-testid="${tag}-element"> attribute to this <${tag}>. It would make this the most stable locator possible and is a 5-second code change.`;
+    } else if (role === 'button' || role === 'link') {
+      proTip = `Great — this element has a data-testid. Use getByTestId() as primary and getByRole() as a backup assertion: expect(page.getByRole('${role}', { name: '...' })).toBeVisible()`;
+    } else {
+      proTip = `Combine your locator with an assertion: await expect(page.getByRole('${role || tag}')).toBeVisible() — Playwright auto-retries this until the element appears or times out.`;
+    }
+
+    return { elementData, locators, avoidList, proTip };
+  }
+
+  // ── Suggest a realistic Playwright action ─────────────────────────────────
+  function suggestAction(el) {
+    const tag = el.tagName.toLowerCase();
+    const type = (el.getAttribute('type') || '').toLowerCase();
+    if (tag === 'input') {
+      if (type === 'checkbox' || type === 'radio') return 'check()';
+      if (type === 'submit' || type === 'button') return 'click()';
+      return "fill('your value')";
+    }
+    if (tag === 'select') return "selectOption('option text')";
+    if (tag === 'textarea') return "fill('your text')";
+    return 'click()';
+  }
+
+  // ── Event handlers ─────────────────────────────────────────────────────────
+  function onMouseOver(e) {
+    if (!isInspecting) return;
+    const el = e.target;
+    // Ignore our own UI elements
+    if (el === overlay || el === tooltip || el === traversalBar ||
+      (traversalBar && traversalBar.contains(el))) return;
+    hoveredEl = el;
+    updateOverlay(el);
+  }
+
+  function onClick(e) {
+    if (!isInspecting) return;
+    // Let traversal bar button clicks go through (they have their own handlers)
+    if (traversalBar && traversalBar.contains(e.target)) return;
+
+    e.preventDefault();
+    e.stopPropagation();
+    e.stopImmediatePropagation();
+
+    const el = e.target;
+    if (el === overlay || el === tooltip) return;
+
+    const result = generateLocators(el);
+
+    // Show toast with best locator + auto-copy
+    const bestCode = result.locators[0] ? result.locators[0].code : '';
+    if (bestCode) {
+      navigator.clipboard.writeText(bestCode).then(() => {
+        showToast(bestCode);
+      }).catch(() => {
+        showToast(bestCode); // still show toast even if clipboard fails
+      });
+    }
+
+    // Flash the overlay green
+    if (overlay) {
+      overlay.style.background = 'rgba(0,255,157,0.25)';
+      setTimeout(() => {
+        if (overlay) overlay.style.background = 'rgba(0,255,157,0.08)';
+      }, 300);
+    }
+
+    // Send to extension
+    chrome.runtime.sendMessage({ type: 'ELEMENT_PICKED', data: result });
+  }
+
+  function onKeyDown(e) {
+    if (!isInspecting) return;
+
+    if (e.key === 'Escape') {
+      stopInspect();
+      chrome.runtime.sendMessage({ type: 'STOP_INSPECT' });
+      return;
+    }
+
+    // Parent / Child traversal keyboard shortcuts
+    if (e.key === 'ArrowUp') {
+      e.preventDefault();
+      navigateParent();
+    }
+    if (e.key === 'ArrowDown') {
+      e.preventDefault();
+      navigateChild();
+    }
+  }
+
+  // ── Start / Stop ───────────────────────────────────────────────────────────
+  function startInspect() {
+    if (isInspecting) return;
+    isInspecting = true;
+    injectStyles();
+    createOverlay();
+    document.body.classList.add('ll-inspecting');
+    document.addEventListener('mouseover', onMouseOver, true);
+    document.addEventListener('click', onClick, true);
+    document.addEventListener('keydown', onKeyDown, true);
+  }
+
+  function stopInspect() {
+    if (!isInspecting) return;
+    isInspecting = false;
+    document.body.classList.remove('ll-inspecting');
+    removeOverlay();
+    document.removeEventListener('mouseover', onMouseOver, true);
+    document.removeEventListener('click', onClick, true);
+    document.removeEventListener('keydown', onKeyDown, true);
+    hoveredEl = null;
+  }
+
+  // ── Message listener ───────────────────────────────────────────────────────
+  chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
+    if (msg.type === 'START_INSPECT') startInspect();
+    if (msg.type === 'STOP_INSPECT') stopInspect();
+
+    // Handle context menu quick-copy
+    if (msg.type === 'CONTEXT_MENU_COPY') {
+      const target = lastRightClickedEl || document.body;
+      const result = generateLocators(target);
+
+      // Copy best locator to clipboard
+      const bestCode = result.locators[0] ? result.locators[0].code : '';
+      if (bestCode) {
+        navigator.clipboard.writeText(bestCode).then(() => {
+          // Visual confirmation: briefly flash the element
+          const origOutline = target.style.outline;
+          const origTransition = target.style.transition;
+          target.style.transition = 'outline 0.1s';
+          target.style.outline = '3px solid #00ff9d';
+          setTimeout(() => {
+            target.style.outline = origOutline;
+            target.style.transition = origTransition;
+          }, 800);
+        }).catch(() => { });
+      }
+
+      // Also update the popup with the full results
+      chrome.runtime.sendMessage({ type: 'ELEMENT_PICKED', data: result });
+      sendResponse({ ok: true, locator: bestCode });
+      return true;
+    }
+  });
+
+})();
