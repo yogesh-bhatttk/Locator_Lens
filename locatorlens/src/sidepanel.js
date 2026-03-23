@@ -6,23 +6,23 @@ let isInspecting = false;
 // ── Helpers ───────────────────────────────────────────────────────────────────
 function esc(s) {
   return String(s || '')
-    .replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+    .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
 }
 
 function hl(code) {
   return esc(code)
-    .replace(/\b(await|const|let)\b/g,'<span class="kw">$1</span>')
-    .replace(/\b(page)\b/g,'<span class="kw">$1</span>')
-    .replace(/\b(getByRole|getByLabel|getByPlaceholder|getByText|getByAltText|getByTitle|getByTestId|locator|click|fill|check|selectOption|expect)\b/g,'<span class="fn">$1</span>')
-    .replace(/(&#39;[^<]*?&#39;|&quot;[^<]*?&quot;)/g,'<span class="str">$1</span>');
+    .replace(/\b(await|const|let)\b/g, '<span class="kw">$1</span>')
+    .replace(/\b(page)\b/g, '<span class="kw">$1</span>')
+    .replace(/\b(getByRole|getByLabel|getByPlaceholder|getByText|getByAltText|getByTitle|getByTestId|locator|click|fill|check|selectOption|expect)\b/g, '<span class="fn">$1</span>')
+    .replace(/(&#39;[^<]*?&#39;|&quot;[^<]*?&quot;)/g, '<span class="str">$1</span>');
 }
 
 function pillClass(s) {
-  const m = { BEST:'p-best', GOOD:'p-good', OK:'p-ok', AVOID:'p-avoid' };
+  const m = { BEST: 'p-best', GOOD: 'p-good', OK: 'p-ok', AVOID: 'p-avoid' };
   return m[String(s).toUpperCase()] || 'p-ok';
 }
 function pillLabel(s) {
-  const m = { BEST:'★ BEST', GOOD:'✓ GOOD', OK:'~ OK', AVOID:'✗ AVOID' };
+  const m = { BEST: '★ BEST', GOOD: '✓ GOOD', OK: '~ OK', AVOID: '✗ AVOID' };
   return m[String(s).toUpperCase()] || s;
 }
 function rankClass(r) {
@@ -45,23 +45,23 @@ function toggleInspect() {
 }
 
 function updateInspectUI() {
-  const btn  = document.getElementById('inspectBtn');
-  const dot  = document.getElementById('statusDot');
+  const btn = document.getElementById('inspectBtn');
+  const dot = document.getElementById('statusDot');
   const icon = document.getElementById('btnIcon');
-  const txt  = document.getElementById('btnText');
+  const txt = document.getElementById('btnText');
   const hint = document.getElementById('hintRow');
 
   if (isInspecting) {
     btn.classList.add('active');
     dot.classList.add('active');
     icon.textContent = '⏹';
-    txt.textContent  = 'Stop Inspecting';
+    txt.textContent = 'Stop Inspecting';
     hint.style.display = 'block';
   } else {
     btn.classList.remove('active');
     dot.classList.remove('active');
     icon.textContent = '🎯';
-    txt.textContent  = 'Start Inspecting';
+    txt.textContent = 'Start Inspecting';
     hint.style.display = 'none';
   }
 }
@@ -71,7 +71,7 @@ function renderResults(data) {
   if (!data) return;
   const { elementData: el, locators, avoidList, proTip } = data;
 
-  document.getElementById('idleState').style.display    = 'none';
+  document.getElementById('idleState').style.display = 'none';
   document.getElementById('resultsState').style.display = '';
 
   // Stop inspecting state in panel
@@ -81,13 +81,13 @@ function renderResults(data) {
   // ── Element bar ──
   const elBar = document.getElementById('elBar');
   const chips = [];
-  if (el.tag)         chips.push(`<span class="el-chip"><span class="k">&lt;</span><span class="v">${esc(el.tag)}</span><span class="k">&gt;</span></span>`);
-  if (el.role)        chips.push(`<span class="el-chip"><span class="k">role: </span><span class="v">${esc(el.role)}</span></span>`);
-  if (el.visibleText) chips.push(`<span class="el-chip"><span class="k">text: </span><span class="v">"${esc(el.visibleText.slice(0,30))}"</span></span>`);
-  if (el.id)          chips.push(`<span class="el-chip"><span class="k">id: </span><span class="v">${esc(el.id)}</span></span>`);
-  if (el.testId)      chips.push(`<span class="el-chip"><span class="k">testid: </span><span class="v">${esc(el.testId)}</span></span>`);
-  if (el.ariaLabel)   chips.push(`<span class="el-chip"><span class="k">aria: </span><span class="v">${esc(el.ariaLabel.slice(0,25))}</span></span>`);
-  if (el.placeholder) chips.push(`<span class="el-chip"><span class="k">ph: </span><span class="v">${esc(el.placeholder.slice(0,25))}</span></span>`);
+  if (el.tag) chips.push(`<span class="el-chip"><span class="k">&lt;</span><span class="v">${esc(el.tag)}</span><span class="k">&gt;</span></span>`);
+  if (el.role) chips.push(`<span class="el-chip"><span class="k">role: </span><span class="v">${esc(el.role)}</span></span>`);
+  if (el.visibleText) chips.push(`<span class="el-chip"><span class="k">text: </span><span class="v">"${esc(el.visibleText.slice(0, 30))}"</span></span>`);
+  if (el.id) chips.push(`<span class="el-chip"><span class="k">id: </span><span class="v">${esc(el.id)}</span></span>`);
+  if (el.testId) chips.push(`<span class="el-chip"><span class="k">testid: </span><span class="v">${esc(el.testId)}</span></span>`);
+  if (el.ariaLabel) chips.push(`<span class="el-chip"><span class="k">aria: </span><span class="v">${esc(el.ariaLabel.slice(0, 25))}</span></span>`);
+  if (el.placeholder) chips.push(`<span class="el-chip"><span class="k">ph: </span><span class="v">${esc(el.placeholder.slice(0, 25))}</span></span>`);
   if (el.hasUnstableClasses) chips.push(`<span class="el-chip"><span class="k">classes: </span><span class="v warn">⚠ auto-generated</span></span>`);
   elBar.innerHTML = chips.join('');
 
@@ -123,10 +123,10 @@ function renderResults(data) {
 
   // ── Avoid section ──
   const avoidLabel = document.getElementById('avoidLabel');
-  const avoidSec   = document.getElementById('avoidContainer');
+  const avoidSec = document.getElementById('avoidContainer');
   if (avoidList && avoidList.length > 0) {
     avoidLabel.style.display = '';
-    avoidSec.style.display   = '';
+    avoidSec.style.display = '';
     avoidSec.innerHTML = `
       <div class="avoid-title">⚠️ Avoid these locators</div>
       ${avoidList.map(a => `
@@ -136,7 +136,7 @@ function renderResults(data) {
         </div>`).join('')}`;
   } else {
     avoidLabel.style.display = 'none';
-    avoidSec.style.display   = 'none';
+    avoidSec.style.display = 'none';
   }
 
   // ── Pro tip ──
@@ -152,13 +152,13 @@ function renderResults(data) {
 // ── Event handlers ─────────────────────────────────────────────────────────────
 function handleCopy(btn) {
   const code = btn.getAttribute('data-code')
-    .replace(/&amp;/g,'&').replace(/&lt;/g,'<').replace(/&gt;/g,'>').replace(/&quot;/g,'"');
+    .replace(/&amp;/g, '&').replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/&quot;/g, '"');
   copyToClipboard(code, btn);
 }
 
 function toggleExplain(btn) {
   const card = btn.closest('.card');
-  const exp  = card.querySelector('.card-explain');
+  const exp = card.querySelector('.card-explain');
   const open = exp.classList.toggle('open');
   btn.textContent = open ? '▼ Why?' : '▶ Why?';
 }
@@ -197,7 +197,7 @@ document.addEventListener('DOMContentLoaded', () => {
   document.getElementById('clearBtn').addEventListener('click', () => {
     chrome.storage.session.remove('lastElement');
     document.getElementById('resultsState').style.display = 'none';
-    document.getElementById('idleState').style.display    = '';
+    document.getElementById('idleState').style.display = '';
   });
 
   // Check inspect state
