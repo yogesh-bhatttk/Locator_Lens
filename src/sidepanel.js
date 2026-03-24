@@ -30,11 +30,27 @@ function rankClass(r) {
 }
 
 function copyToClipboard(text, btn) {
-  navigator.clipboard.writeText(text).then(() => {
+  const onSuccess = () => {
     btn.textContent = '✓ Copied';
     btn.classList.add('done');
     setTimeout(() => { btn.textContent = 'Copy'; btn.classList.remove('done'); }, 2000);
-  });
+  };
+
+  if (navigator.clipboard && navigator.clipboard.writeText) {
+    navigator.clipboard.writeText(text).then(onSuccess).catch(onSuccess);
+  } else {
+    try {
+      const textArea = document.createElement("textarea");
+      textArea.value = text;
+      textArea.style.position = "fixed";
+      document.body.appendChild(textArea);
+      textArea.focus();
+      textArea.select();
+      document.execCommand('copy');
+      document.body.removeChild(textArea);
+    } catch (e) {}
+    onSuccess();
+  }
 }
 
 // ── Toggle inspect mode ────────────────────────────────────────────────────────
@@ -73,10 +89,6 @@ function renderResults(data) {
 
   document.getElementById('idleState').style.display = 'none';
   document.getElementById('resultsState').style.display = '';
-
-  // Stop inspecting state in panel
-  isInspecting = false;
-  updateInspectUI();
 
   // ── Element bar ──
   const elBar = document.getElementById('elBar');
@@ -143,7 +155,8 @@ function renderResults(data) {
   const tipEl = document.getElementById('proTip');
   if (proTip) {
     tipEl.style.display = '';
-    tipEl.innerHTML = `<strong>💡 Pro Tip:</strong> ${esc(proTip)}`;
+    // Use textContent for plain text tips
+    tipEl.textContent = `💡 Pro Tip: ${proTip}`;
   } else {
     tipEl.style.display = 'none';
   }
@@ -195,7 +208,9 @@ document.addEventListener('DOMContentLoaded', () => {
 
   // Clear button
   document.getElementById('clearBtn').addEventListener('click', () => {
-    chrome.storage.session.remove('lastElement');
+    if (chrome.storage && chrome.storage.local) {
+      chrome.storage.local.remove('lastElement');
+    }
     document.getElementById('resultsState').style.display = 'none';
     document.getElementById('idleState').style.display = '';
   });
@@ -208,10 +223,12 @@ document.addEventListener('DOMContentLoaded', () => {
     }
   });
 
-  // Restore last element picked (session only — clears on browser close)
-  chrome.storage.session.get('lastElement', (result) => {
-    if (result.lastElement) {
-      renderResults(result.lastElement);
-    }
-  });
+  // Restore last element picked (local storage for cross-browser compatibility)
+  if (chrome.storage && chrome.storage.local) {
+    chrome.storage.local.get('lastElement', (result) => {
+      if (result && result.lastElement) {
+        renderResults(result.lastElement);
+      }
+    });
+  }
 });

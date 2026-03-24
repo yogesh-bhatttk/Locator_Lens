@@ -706,7 +706,7 @@
       name: name_attr || null,
       href: tag === 'a' ? el.getAttribute('href') : null,
       classes: typeof el.className === 'string' ? el.className.trim().split(/\s+/).filter(Boolean).slice(0, 6) : [],
-      hasUnstableClasses,
+      hasUnstableClasses: hasUnstable,
     };
 
     // ── Pro tip based on element ───────────────────────────────────────────
@@ -764,11 +764,25 @@
     // Show toast with best locator + auto-copy
     const bestCode = result.locators[0] ? result.locators[0].code : '';
     if (bestCode) {
-      navigator.clipboard.writeText(bestCode).then(() => {
+      if (navigator.clipboard && navigator.clipboard.writeText) {
+        navigator.clipboard.writeText(bestCode).then(() => {
+          showToast(bestCode);
+        }).catch(() => {
+          showToast(bestCode); // still show toast even if clipboard fails
+        });
+      } else {
+        try {
+          const textArea = document.createElement("textarea");
+          textArea.value = bestCode;
+          textArea.style.position = "fixed";
+          document.body.appendChild(textArea);
+          textArea.focus();
+          textArea.select();
+          document.execCommand('copy');
+          document.body.removeChild(textArea);
+        } catch (e) {}
         showToast(bestCode);
-      }).catch(() => {
-        showToast(bestCode); // still show toast even if clipboard fails
-      });
+      }
     }
 
     // Flash the overlay green
@@ -816,7 +830,6 @@
   }
 
   function stopInspect() {
-    if (!isInspecting) return;
     isInspecting = false;
     document.body.classList.remove('ll-inspecting');
     removeOverlay();

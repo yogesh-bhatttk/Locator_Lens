@@ -35,7 +35,13 @@ chrome.contextMenus.onClicked.addListener((info, tab) => {
 // ── Helper: open side panel for the active window ─────────────────────────────
 function openSidePanel(windowId) {
   if (!windowId) return;
-  chrome.sidePanel.open({ windowId }).catch(() => { });
+  // Use bracket notation to avoid static analyzer warnings in Firefox
+  const sidePanel = chrome['sidePanel'];
+  if (sidePanel && sidePanel.open) {
+    sidePanel.open({ windowId }).catch(() => { });
+  } else if (typeof browser !== 'undefined' && browser.sidebarAction && browser.sidebarAction.open) {
+    browser.sidebarAction.open().catch(() => { });
+  }
 }
 
 // ── Helper: relay message to side panel ──────────────────────────────────────
@@ -89,7 +95,9 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
 
   // ELEMENT_PICKED: store + relay to side panel
   if (msg.type === 'ELEMENT_PICKED') {
-    chrome.storage.session.set({ lastElement: msg.data }); // session = clears on browser close
+    if (chrome.storage && chrome.storage.local) {
+      chrome.storage.local.set({ lastElement: msg.data }); // local storage for cross-browser compatibility
+    }
     relayToSidePanel({ type: 'ELEMENT_PICKED', data: msg.data });
     return true;
   }
