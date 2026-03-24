@@ -3,6 +3,7 @@
 [![Chrome](https://img.shields.io/badge/Chrome-Ready-green?logo=google-chrome&logoColor=white)]()
 [![Firefox](https://img.shields.io/badge/Firefox-Ready-orange?logo=firefox-browser&logoColor=white)]()
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
+[![GitHub Repository](https://img.shields.io/badge/GitHub-Locator_Lens-blue?logo=github)](https://github.com/yogesh-bhatttk/Locator_Lens)
 
 **LocatorLens** is a professional browser inspector purpose-built for **Playwright** automation engineers. It helps you instantly find the most stable, semantic locators for any element on any webpage.
 
@@ -64,6 +65,8 @@ To prepare the extension for official store release, we provide strict, pre-conf
 
 ## 👨‍💻 Contributing
 Feel free to open issues or submit pull requests to help make **LocatorLens** the best Playwright inspector in the world!
+
+🔗 **GitHub Repository**: [https://github.com/yogesh-bhatttk/Locator_Lens](https://github.com/yogesh-bhatttk/Locator_Lens)
 
 ### **Current Roadmap:**
 - [ ] AI-powered locator refinement (coming soon)

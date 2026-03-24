@@ -1,24 +1,37 @@
 {
   "manifest_version": 3,
   "name": "LocatorLens: Playwright Tool",
-  "version": "1.1.1",
-  "description": "Inspect any element on any page and instantly get ranked Playwright locators with explanations. Built for QA engineers and automation testers.",
-  "browser_specific_settings": {
-    "gecko": {
-      "id": "locatorlens@yogesh-bhatttk.com",
-      "strict_min_version": "120.0",
-      "data_collection_permissions": {
-        "required": ["none"]
-      }
-    }
-  },
+  "version": "1.1.0",
+  "description": "Professional Playwright locator inspector with ranked results and explanations. Works on Chrome, Edge, Brave, and Firefox.",
   "permissions": [
     "activeTab",
     "scripting",
     "storage",
     "tabs",
-    "contextMenus"
+    "contextMenus",
+    "sidePanel"
   ],
+  "browser_specific_settings": {
+    "gecko": {
+      "id": "locatorlens@yogesh-bhatttk.com",
+      "strict_min_version": "120.0",
+      "data_collection_permissions": {
+        "required": [
+          "none"
+        ]
+      }
+    }
+  },
+  "background": {
+    "service_worker": "src/background.js",
+    "scripts": [
+      "src/background.js"
+    ],
+    "type": "module"
+  },
+  "side_panel": {
+    "default_path": "src/sidepanel.html"
+  },
   "sidebar_action": {
     "default_panel": "src/sidepanel.html",
     "default_icon": "icons/icon32.png"
@@ -26,10 +39,6 @@
   "host_permissions": [
     "<all_urls>"
   ],
-  "background": {
-    "scripts": ["src/background.js"],
-    "type": "module"
-  },
   "action": {
     "default_popup": "src/popup.html",
     "default_icon": {
@@ -38,7 +47,7 @@
       "48": "icons/icon48.png",
       "128": "icons/icon128.png"
     },
-    "default_title": "LocatorLens \u2013 Playwright Inspector"
+    "default_title": "LocatorLens – Playwright Inspector"
   },
   "content_scripts": [
     {
