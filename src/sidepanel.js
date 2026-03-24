@@ -231,4 +231,7 @@ document.addEventListener('DOMContentLoaded', () => {
       }
     });
   }
+
+  // Tell background/popup I am open!
+  chrome.runtime.sendMessage({ type: 'PANEL_HEARTBEAT' });
 });

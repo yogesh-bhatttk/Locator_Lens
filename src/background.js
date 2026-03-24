@@ -3,6 +3,7 @@
 
 // Track inspect mode per tab
 const inspectTabs = new Set();
+const activePanels = new Set(); // Track which tabs have an open side panel
 
 // ── Register context menu on install ────────────────────────────────────────
 chrome.runtime.onInstalled.addListener(() => {
@@ -117,10 +118,36 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
     });
     return true;
   }
+
+  // CLOSE_SIDE_PANEL: only works in Firefox
+  if (msg.type === 'CLOSE_SIDE_PANEL') {
+    if (typeof browser !== 'undefined' && browser.sidebarAction && browser.sidebarAction.close) {
+      browser.sidebarAction.close().catch(() => { });
+    }
+    return true;
+  }
+
+  // Track panel open/close
+  if (msg.type === 'PANEL_HEARTBEAT') {
+    if (sender.tab && sender.tab.id) {
+      activePanels.add(sender.tab.id);
+    } else {
+      // For side panels without a tab (global), we'll use a special key
+      activePanels.add('global');
+    }
+  }
+  
+  if (msg.type === 'GET_PANEL_STATE') {
+    sendResponse({ active: activePanels.has('global') });
+    return true;
+  }
 });
 
 // Clean up when tab closes
-chrome.tabs.onRemoved.addListener((tabId) => inspectTabs.delete(tabId));
+chrome.tabs.onRemoved.addListener((tabId) => {
+  inspectTabs.delete(tabId);
+  activePanels.delete(tabId);
+});
 // Clean up on navigation
 chrome.tabs.onUpdated.addListener((tabId, info) => {
   if (info.status === 'loading') inspectTabs.delete(tabId);

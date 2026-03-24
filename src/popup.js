@@ -32,7 +32,16 @@ function toggleInspect() {
 }
 
 function openPanel() {
-  chrome.runtime.sendMessage({ type: 'OPEN_SIDE_PANEL' });
+  const btn = document.getElementById('panelBtn');
+  const txt = btn.querySelectorAll('span')[1];
+  
+  if (txt && txt.textContent.includes('Close')) {
+    chrome.runtime.sendMessage({ type: 'CLOSE_SIDE_PANEL' });
+    txt.textContent = 'Open Results Panel';
+  } else {
+    chrome.runtime.sendMessage({ type: 'OPEN_SIDE_PANEL' });
+    if (txt) txt.textContent = 'Close Result Panel';
+  }
 }
 
 document.addEventListener('DOMContentLoaded', () => {
@@ -44,6 +53,14 @@ document.addEventListener('DOMContentLoaded', () => {
     if (res && res.active) {
       isInspecting = true;
       updateInspectUI();
+    }
+  });
+
+  // Check if side panel is already open to show 'Close' button
+  chrome.runtime.sendMessage({ type: 'GET_PANEL_STATE' }, (res) => {
+    if (res && res.active) {
+      const txt = document.querySelectorAll('#panelBtn span')[1];
+      if (txt) txt.textContent = 'Close Result Panel';
     }
   });
 });
