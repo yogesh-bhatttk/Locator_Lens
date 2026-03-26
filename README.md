@@ -27,6 +27,15 @@
 3.  Enable **"Developer mode"** (top-right).
 4.  Click **"Load unpacked"** and select the project folder.
 
+### 🛠️ Local Development (Zero Warnings)
+
+To prevent "Unrecognized Key" warnings in the extension dashboard, load the specialized distribution folders:
+
+- **Chrome / Edge / Brave**: Load the `dist-chrome` folder as an unpacked extension.
+- **Firefox**: Load `manifest.json` from the `dist-firefox` folder as a temporary add-on.
+
+Both folders are synced to the `src/` directory—edit once, see changes everywhere!
+
 ### **2. Firefox**
 1.  Navigate to `about:debugging#/runtime/this-firefox`.
 2.  Click **"Load Temporary Add-on..."**.
