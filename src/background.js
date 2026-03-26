@@ -12,10 +12,20 @@ chrome.runtime.onInstalled.addListener(() => {
     title: '🎯 Copy Best Playwright Locator',
     contexts: ['all']
   });
+  chrome.contextMenus.create({
+    id: 'll-toggle-panel',
+    title: '📋 Open/Close Results Panel',
+    contexts: ['all']
+  });
 });
 
 // ── Context menu click ────────────────────────────────────────────────────────
 chrome.contextMenus.onClicked.addListener((info, tab) => {
+  if (info.menuItemId === 'll-toggle-panel' && tab && tab.windowId) {
+    // If it's already open, it will just stay open or reload in Chrome
+    openSidePanel(tab.windowId);
+    return;
+  }
   if (info.menuItemId !== 'll-copy-locator') return;
   if (!tab || !tab.id) return;
 
@@ -124,17 +134,20 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
     }
   }
 
-  // Track panel open/close
+  // Track panel open/close with timeout safety
   if (msg.type === 'PANEL_HEARTBEAT') {
-    if (sender.tab && sender.tab.id) {
-      activePanels.add(sender.tab.id);
-    } else {
-      // For side panels without a tab (global), we'll use a special key
-      activePanels.add('global');
-    }
+    const key = (sender.tab && sender.tab.id) ? sender.tab.id : 'global';
+    activePanels.add(key);
+    
+    // Using a simple timeout to remove the panel from active state if it goes silent
+    if (globalThis[`timeout_${key}`]) clearTimeout(globalThis[`timeout_${key}`]);
+    globalThis[`timeout_${key}`] = setTimeout(() => {
+      activePanels.delete(key);
+    }, 4500); 
   }
   
   if (msg.type === 'GET_PANEL_STATE') {
+    // We check for 'global' as the side panel is usually global for the window in Chrome
     sendResponse({ active: activePanels.has('global') });
   }
 });
@@ -144,7 +157,14 @@ chrome.tabs.onRemoved.addListener((tabId) => {
   inspectTabs.delete(tabId);
   activePanels.delete(tabId);
 });
-// Clean up on navigation
+// Clean up on navigation (and sync UI)
 chrome.tabs.onUpdated.addListener((tabId, info) => {
-  if (info.status === 'loading') inspectTabs.delete(tabId);
+  if (info.status === 'loading') {
+    if (inspectTabs.has(tabId)) {
+      inspectTabs.delete(tabId);
+      // Explicitly tell the UI that this tab is no longer inspecting
+      relayToSidePanel({ type: 'STOP_INSPECT' });
+    }
+    activePanels.delete(tabId);
+  }
 });

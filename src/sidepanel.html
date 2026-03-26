@@ -5,20 +5,24 @@
   <meta charset="UTF-8" />
   <title>LocatorLens – Side Panel</title>
   <style>
+    /* 🛸 Lumina Cyber HUD Masterpiece Edition 🛸 */
+    @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@500;700&display=swap');
+
     :root {
-      --bg: #0a0e1a;
-      --surf: #111827;
-      --surf2: #1a2235;
-      --border: #1e2d45;
-      --green: #00ff9d;
-      --gdim: #00c97a;
-      --blue: #3b82f6;
-      --purple: #a78bfa;
-      --orange: #fb923c;
-      --red: #f87171;
-      --text: #e2e8f0;
-      --muted: #64748b;
-      --code: #0d1929;
+      --bg: #070d1f;
+      --surf: #11192e;
+      --surf2: #1c253e;
+      --surf-low: #0c1326;
+      --border: rgba(65, 71, 91, 0.4);
+      --primary: #3adffa;
+      --primary-dim: rgba(58, 223, 250, 0.4);
+      --secondary: #dae2fd;
+      --tertiary: #47c4ff;
+      --text: #dfe4fe;
+      --muted: #a5aac2;
+      --error: #ff716c;
+      --warn: #fb923c;
+      --code: #000000;
     }
 
     * {
@@ -32,33 +36,84 @@
       height: 100%;
       background: var(--bg);
       color: var(--text);
-      font-family: 'Segoe UI', system-ui, sans-serif;
+      font-family: 'Inter', system-ui, sans-serif;
       font-size: 13px;
-      overflow-x: hidden;
+      overflow: hidden;
+      position: relative;
     }
 
-    /* ── Header ── */
+    /* ── The Scanline Overlay ── */
+    body::before {
+      content: " ";
+      display: block;
+      position: fixed;
+      top: 0; left: 0; bottom: 0; right: 0;
+      background: linear-gradient(rgba(18, 16, 16, 0) 50%, rgba(0, 0, 0, 0.25) 50%), linear-gradient(90deg, rgba(255, 0, 0, 0.04), rgba(0, 255, 0, 0.02), rgba(0, 0, 255, 0.04));
+      z-index: 1000;
+      background-size: 100% 2px, 3px 100%;
+      pointer-events: none;
+      opacity: 0.15;
+    }
+
+    /* ── Custom Scrollbar (Proprietary Look) ── */
+    ::-webkit-scrollbar {
+      width: 4px;
+    }
+
+    ::-webkit-scrollbar-track {
+      background: var(--surf-low);
+    }
+
+    ::-webkit-scrollbar-thumb {
+      background: var(--primary);
+      border-radius: 2px;
+    }
+
+    /* ── App Container ── */
+    .app {
+      display: flex;
+      flex-direction: column;
+      height: 100%;
+      backdrop-filter: blur(20px);
+    }
+
+    /* ── Header (Tactical Observer) ── */
     .header {
       background: var(--surf);
-      border-bottom: 1px solid var(--border);
-      padding: 12px 16px;
+      padding: 14px 18px;
       display: flex;
       align-items: center;
-      gap: 10px;
-      position: sticky;
-      top: 0;
-      z-index: 10;
+      gap: 12px;
+      border-bottom: 0.5px solid var(--border);
+    }
+
+    .fw-select-wrap {
+      margin-left: auto;
+      position: relative;
+    }
+
+    #framework-select {
+      background: var(--surf-low);
+      border: 1px solid var(--border);
+      color: var(--primary);
+      font-family: 'JetBrains Mono', monospace;
+      font-size: 10px;
+      padding: 4px 8px;
+      border-radius: 4px;
+      outline: none;
+      cursor: pointer;
+      text-transform: uppercase;
+      letter-spacing: 0.05em;
+      transition: all 0.2s;
+    }
+
+    #framework-select:hover {
+      border-color: var(--primary);
+      box-shadow: 0 0 10px rgba(58, 223, 250, 0.1);
     }
 
     .logo {
-      width: 30px;
-      height: 30px;
-      border-radius: 8px;
-      background: linear-gradient(135deg, #00c97a, #00ff9d);
-      display: flex;
-      align-items: center;
-      justify-content: center;
-      font-size: 16px;
+      font-size: 18px;
       flex-shrink: 0;
     }
 
@@ -69,103 +124,148 @@
     .brand-name {
       font-weight: 700;
       font-size: 14px;
+      letter-spacing: -0.02em;
     }
 
     .brand-sub {
-      font-size: 10px;
+      font-size: 9px;
       color: var(--muted);
-      font-family: monospace;
+      text-transform: uppercase;
+      letter-spacing: 0.1em;
+      margin-top: 1px;
     }
 
     .status-dot {
-      width: 8px;
-      height: 8px;
+      width: 6px;
+      height: 6px;
       border-radius: 50%;
       background: var(--muted);
-      flex-shrink: 0;
-      transition: background .3s;
+      transition: all .3s;
     }
 
     .status-dot.active {
-      background: var(--green);
-      box-shadow: 0 0 6px var(--green);
-      animation: blink 1.5s infinite;
+      background: var(--primary);
+      box-shadow: 0 0 10px var(--primary);
+      animation: pulse 2s infinite linear;
     }
 
-    @keyframes blink {
-
-      0%,
-      100% {
-        opacity: 1
-      }
-
-      50% {
-        opacity: .4
-      }
+    @keyframes pulse {
+      0% { opacity: 1; box-shadow: 0 0 6px var(--primary); }
+      50% { opacity: 0.7; box-shadow: 0 0 14px var(--primary); }
+      100% { opacity: 1; box-shadow: 0 0 6px var(--primary); }
     }
 
-    /* ── Inspect button ── */
+    .logo {
+      font-size: 20px;
+      animation: glitchGlow 4s infinite linear;
+      text-shadow: 0 0 5px var(--primary);
+    }
+
+    @keyframes glitchGlow {
+      0%, 100% { opacity: 1; filter: hue-rotate(0deg); text-shadow: 0 0 5px var(--primary); }
+      92% { opacity: 1; filter: hue-rotate(0deg); }
+      94% { opacity: 0.8; filter: hue-rotate(90deg); text-shadow: 2px 0 red, -2px 0 map; }
+      96% { opacity: 1; filter: hue-rotate(0deg); }
+    }
+
+    /* ── Inspect Button (Hardware Backlit) ── */
     .btn-wrap {
-      padding: 12px 16px 0;
+      padding: 16px 18px 12px;
     }
 
     .inspect-btn {
       width: 100%;
-      background: linear-gradient(135deg, var(--gdim), var(--green));
-      color: #0a0e1a;
+      background: var(--primary);
+      color: var(--bg);
       border: none;
-      padding: 10px 16px;
-      border-radius: 10px;
+      padding: 12px 16px;
+      border-radius: 4px;
       font-size: 13px;
       font-weight: 700;
+      text-transform: uppercase;
+      letter-spacing: 0.05em;
       cursor: pointer;
       display: flex;
       align-items: center;
       justify-content: center;
-      gap: 8px;
-      transition: all .2s;
+      gap: 10px;
+      box-shadow: 0 0 15px var(--primary-dim);
+      transition: all .2s cubic-bezier(0.4, 0, 0.2, 1);
+      position: relative;
     }
 
     .inspect-btn:hover {
-      opacity: .9;
-      transform: translateY(-1px);
+      transform: translateY(-2px);
+      box-shadow: 0 0 25px var(--primary), inset 0 0 8px rgba(255,255,255,0.3);
+    }
+
+    .inspect-btn:active {
+      transform: translateY(0);
+      filter: brightness(0.9);
     }
 
     .inspect-btn.active {
       background: var(--surf2);
-      border: 1px solid var(--red);
-      color: var(--red);
+      color: var(--error);
+      box-shadow: 0 0 15px rgba(255, 113, 108, 0.2);
+      border: 1px solid var(--error);
     }
 
     .hint-row {
-      padding: 6px 16px 10px;
-      font-size: 11px;
+      padding: 0 18px 12px;
+      font-size: 10px;
       color: var(--muted);
-      font-family: monospace;
       text-align: center;
       display: none;
+      text-transform: uppercase;
+      letter-spacing: 0.05em;
     }
 
     .hint-row span {
-      color: var(--green);
+      color: var(--primary);
     }
 
-    /* ── Idle state ── */
+    /* ── Main Content Area ── */
+    .scroll-content {
+      flex: 1;
+      overflow-y: auto;
+      padding-bottom: 24px;
+    }
+
+    /* ── Idle State ── */
     .idle-state {
-      padding: 48px 24px;
+      padding: 60px 24px;
       text-align: center;
+      position: relative;
+      overflow: hidden;
+    }
+
+    .idle-state::before {
+      content: '';
+      position: absolute;
+      top: 0; left: 0; right: 0; bottom: 0;
+      background: linear-gradient(180deg, transparent 0%, rgba(58, 223, 250, 0.08) 50%, transparent 100%);
+      background-size: 100% 200%;
+      animation: scan 4s infinite linear;
+      pointer-events: none;
+    }
+
+    @keyframes scan {
+      0% { background-position: 0 150%; }
+      100% { background-position: 0 -150%; }
     }
 
     .idle-icon {
-      font-size: 48px;
-      margin-bottom: 16px;
+      font-size: 40px;
+      margin-bottom: 20px;
+      opacity: 0.6;
     }
 
     .idle-title {
       font-size: 16px;
       font-weight: 600;
       color: var(--text);
-      margin-bottom: 8px;
+      margin-bottom: 12px;
     }
 
     .idle-sub {
@@ -174,263 +274,237 @@
       line-height: 1.8;
     }
 
-    .idle-tip {
-      margin-top: 20px;
-      padding: 12px 16px;
-      background: var(--surf2);
-      border: 1px solid var(--border);
-      border-radius: 10px;
-      font-size: 11px;
-      color: var(--muted);
-      line-height: 1.6;
+    .idle-sub strong {
+      color: var(--primary);
     }
 
-    .idle-tip strong {
-      color: var(--green);
-    }
-
-    /* ── Element bar ── */
+    /* ── Results UI ── */
     .el-bar {
-      margin: 12px 16px 0;
-      background: var(--surf2);
-      border: 1px solid var(--border);
-      border-radius: 9px;
-      padding: 10px 14px;
+      margin: 0 18px 12px;
+      padding: 12px;
+      background: var(--surf-low);
+      border-radius: 6px;
       display: flex;
-      gap: 10px;
       flex-wrap: wrap;
+      gap: 8px;
     }
 
     .el-chip {
-      font-family: monospace;
-      font-size: 11px;
-    }
-
-    .el-chip .k {
+      font-size: 10px;
+      padding: 4px 8px;
+      background: var(--surf);
+      border-radius: 4px;
+      border: 1px solid var(--border);
       color: var(--muted);
     }
 
     .el-chip .v {
-      color: var(--green);
+      color: var(--primary);
       font-weight: 600;
     }
 
     .el-chip .v.warn {
-      color: var(--orange);
+      color: var(--warn);
     }
 
-    /* ── Section label ── */
-    .sec {
-      padding: 10px 16px 6px;
+    .el-chip.shadow {
+      border-color: #ff00ff;
+      color: #ff00ff;
+      box-shadow: 0 0 8px rgba(255, 0, 255, 0.2);
+    }
+
+    .sec-label {
+      padding: 12px 18px 8px;
       font-size: 10px;
-      letter-spacing: 1.5px;
       text-transform: uppercase;
+      letter-spacing: 0.15em;
       color: var(--muted);
       display: flex;
       align-items: center;
-      gap: 8px;
+      gap: 10px;
     }
 
-    .sec::after {
+    .sec-label::after {
       content: '';
       flex: 1;
       height: 1px;
       background: var(--border);
     }
 
-    /* ── Locator cards ── */
+    /* ── Locator cards (The Module) ── */
     .cards {
-      padding: 0 16px;
+      padding: 0 18px;
       display: flex;
       flex-direction: column;
-      gap: 8px;
-      padding-bottom: 8px;
+      gap: 12px;
     }
 
     .card {
+      background: var(--surf);
+      border-radius: 4px;
       border: 1px solid var(--border);
-      border-radius: 10px;
+      position: relative;
       overflow: hidden;
-      animation: slideIn .3s ease both;
+      animation: cardIn .5s cubic-bezier(0.16, 1, 0.3, 1) both;
     }
 
-    @keyframes slideIn {
-      from {
-        opacity: 0;
-        transform: translateY(8px)
-      }
+    .card::after {
+      content: '';
+      position: absolute;
+      top: 0; left: -150%;
+      width: 100%; height: 100%;
+      background: linear-gradient(90deg, transparent, rgba(58, 223, 250, 0.08), transparent);
+      animation: sweep 2s 0.5s ease-out both; 
+    }
 
-      to {
-        opacity: 1;
-        transform: translateY(0)
-      }
+    @keyframes cardIn {
+      from { opacity: 0; transform: translateY(20px) scale(0.98); }
+      to { opacity: 1; transform: translateY(0) scale(1); }
+    }
+
+    @keyframes sweep {
+      0% { left: -100%; }
+      100% { left: 150%; }
     }
 
     .card.r1 {
-      border-color: rgba(0, 255, 157, .4);
+      border-left: 3px solid var(--primary);
+      box-shadow: 0 0 20px rgba(58, 223, 250, 0.1), inset 0 0 10px rgba(58, 223, 250, 0.05);
+      border-color: var(--primary);
     }
 
-    .card.r2 {
-      border-color: rgba(59, 130, 246, .35);
+    .card.r1 .rank-num {
+      background: var(--primary);
+      color: var(--bg);
     }
 
-    .card.r3 {
-      border-color: rgba(167, 139, 250, .3);
+    .card:hover {
+      border-color: var(--primary);
+      background: var(--surf2);
+      box-shadow: 0 8px 24px rgba(0,0,0,0.4), inset 0 0 10px rgba(58, 223, 250, 0.05);
+      transition: all 0.3s;
     }
 
     .card-head {
       display: flex;
       align-items: center;
       justify-content: space-between;
-      padding: 8px 12px;
-      background: var(--surf);
-      gap: 8px;
+      padding: 12px 14px;
+      gap: 10px;
     }
 
     .card-left {
       display: flex;
       align-items: center;
-      gap: 8px;
-      flex: 1;
+      gap: 12px;
       min-width: 0;
     }
 
     .rank-num {
-      width: 22px;
-      height: 22px;
-      border-radius: 6px;
-      flex-shrink: 0;
+      width: 24px;
+      height: 24px;
+      background: var(--surf-low);
+      color: var(--primary);
+      font-size: 11px;
+      font-weight: 700;
       display: flex;
       align-items: center;
       justify-content: center;
-      font-size: 11px;
-      font-weight: 700;
-      font-family: monospace;
-    }
-
-    .r1 .rank-num {
-      background: rgba(0, 255, 157, .15);
-      color: var(--green);
-    }
-
-    .r2 .rank-num {
-      background: rgba(59, 130, 246, .15);
-      color: var(--blue);
-    }
-
-    .r3 .rank-num {
-      background: rgba(167, 139, 250, .15);
-      color: var(--purple);
-    }
-
-    .rX .rank-num {
-      background: rgba(100, 116, 139, .15);
-      color: var(--muted);
+      border-radius: 2px;
+      flex-shrink: 0;
     }
 
     .method-name {
-      font-weight: 700;
+      font-weight: 600;
       font-size: 12px;
       color: var(--text);
     }
 
     .match-attr {
-      font-family: monospace;
       font-size: 10px;
       color: var(--muted);
+      margin-top: 2px;
+      white-space: nowrap;
       overflow: hidden;
       text-overflow: ellipsis;
-      white-space: nowrap;
-      max-width: 240px;
+      max-width: 140px;
     }
 
     .pill {
-      font-family: monospace;
       font-size: 9px;
-      letter-spacing: .5px;
-      padding: 3px 8px;
-      border-radius: 100px;
       font-weight: 700;
-      white-space: nowrap;
+      text-transform: uppercase;
+      letter-spacing: 0.05em;
+      padding: 3px 8px;
+      border-radius: 2px;
     }
 
-    .p-best {
-      background: rgba(0, 255, 157, .1);
-      color: var(--green);
-      border: 1px solid rgba(0, 255, 157, .3);
-    }
-
-    .p-good {
-      background: rgba(59, 130, 246, .1);
-      color: var(--blue);
-      border: 1px solid rgba(59, 130, 246, .3);
-    }
-
-    .p-ok {
-      background: rgba(251, 146, 60, .1);
-      color: var(--orange);
-      border: 1px solid rgba(251, 146, 60, .3);
-    }
-
-    .p-avoid {
-      background: rgba(248, 113, 113, .1);
-      color: var(--red);
-      border: 1px solid rgba(248, 113, 113, .3);
-    }
+    .p-best { background: var(--primary-dim); color: var(--primary); border: 1px solid var(--primary); }
+    .p-good { background: rgba(71, 196, 255, 0.1); color: var(--tertiary); border: 1px solid var(--tertiary); }
+    .p-ok   { background: rgba(251, 146, 60, 0.1); color: var(--warn); border: 1px solid var(--warn); }
+    .p-avoid{ background: rgba(255, 113, 108, 0.1); color: var(--error); border: 1px solid var(--error); }
 
     .card-code {
       background: var(--code);
-      border-top: 1px solid var(--border);
-      padding: 8px 12px;
+      padding: 10px 14px;
       display: flex;
       align-items: center;
-      gap: 8px;
+      justify-content: space-between;
+      gap: 10px;
+      border-top: 1px solid var(--border);
     }
 
     .code-txt {
-      font-family: 'Courier New', monospace;
-      font-size: 11.5px;
+      font-family: 'JetBrains Mono', monospace;
+      font-size: 11px;
+      font-weight: 500;
       color: #a8d8ea;
-      flex: 1;
       word-break: break-all;
-      line-height: 1.5;
-      white-space: pre-wrap;
+      flex: 1;
+      padding-right: 8px;
     }
 
-    .code-txt .kw {
-      color: #c792ea;
-    }
-
-    .code-txt .fn {
-      color: #82aaff;
-    }
-
-    .code-txt .str {
-      color: #c3e88d;
-    }
+    .kw { color: #c792ea; }
+    .fn { color: #82aaff; }
+    .str { color: #c3e88d; }
+    .num { color: #f78c6c; }
 
     .copy-btn {
-      background: rgba(255, 255, 255, .06);
+      background: var(--surf2);
       border: 1px solid var(--border);
-      color: var(--muted);
-      font-family: monospace;
+      color: var(--text);
       font-size: 10px;
-      padding: 4px 10px;
-      border-radius: 6px;
+      padding: 5px 12px;
+      border-radius: 2px;
       cursor: pointer;
+      text-transform: uppercase;
+      font-weight: 600;
       transition: all .2s;
       flex-shrink: 0;
-      white-space: nowrap;
     }
 
     .copy-btn:hover {
-      border-color: var(--green);
-      color: var(--green);
+      border-color: var(--primary);
+      color: var(--primary);
     }
 
-    .copy-btn.done {
-      border-color: var(--green);
-      color: var(--green);
+    .card-explain {
+      display: none;
+      padding: 12px 14px;
+      font-size: 11px;
+      line-height: 1.6;
+      color: var(--muted);
+      border-top: 1px solid var(--border);
+      background: var(--surf-low);
+    }
+
+    .card-explain.open { display: block; }
+
+    .why-row {
+      padding: 6px 14px;
+      background: var(--surf);
+      display: flex;
+      justify-content: flex-end;
     }
 
     .toggle-explain {
@@ -439,177 +513,135 @@
       color: var(--muted);
       font-size: 10px;
       cursor: pointer;
-      padding: 2px 4px;
-      display: flex;
-      align-items: center;
-      gap: 3px;
-      transition: color .2s;
     }
 
-    .toggle-explain:hover {
-      color: var(--text);
-    }
+    .toggle-explain:hover { color: var(--primary); }
 
-    .card-explain {
-      display: none;
-      padding: 8px 12px;
-      font-size: 11.5px;
-      color: #94a3b8;
-      line-height: 1.6;
-      border-top: 1px solid var(--border);
-      background: var(--surf);
-    }
-
-    .card-explain.open {
-      display: block;
-    }
-
-    .why-row {
-      display: flex;
-      align-items: center;
-      justify-content: space-between;
-      padding: 4px 12px;
-      background: #111827;
-      border-top: 1px solid var(--border);
-    }
-
-    /* ── Avoid section ── */
+    /* ── System Warnings Area ── */
     .avoid-sec {
-      margin: 0 16px;
-      background: var(--surf);
-      border: 1px solid rgba(251, 146, 60, .25);
-      border-radius: 10px;
-      padding: 12px;
+      margin: 12px 18px;
+      background: rgba(251, 146, 60, 0.05);
+      border: 1px solid rgba(251, 146, 60, 0.2);
+      border-radius: 4px;
+      padding: 16px;
     }
 
     .avoid-title {
       font-size: 11px;
       font-weight: 700;
-      color: var(--orange);
-      margin-bottom: 8px;
+      color: var(--warn);
+      margin-bottom: 12px;
+      text-transform: uppercase;
+      letter-spacing: 0.1em;
     }
 
     .avoid-row {
       display: flex;
-      gap: 8px;
+      gap: 10px;
       font-size: 11px;
-      color: #94a3b8;
-      line-height: 1.5;
-      margin-bottom: 6px;
+      color: var(--muted);
+      line-height: 1.6;
+      margin-bottom: 10px;
     }
 
-    .avoid-x {
-      color: var(--red);
-      flex-shrink: 0;
-    }
-
+    .avoid-x { color: var(--error); font-weight: 700; }
     .avoid-code {
       font-family: monospace;
-      background: var(--code);
-      color: var(--red);
-      padding: 0 5px;
-      border-radius: 4px;
-      font-size: 10.5px;
+      color: var(--error);
+      background: rgba(255,113,108,0.1);
+      padding: 2px 4px;
+      border-radius: 2px;
     }
 
-    /* ── Pro tip ── */
     .pro-tip {
-      margin: 10px 16px 16px;
-      background: rgba(0, 255, 157, .04);
-      border: 1px solid rgba(0, 255, 157, .2);
-      border-radius: 10px;
-      padding: 10px 14px;
-      font-size: 11.5px;
-      color: #94a3b8;
+      margin: 0 18px 24px;
+      padding: 14px;
+      background: var(--surf-low);
+      border-radius: 4px;
+      border: 0.5px solid var(--border);
+      font-size: 11px;
+      color: var(--muted);
       line-height: 1.6;
     }
 
-    .pro-tip strong {
-      color: var(--green);
-    }
-
-    /* ── Clear button ── */
     .clear-btn-wrap {
-      padding: 0 16px 16px;
+      padding: 0 18px 24px;
     }
 
     .clear-btn {
       width: 100%;
-      background: none;
+      background: transparent;
       border: 1px solid var(--border);
       color: var(--muted);
-      padding: 7px;
-      border-radius: 8px;
-      font-size: 11px;
+      padding: 8px;
+      border-radius: 4px;
       cursor: pointer;
-      transition: all .2s;
+      font-size: 10px;
+      text-transform: uppercase;
+      letter-spacing: 0.05em;
     }
 
     .clear-btn:hover {
-      border-color: var(--red);
-      color: var(--red);
-    }
-
-    /* scrollbar */
-    ::-webkit-scrollbar {
-      width: 5px
-    }
-
-    ::-webkit-scrollbar-track {
-      background: transparent
-    }
-
-    ::-webkit-scrollbar-thumb {
-      background: var(--border);
-      border-radius: 3px
+      border-color: var(--error);
+      color: var(--error);
     }
   </style>
 </head>
 
 <body>
-
-  <div class="header">
-    <div class="logo">🔍</div>
-    <div class="brand">
-      <div class="brand-name">LocatorLens</div>
-      <div class="brand-sub">Playwright Element Inspector</div>
+  <div class="app">
+    <div class="header">
+      <div class="logo">🥷</div>
+      <div class="brand">
+        <div class="brand-name">LocatorLens</div>
+        <div class="brand-sub">Framework Matrix Active</div>
+      </div>
+      <div class="fw-select-wrap">
+        <select id="framework-select">
+          <option value="playwright">Playwright</option>
+          <option value="selenium">Selenium</option>
+          <option value="cypress">Cypress</option>
+        </select>
+      </div>
+      <div class="status-dot" id="statusDot"></div>
     </div>
-    <div class="status-dot" id="statusDot"></div>
-  </div>
 
-  <div class="btn-wrap">
-    <button class="inspect-btn" id="inspectBtn">
-      <span id="btnIcon">🎯</span>
-      <span id="btnText">Start Inspecting</span>
-    </button>
-  </div>
-  <div class="hint-row" id="hintRow">
-    Click any element · <span>▲▼ keys</span> to navigate · <span>Esc</span> to stop
-  </div>
-
-  <div id="idleState" class="idle-state">
-    <div class="idle-icon">🔎</div>
-    <div class="idle-title">Waiting for an element...</div>
-    <div class="idle-sub">
-      Press <strong style="color:var(--green)">Start Inspecting</strong> above,<br>
-      then click any element on the page.<br>
-      Results will appear here instantly.
+    <div class="btn-wrap">
+      <button class="inspect-btn" id="inspectBtn">
+        <span id="btnIcon">🎯</span>
+        <span id="btnText">Start Inspecting</span>
+      </button>
     </div>
-    <div class="idle-tip">
-      <strong>💡 Tip:</strong> You can also <strong>right-click</strong> any element
-      and choose <em>"🎯 Copy Best Playwright Locator"</em> — no need to open inspect mode at all.
+    <div class="hint-row" id="hintRow">
+      SELECT TARGET · <span>▲▼ ARROW TO NAVIGATE</span> · <span>ESC TO ABORT</span>
     </div>
-  </div>
 
-  <div id="resultsState" style="display:none">
-    <div class="el-bar" id="elBar"></div>
-    <div class="sec">Ranked Locators</div>
-    <div class="cards" id="cardsContainer"></div>
-    <div class="sec" id="avoidLabel" style="display:none">What to Avoid</div>
-    <div class="avoid-sec" id="avoidContainer" style="display:none"></div>
-    <div class="pro-tip" id="proTip" style="display:none"></div>
-    <div class="clear-btn-wrap">
-      <button class="clear-btn" id="clearBtn">✕ Clear Results</button>
+    <div class="scroll-content">
+      <div id="idleState" class="idle-state">
+        <div class="idle-icon">🛰️</div>
+        <div class="idle-title">Standby for Target Selection</div>
+        <div class="idle-sub">
+          Initiate <strong>Start Inspecting</strong> to begin.<br>
+          Ranked locators will appear below once selected.
+        </div>
+      </div>
+
+      <div id="resultsState" style="display:none">
+        <div class="sec-label">Target metadata</div>
+        <div class="el-bar" id="elBar"></div>
+
+        <div class="sec-label">Ranked Locators</div>
+        <div class="cards" id="cardsContainer"></div>
+
+        <div class="sec-label" id="avoidLabel" style="display:none">System Warnings</div>
+        <div class="avoid-sec" id="avoidContainer" style="display:none"></div>
+
+        <div class="pro-tip" id="proTip" style="display:none"></div>
+
+        <div class="clear-btn-wrap">
+          <button class="clear-btn" id="clearBtn">✕ Reset Utility</button>
+        </div>
+      </div>
     </div>
   </div>
 

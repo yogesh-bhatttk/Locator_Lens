@@ -14,9 +14,20 @@
   let traversalBar = null;
   let lastRightClickedEl = null;
 
+  // ── Deep-Tracing Engine (Shadow DOM X-Ray) ────────────────────────────────
+  function getDeepElementAt(x, y) {
+    let el = document.elementFromPoint(x, y);
+    while (el && el.shadowRoot) {
+      const shadowEl = el.shadowRoot.elementFromPoint(x, y);
+      if (!shadowEl || shadowEl === el) break;
+      el = shadowEl;
+    }
+    return el;
+  }
+
   // ── Track right-clicked element (always active for context menu) ───────────
   document.addEventListener('contextmenu', (e) => {
-    lastRightClickedEl = e.target;
+    lastRightClickedEl = getDeepElementAt(e.clientX, e.clientY);
   }, true);
 
   // ── Styles injected into the page ─────────────────────────────────────────
@@ -29,30 +40,43 @@
         position: fixed !important;
         pointer-events: none !important;
         z-index: 2147483646 !important;
-        border: 2px solid #00ff9d !important;
-        background: rgba(0,255,157,0.08) !important;
+        border: 2px solid #3adffa !important;
+        background: rgba(58, 223, 250, 0.08) !important;
         border-radius: 3px !important;
-        transition: all 0.1s ease !important;
-        box-shadow: 0 0 0 1px rgba(0,255,157,0.3), 0 0 12px rgba(0,255,157,0.2) !important;
+        border: 1px solid #3adffa !important;
+        background: rgba(58, 223, 250, 0.05) !important;
+        border-radius: 2px !important;
+        transition: all 0.08s cubic-bezier(0.4, 0, 0.2, 1) !important;
+        box-shadow: 0 0 0 1px rgba(58, 223, 250, 0.2), inset 0 0 15px rgba(58, 223, 250, 0.1) !important;
+        animation: llBreathing 3s infinite linear !important;
       }
+      @keyframes llBreathing {
+        0% { opacity: 1; box-shadow: 0 0 4px rgba(58, 223, 250, 0.3), inset 0 0 10px rgba(58, 223, 250, 0.1); }
+        50% { opacity: 0.8; box-shadow: 0 0 12px rgba(58, 223, 250, 0.5), inset 0 0 20px rgba(58, 223, 250, 0.2); }
+        100% { opacity: 1; box-shadow: 0 0 4px rgba(58, 223, 250, 0.3), inset 0 0 10px rgba(58, 223, 250, 0.1); }
+      }
+
       #ll-tooltip {
         position: fixed !important;
         z-index: 2147483647 !important;
-        background: #0a0e1a !important;
-        border: 1px solid #00ff9d !important;
-        border-radius: 8px !important;
+        background: rgba(7, 13, 31, 0.85) !important;
+        backdrop-filter: blur(10px) !important;
+        -webkit-backdrop-filter: blur(10px) !important;
+        border: 1px solid #3adffa !important;
+        border-radius: 4px !important;
         padding: 8px 12px !important;
-        font-family: 'JetBrains Mono', 'Courier New', monospace !important;
-        font-size: 12px !important;
-        color: #00ff9d !important;
+        font-family: 'Inter', system-ui, sans-serif !important;
+        font-size: 11px !important;
+        font-weight: 500 !important;
+        color: #3adffa !important;
         pointer-events: none !important;
         max-width: 320px !important;
-        box-shadow: 0 4px 20px rgba(0,0,0,0.6) !important;
+        box-shadow: 0 8px 32px rgba(0,0,0,0.5) !important;
         line-height: 1.5 !important;
         white-space: nowrap !important;
       }
-      #ll-tooltip .ll-tag { color: #82aaff; font-weight: bold; }
-      #ll-tooltip .ll-hint { color: #64748b; font-size: 11px; margin-top: 3px; }
+      #ll-tooltip .ll-tag { color: #82aaff; font-weight: 700; }
+      #ll-tooltip .ll-hint { color: #a5aac2; font-size: 9px; margin-top: 3px; text-transform: uppercase; letter-spacing: 0.05em; font-weight: 600; }
       body.ll-inspecting * { cursor: crosshair !important; }
 
       /* ── Traversal Toolbar ── */
@@ -61,44 +85,50 @@
         z-index: 2147483647 !important;
         display: flex !important;
         align-items: center !important;
-        gap: 4px !important;
-        background: #0a0e1a !important;
-        border: 1px solid #00ff9d !important;
-        border-radius: 8px !important;
-        padding: 4px 8px !important;
+        gap: 6px !important;
+        background: rgba(7, 13, 31, 0.9) !important;
+        backdrop-filter: blur(8px) !important;
+        border: 1px solid #3adffa !important;
+        border-radius: 4px !important;
+        padding: 6px 10px !important;
         box-shadow: 0 4px 16px rgba(0,0,0,0.7) !important;
-        font-family: 'Courier New', monospace !important;
+        font-family: 'Inter', system-ui, sans-serif !important;
         font-size: 11px !important;
         pointer-events: all !important;
         user-select: none !important;
       }
       #ll-traversal-bar .ll-trav-lbl {
-        color: #64748b !important;
-        font-size: 10px !important;
-        letter-spacing: 0.5px !important;
+        color: #a5aac2 !important;
+        font-size: 9px !important;
+        font-weight: 700 !important;
+        letter-spacing: 0.1em !important;
         margin-right: 4px !important;
+        text-transform: uppercase;
       }
       #ll-traversal-bar button {
-        background: #1a2235 !important;
-        border: 1px solid #1e2d45 !important;
-        color: #00ff9d !important;
-        font-size: 11px !important;
-        font-family: 'Courier New', monospace !important;
-        padding: 3px 10px !important;
-        border-radius: 5px !important;
+        background: #1c253e !important;
+        border: 1px solid rgba(65, 71, 91, 0.4) !important;
+        color: #3adffa !important;
+        font-size: 10px !important;
+        font-weight: 700 !important;
+        text-transform: uppercase !important;
+        padding: 4px 10px !important;
+        border-radius: 2px !important;
         cursor: pointer !important;
         transition: all 0.15s !important;
         pointer-events: all !important;
       }
       #ll-traversal-bar button:hover {
-        background: #00ff9d !important;
-        color: #0a0e1a !important;
-        border-color: #00ff9d !important;
+        background: #3adffa !important;
+        color: #070d1f !important;
+        border-color: #3adffa !important;
+        box-shadow: 0 0 10px rgba(58, 223, 250, 0.5);
       }
       #ll-traversal-bar .ll-trav-hint {
-        color: #334155 !important;
-        font-size: 9px !important;
+        color: #a5aac2 !important;
+        font-size: 8px !important;
         margin-left: 4px !important;
+        opacity: 0.6;
       }
 
       /* ── Toast notification ── */
@@ -108,27 +138,29 @@
         left: 50% !important;
         transform: translateX(-50%) translateY(0) !important;
         z-index: 2147483647 !important;
-        background: #0a0e1a !important;
-        border: 1px solid #00ff9d !important;
-        border-radius: 10px !important;
-        padding: 10px 18px !important;
-        font-family: 'JetBrains Mono', 'Courier New', monospace !important;
+        background: rgba(7, 13, 31, 0.95) !important;
+        backdrop-filter: blur(12px) !important;
+        border: 1px solid #3adffa !important;
+        border-radius: 4px !important;
+        padding: 12px 20px !important;
+        font-family: 'Inter', system-ui, sans-serif !important;
         font-size: 12px !important;
-        color: #00ff9d !important;
-        box-shadow: 0 8px 32px rgba(0,0,0,0.7), 0 0 0 1px rgba(0,255,157,0.2) !important;
+        font-weight: 600 !important;
+        color: #3adffa !important;
+        box-shadow: 0 12px 40px rgba(0,0,0,0.8), 0 0 0 1px rgba(58, 223, 250, 0.2) !important;
         display: flex !important;
         align-items: center !important;
-        gap: 10px !important;
+        gap: 12px !important;
         pointer-events: none !important;
         white-space: nowrap !important;
-        animation: llToastIn 0.25s cubic-bezier(0.34,1.56,0.64,1) both !important;
+        animation: llToastIn 0.3s cubic-bezier(0.34,1.56,0.64,1) both !important;
       }
       #ll-toast.ll-toast-out {
         animation: llToastOut 0.3s ease forwards !important;
       }
-      #ll-toast .ll-toast-icon { font-size: 14px !important; }
-      #ll-toast .ll-toast-label { color: #64748b !important; font-size: 10px !important; margin-right: 2px !important; }
-      #ll-toast .ll-toast-code { color: #00ff9d !important; max-width: 320px !important; overflow: hidden !important; text-overflow: ellipsis !important; }
+      #ll-toast .ll-toast-icon { font-size: 14px !important; text-shadow: 0 0 10px #3adffa; }
+      #ll-toast .ll-toast-label { color: #a5aac2 !important; font-size: 10px !important; font-weight: 700 !important; margin-right: 2px !important; text-transform: uppercase; letter-spacing: 0.05em; }
+      #ll-toast .ll-toast-code { color: #3adffa !important; max-width: 320px !important; overflow: hidden !important; text-overflow: ellipsis !important; font-family: 'Inter', system-ui, sans-serif !important; font-weight: 700; }
       @keyframes llToastIn {
         from { opacity: 0; transform: translateX(-50%) translateY(16px); }
         to   { opacity: 1; transform: translateX(-50%) translateY(0); }
@@ -177,6 +209,11 @@
     if (overlay) { overlay.remove(); overlay = null; }
     if (tooltip) { tooltip.remove(); tooltip = null; }
     if (traversalBar) { traversalBar.remove(); traversalBar = null; }
+    
+    // Final Flawless Audit: ensure toast is removed on exit
+    const existing = document.getElementById('ll-toast');
+    if (existing) existing.remove();
+    if (toastTimer) { clearTimeout(toastTimer); toastTimer = null; }
   }
 
   function updateOverlay(el) {
@@ -186,10 +223,10 @@
       position: fixed !important;
       pointer-events: none !important;
       z-index: 2147483646 !important;
-      border: 2px solid #00ff9d !important;
-      background: rgba(0,255,157,0.08) !important;
-      border-radius: 3px !important;
-      box-shadow: 0 0 0 1px rgba(0,255,157,0.3), 0 0 12px rgba(0,255,157,0.2) !important;
+      border: 1px solid #3adffa !important;
+      background: rgba(58, 223, 250, 0.05) !important;
+      border-radius: 2px !important;
+      box-shadow: 0 0 0 1px rgba(58, 223, 250, 0.2), inset 0 0 15px rgba(58, 223, 250, 0.1) !important;
       left: ${r.left}px !important;
       top: ${r.top}px !important;
       width: ${r.width}px !important;
@@ -218,13 +255,15 @@
     tooltip.style.cssText = `
       position: fixed !important;
       z-index: 2147483647 !important;
-      background: #0a0e1a !important;
-      border: 1px solid #00ff9d !important;
+      background: rgba(7, 13, 31, 0.85) !important;
+      backdrop-filter: blur(10px) !important;
+      -webkit-backdrop-filter: blur(10px) !important;
+      border: 1px solid #3adffa !important;
       border-radius: 8px !important;
       padding: 8px 12px !important;
       font-family: 'JetBrains Mono','Courier New',monospace !important;
       font-size: 12px !important;
-      color: #00ff9d !important;
+      color: #3adffa !important;
       pointer-events: none !important;
       max-width: ${TW}px !important;
       box-shadow: 0 4px 20px rgba(0,0,0,0.6) !important;
@@ -257,8 +296,15 @@
   // ── Traversal helpers ──────────────────────────────────────────────────────
   function navigateParent() {
     if (!hoveredEl) return;
-    const parent = hoveredEl.parentElement;
-    if (parent && parent !== document.body && parent !== document.documentElement) {
+    let parent = hoveredEl.parentElement;
+    
+    // 🧬 Shadow Boundary Jump: If no parent, check if we are in a shadow root
+    if (!parent) {
+      const root = hoveredEl.getRootNode();
+      if (root instanceof ShadowRoot) parent = root.host;
+    }
+
+    if (parent && parent !== document.body && parent !== document.documentElement && parent.nodeType === Node.ELEMENT_NODE) {
       hoveredEl = parent;
       updateOverlay(hoveredEl);
     }
@@ -266,8 +312,17 @@
 
   function navigateChild() {
     if (!hoveredEl) return;
-    // Find first Element child (not text/comment nodes)
-    const child = Array.from(hoveredEl.childNodes).find(n => n.nodeType === Node.ELEMENT_NODE);
+    
+    // 🧬 Shadow Infiltration: If host has shadow root, enter it
+    let child = null;
+    if (hoveredEl.shadowRoot) {
+      child = Array.from(hoveredEl.shadowRoot.childNodes).find(n => n.nodeType === Node.ELEMENT_NODE);
+    }
+    
+    if (!child) {
+      child = Array.from(hoveredEl.childNodes).find(n => n.nodeType === Node.ELEMENT_NODE);
+    }
+
     if (child) {
       hoveredEl = child;
       updateOverlay(hoveredEl);
@@ -436,6 +491,7 @@
       if (stableClasses.length) {
         part += '.' + stableClasses.slice(0, 2).join('.');
       }
+      // Nth-child fallback
       const siblings = current.parentElement
         ? Array.from(current.parentElement.children).filter(c => c.tagName === current.tagName)
         : [];
@@ -447,6 +503,23 @@
       current = current.parentElement;
     }
     return parts.join(' > ');
+  }
+
+  // ── Find a unique parent for chaining ──────────────────────────────────────
+  function findUniqueParent(el) {
+    let parent = el.parentElement;
+    while (parent && parent !== document.body) {
+      const pTestId = parent.getAttribute('data-testid');
+      const pId = (!isUnstableId(parent.id)) ? parent.id : null;
+      const pRole = getRole(parent);
+      const pName = getAccessibleName(parent);
+      
+      if (pTestId || pId || (pRole && pName)) {
+        return { el: parent, testId: pTestId, id: pId, role: pRole, name: pName };
+      }
+      parent = parent.parentElement;
+    }
+    return null;
   }
 
   // ── Main locator generation engine ────────────────────────────────────────
@@ -461,13 +534,14 @@
     for (const attr of testAttrs) {
       const val = el.getAttribute(attr);
       if (val) {
+        const escaped = val.replace(/'/g, "\\'");
         locators.push({
           rank: 1,
           method: 'getByTestId()',
           matchedAttr: `${attr}="${val}"`,
           stability: 'BEST',
-          code: `page.getByTestId('${val}')`,
-          fullCode: `await page.getByTestId('${val}').${suggestAction(el)};`,
+          code: `page.getByTestId('${escaped}')`,
+          fullCode: `await page.getByTestId('${escaped}').${suggestAction(el)};`,
           explanation: `Uses the <${attr}> attribute which is purpose-built for testing. This is the most stable locator — it never changes with visual redesigns.`,
           why: 'Stable test attribute'
         });
@@ -646,6 +720,44 @@
       });
     }
 
+    // 10. Chained / Filtered Locator (The Pro Approach)
+    const uParent = findUniqueParent(el);
+    if (uParent && locators.length > 0) {
+      let pCode = '';
+      if (uParent.testId) pCode = `page.getByTestId('${uParent.testId}')`;
+      else if (uParent.id) pCode = `page.locator('#${uParent.id}')`;
+      else if (uParent.role && uParent.name) pCode = `page.getByRole('${uParent.role}', { name: '${uParent.name.replace(/'/g, "\\'")}' })`;
+
+      if (pCode) {
+        const bestChild = locators[0].code.replace('page.', '');
+        locators.push({
+          rank: locators.length + 1,
+          method: 'Chained/Filtered',
+          matchedAttr: `Parent: ${uParent.testId || uParent.id || uParent.name}`,
+          stability: 'BEST',
+          code: `${pCode}.${bestChild}`,
+          fullCode: `await ${pCode}.${bestChild}.${suggestAction(el)};`,
+          explanation: `Uses a unique parent (${uParent.id || uParent.role}) to narrow down the search. This is the pro approach for elements in lists, tables, or complex dashboards where name alone is ambiguous.`,
+          why: 'Context-specific uniqueness'
+        });
+      }
+    }
+
+    // 11. Iframe Detection
+    const inIframe = window.self !== window.top;
+    if (inIframe) {
+      locators.unshift({
+        rank: 0,
+        method: 'Frame Switch',
+        matchedAttr: 'Inside Iframe',
+        stability: 'GOOD',
+        code: `page.frameLocator('iframe-selector')`,
+        fullCode: `await page.frameLocator('iframe').${locators[0] ? locators[0].code.replace('page.', '') : 'locator(...)'};`,
+        explanation: `Element is inside an Iframe. You must use frameLocator() to switch context before interacting. Replace 'iframe-selector' with the actual iframe ID or src.`,
+        why: 'Cross-document isolation'
+      });
+    }
+
     // 10. CSS selector fallback
     const cssSelector = buildCSSSelector(el);
     const hasUnstable = hasUnstableClasses(el);
@@ -662,7 +774,17 @@
       why: 'CSS selector (fallback)'
     });
 
-    // Re-rank
+    // ── Stability-First Sorting ──────────────────────────────────────────────
+    const stabilityWeight = { 'BEST': 4, 'GOOD': 3, 'OK': 2, 'AVOID': 1 };
+    
+    locators.sort((a, b) => {
+      const wa = stabilityWeight[a.stability] || 0;
+      const wb = stabilityWeight[b.stability] || 0;
+      if (wa !== wb) return wb - wa;
+      return a.rank - b.rank; // Keep relative discovery order within same stability
+    });
+
+    // Re-rank (The 1, 2, 3 sequence)
     locators.forEach((l, i) => { l.rank = i + 1; });
 
     // ── Build avoid list ───────────────────────────────────────────────────────
@@ -691,6 +813,16 @@
       });
     }
 
+    // ── Shadow DOM Detection ─────────────────────────────────────────────
+    let isInShadow = false;
+    let shadowHost = null;
+    const root = el.getRootNode();
+    if (root instanceof ShadowRoot) {
+      isInShadow = true;
+      shadowHost = root.host.tagName.toLowerCase();
+      if (root.host.id) shadowHost += `#${root.host.id}`;
+    }
+
     // ── Collect element metadata ───────────────────────────────────────────
     const elementData = {
       tag,
@@ -707,11 +839,15 @@
       href: tag === 'a' ? el.getAttribute('href') : null,
       classes: typeof el.className === 'string' ? el.className.trim().split(/\s+/).filter(Boolean).slice(0, 6) : [],
       hasUnstableClasses: hasUnstable,
+      isInShadow,
+      shadowHost
     };
 
     // ── Pro tip based on element ───────────────────────────────────────────
     let proTip = '';
-    if (!el.getAttribute('data-testid')) {
+    if (isInShadow) {
+      proTip = `Found inside Shadow DOM (<${shadowHost}>). Playwright's getBy... locators pierce Shadow DOM automatically! For Selenium, you'll need driver.execute_script('return arguments[0].shadowRoot', host).`;
+    } else if (!el.getAttribute('data-testid')) {
       proTip = `Ask your developers to add a <data-testid="${tag}-element"> attribute to this <${tag}>. It would make this the most stable locator possible and is a 5-second code change.`;
     } else if (role === 'button' || role === 'link') {
       proTip = `Great — this element has a data-testid. Use getByTestId() as primary and getByRole() as a backup assertion: expect(page.getByRole('${role}', { name: '...' })).toBeVisible()`;
@@ -739,10 +875,13 @@
   // ── Event handlers ─────────────────────────────────────────────────────────
   function onMouseOver(e) {
     if (!isInspecting) return;
-    const el = e.target;
+    const el = getDeepElementAt(e.clientX, e.clientY);
+    if (!el) return;
+    
     // Ignore our own UI elements
     if (el === overlay || el === tooltip || el === traversalBar ||
       (traversalBar && traversalBar.contains(el))) return;
+      
     hoveredEl = el;
     updateOverlay(el);
   }
@@ -756,45 +895,61 @@
     e.stopPropagation();
     e.stopImmediatePropagation();
 
-    const el = e.target;
-    if (el === overlay || el === tooltip) return;
+    const el = getDeepElementAt(e.clientX, e.clientY);
+    if (!el || el === overlay || el === tooltip) return;
 
     const result = generateLocators(el);
 
-    // Show toast with best locator + auto-copy
-    const bestCode = result.locators[0] ? result.locators[0].code : '';
-    if (bestCode) {
-      if (navigator.clipboard && navigator.clipboard.writeText) {
-        navigator.clipboard.writeText(bestCode).then(() => {
-          showToast(bestCode);
-        }).catch(() => {
-          showToast(bestCode); // still show toast even if clipboard fails
-        });
-      } else {
-        try {
-          const textArea = document.createElement("textarea");
-          textArea.value = bestCode;
-          textArea.style.position = "fixed";
-          document.body.appendChild(textArea);
-          textArea.focus();
-          textArea.select();
-          document.execCommand('copy');
-          document.body.removeChild(textArea);
-        } catch (e) {}
-        showToast(bestCode);
+    // Get current framework preference for the toast
+    chrome.storage.local.get('framework', (res) => {
+      const fw = res.framework || 'playwright';
+      let bestCode = result.locators[0] ? result.locators[0].code : '';
+
+      // Simple toast translation
+      if (fw === 'selenium' && result.locators[0]) {
+        const loc = result.locators[0];
+        if (loc.method.includes('TestId')) bestCode = `driver.find_element(By.CSS_SELECTOR, "[data-testid='${loc.matchedAttr.split('"')[1]}']")`;
+        else if (loc.id) bestCode = `driver.find_element(By.ID, "${el.id}")`;
+        else bestCode = `driver.find_element(By.CSS_SELECTOR, "${bestCode.replace("page.locator('", "").replace("')", "")}")`;
+      } else if (fw === 'cypress' && result.locators[0]) {
+        const loc = result.locators[0];
+        if (loc.method.includes('TestId')) bestCode = `cy.get('[data-testid="${loc.matchedAttr.split('"')[1]}"]')`;
+        else if (loc.id) bestCode = `cy.get('#${el.id}')`;
+        else bestCode = `cy.get('${bestCode.replace("page.locator('", "").replace("')", "")}')`;
       }
-    }
+
+      if (bestCode) {
+        if (navigator.clipboard && navigator.clipboard.writeText) {
+          navigator.clipboard.writeText(bestCode).then(() => {
+            showToast(bestCode);
+          }).catch(() => {
+            showToast(bestCode);
+          });
+        } else {
+          showToast(bestCode);
+        }
+      }
+    });
 
     // Flash the overlay green
     if (overlay) {
-      overlay.style.background = 'rgba(0,255,157,0.25)';
+      overlay.style.background = 'rgba(58, 223, 250, 0.25)';
       setTimeout(() => {
-        if (overlay) overlay.style.background = 'rgba(0,255,157,0.08)';
+        if (overlay) overlay.style.background = 'rgba(58, 223, 250, 0.05)';
       }, 300);
     }
 
-    // Send to extension
-    chrome.runtime.sendMessage({ type: 'ELEMENT_PICKED', data: result });
+    // Send to extension with context-invalidation safety
+    try {
+      if (chrome.runtime && chrome.runtime.id) {
+        chrome.runtime.sendMessage({ type: 'ELEMENT_PICKED', data: result });
+      }
+    } catch (err) {
+      if (err.message.includes('context invalidated')) {
+        console.warn('[LocatorLens] Extension context invalidated. Please refresh the page.');
+        stopInspect(); // Cleanly remove UI
+      }
+    }
   }
 
   function onKeyDown(e) {
@@ -832,11 +987,17 @@
   function stopInspect() {
     isInspecting = false;
     document.body.classList.remove('ll-inspecting');
-    removeOverlay();
+    
+    // Total Decommission: Remove all tracking listeners
     document.removeEventListener('mouseover', onMouseOver, true);
     document.removeEventListener('click', onClick, true);
     document.removeEventListener('keydown', onKeyDown, true);
+    
+    removeOverlay();
     hoveredEl = null;
+    lastRightClickedEl = null;
+    
+    console.log('[LocatorLens] Inspection Deactivated.');
   }
 
   // ── Message listener ───────────────────────────────────────────────────────
@@ -849,25 +1010,48 @@
       const target = lastRightClickedEl || document.body;
       const result = generateLocators(target);
 
-      // Copy best locator to clipboard
-      const bestCode = result.locators[0] ? result.locators[0].code : '';
-      if (bestCode) {
-        navigator.clipboard.writeText(bestCode).then(() => {
-          // Visual confirmation: briefly flash the element
-          const origOutline = target.style.outline;
-          const origTransition = target.style.transition;
-          target.style.transition = 'outline 0.1s';
-          target.style.outline = '3px solid #00ff9d';
-          setTimeout(() => {
-            target.style.outline = origOutline;
-            target.style.transition = origTransition;
-          }, 800);
-        }).catch(() => { });
-      }
+      chrome.storage.local.get('framework', (res) => {
+        const fw = res.framework || 'playwright';
+        let bestCode = result.locators[0] ? result.locators[0].code : '';
 
-      // Also update the popup with the full results
-      chrome.runtime.sendMessage({ type: 'ELEMENT_PICKED', data: result });
-      sendResponse({ ok: true, locator: bestCode });
+        // Context Menu Framework Translation
+        if (fw === 'selenium' && result.locators[0]) {
+          const loc = result.locators[0];
+          if (loc.method.includes('TestId')) bestCode = `driver.find_element(By.CSS_SELECTOR, "[data-testid='${loc.matchedAttr.split('"')[1]}']")`;
+          else if (loc.id) bestCode = `driver.find_element(By.ID, "${target.id}")`;
+          else bestCode = `driver.find_element(By.CSS_SELECTOR, "${bestCode.replace("page.locator('", "").replace("')", "")}")`;
+        } else if (fw === 'cypress' && result.locators[0]) {
+          const loc = result.locators[0];
+          if (loc.method.includes('TestId')) bestCode = `cy.get('[data-testid="${loc.matchedAttr.split('"')[1]}"]')`;
+          else if (loc.id) bestCode = `cy.get('#${target.id}')`;
+          else bestCode = `cy.get('${bestCode.replace("page.locator('", "").replace("')", "")}')`;
+        }
+
+        if (bestCode) {
+          navigator.clipboard.writeText(bestCode).then(() => {
+            // Visual confirmation: briefly flash the element
+            const origOutline = target.style.outline;
+            const origTransition = target.style.transition;
+            target.style.transition = 'outline 0.1s';
+            target.style.outline = '3px solid #00ff9d';
+            setTimeout(() => {
+              target.style.outline = origOutline;
+              target.style.transition = origTransition;
+            }, 800);
+          }).catch(() => { });
+        }
+
+        // ONLY update the extension UI if we are actually in Inspect Mode
+        if (isInspecting) {
+          try {
+            if (chrome.runtime && chrome.runtime.id) {
+              chrome.runtime.sendMessage({ type: 'ELEMENT_PICKED', data: result });
+            }
+          } catch (e) { }
+        }
+      });
+      
+      sendResponse({ ok: true });
       return true;
     }
   });
