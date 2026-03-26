@@ -87,7 +87,9 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
       if (!tabs[0]) return;
       const tabId = tabs[0].id;
       inspectTabs.delete(tabId);
-      chrome.tabs.sendMessage(tabId, { type: 'STOP_INSPECT' });
+      chrome.tabs.sendMessage(tabId, { type: 'STOP_INSPECT' }, () => {
+        void chrome.runtime.lastError;
+      });
       relayToSidePanel({ type: 'STOP_INSPECT' });
     });
   }

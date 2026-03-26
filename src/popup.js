@@ -36,8 +36,14 @@ function openPanel() {
   const txt = btn.querySelectorAll('span')[1];
   
   if (txt && txt.textContent.includes('Close')) {
-    chrome.runtime.sendMessage({ type: 'CLOSE_SIDE_PANEL' });
-    txt.textContent = 'Open Results Panel';
+    // In Firefox, we can actually close it
+    if (typeof browser !== 'undefined' && browser.sidebarAction && browser.sidebarAction.close) {
+      chrome.runtime.sendMessage({ type: 'CLOSE_SIDE_PANEL' });
+      txt.textContent = 'Open Results Panel';
+    } else {
+      // In Chrome, we can only remind the user
+      alert('Chrome does not support closing the Side Panel programmatically yet! Please use the sidebar "X" or the browser toggle button.');
+    }
   } else {
     chrome.runtime.sendMessage({ type: 'OPEN_SIDE_PANEL' });
     if (txt) txt.textContent = 'Close Result Panel';
