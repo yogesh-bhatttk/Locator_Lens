@@ -1,90 +1,71 @@
-# 🎯 LocatorLens: Playwright Tool (v1.1.0)
+# 🎯 LocatorLens: Lumina Cyber HUD (v1.5.0)
 
 [![Chrome](https://img.shields.io/badge/Chrome-Ready-green?logo=google-chrome&logoColor=white)]()
 [![Firefox](https://img.shields.io/badge/Firefox-Ready-orange?logo=firefox-browser&logoColor=white)]()
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
-[![GitHub Repository](https://img.shields.io/badge/GitHub-Locator_Lens-blue?logo=github)](https://github.com/yogesh-bhatttk/Locator_Lens)
 
-**LocatorLens** is a professional browser inspector purpose-built for **Playwright** automation engineers. It helps you instantly find the most stable, semantic locators for any element on any webpage.
-
----
-
-## 📽 Features
-- **🎯 Ranked Locators**: Instantly see `getByTestId()`, `getByRole()`, `getByLabel()`, and more, ranked by stability.
-- **🛡 Stability Guard**: Automatically flags fragile CSS selectors or auto-generated IDs and tells you *why* to avoid them.
-- **🎮 Continuous Inspection**: Toggle "Inspect Mode" once and capture multiple elements in sequence.
-- **🛠 Code Explanations**: Deep-dive into *why* each locator was suggested based on Playwright best practices.
-- **🚀 One-Click Copy**: Auto-copies the full Playwright command (`await page.getByRole(...)`) to your clipboard.
-- **🖥 Cross-Browser**: Works flawlessly on Chrome, Edge, Brave, and Firefox.
+**LocatorLens** is a next-generation, high-fidelity browser inspector for modern automation engineers. Featuring the **Lumina Cyber HUD**, it provides real-time, multi-framework locator generation with deep-trace "X-Ray" vision for even the most complex web applications.
 
 ---
 
-## 🚀 Quick Start (Local Development)
+## 📽 Key Features
 
-### **1. Chrome, Edge, or Brave**
-1.  Download or `git clone` this repository.
-2.  Open your browser and navigate to `chrome://extensions`.
-3.  Enable **"Developer mode"** (top-right).
-4.  Click **"Load unpacked"** and select the project folder.
+### 1. 🌌 Lumina Cyber HUD
+Experience a tactical-grade developer interface with holographic animations, scanline textures, and a high-focus obsidian/cyan aesthetic. 
 
-### 🛠️ Local Development (Zero Warnings)
+### 2. 🛰️ Universal Framework Matrix
+Switch between **Playwright**, **Selenium (Python/Java/C#)**, and **Cypress** on-the-fly. The HUD instantly translates semantic locators into the correct syntax for your chosen framework.
 
-To prevent "Unrecognized Key" warnings in the extension dashboard, load the specialized distribution folders:
+### 3. 🧬 Shadow DOM X-Ray Vision
+Pierce the veil of encapsulated Web Components. Our **Deep-Trace Engine** automatically identifies Shadow Roots and provides "Shadow-aware" locators that work where others fail.
 
-- **Chrome / Edge / Brave**: Load the `dist-chrome` folder as an unpacked extension.
-- **Firefox**: Load `manifest.json` from the `dist-firefox` folder as a temporary add-on.
+### 4. 🕹️ Precision Navigation
+Use **Arrow Up/Down** keyboard shortcuts to traverse the DOM tree. Our "Boundary Jumper" logic allows you to navigate in and out of Shadow DOM layers seamlessly.
 
-Both folders are synced to the `src/` directory—edit once, see changes everywhere!
+### 5. 🛡️ Stability Intelligence
+- **Ranked Locators**: Automatically prioritizes `getByTestId()`, `getByRole()`, and `getByLabel()`.
+- **Anti-Ghost Guard**: Total event-listener decommissioning ensures zero "ghost-hover" effects when inspection is stopped.
+- **Auto-Sync**: Real-time state synchronization between Popup, Sidepanel, and Page.
 
-### **2. Firefox**
+---
+
+## 🚀 Quick Start (Masterpiece Edition)
+
+### **1. Initial Setup (Zero-Warning Mode)**
+To ensure you have 0 warnings in your browser, run the setup script for your target platform:
+- **Windows**: Open terminal in project root and run `setup.bat chrome` (or `firefox`)
+- **Mac/Linux**: Open terminal in project root and run `./setup.sh chrome` (or `firefox`)
+
+### **2. Chrome, Edge, or Brave**
+1.  Open your browser and navigate to `chrome://extensions`.
+2.  Enable **"Developer mode"** (top-right).
+3.  Click **"Load unpacked"** and select the **root project folder**.
+
+### **3. Firefox**
 1.  Navigate to `about:debugging#/runtime/this-firefox`.
 2.  Click **"Load Temporary Add-on..."**.
-3.  Select the **`manifest.json`** file in the project folder.
+3.  Select the **`manifest.json`** file in the root project folder.
 
 ---
 
 ## 📁 Project Structure
 
 ```text
-├── manifests/          # Official Store versions (Chrome & Firefox)
 ├── src/                # Core JavaScript and HTML logic
-│   ├── background.js   # Cross-browser Service Worker
-│   ├── content.js      # Page injection & locator generation
-│   ├── sidepanel.js    # Inspector UI & logic
-│   └── sidepanel.html  # Modern UI sidebar
-├── icons/              # High-res professional branding
-└── manifest.json       # Universal manifest (Local Dev)
+│   ├── background.js   # Master Relay & Navigation Shield
+│   ├── content.js      # Deep-Trace X-Ray Engine & Page Injection
+│   ├── sidepanel.js    # Multi-Framework Translator & HUD Logic
+│   └── sidepanel.html  # Lumina Cyber HUD UI (CSS/HTML)
+├── dist-chrome/        # Chrome-optimized build (Junctioned)
+├── dist-firefox/       # Firefox-optimized build (Junctioned)
+└── icons/              # High-fidelity Lumina branding icons
 ```
 
 ---
 
-## 📦 Store Submission
-
-To prepare the extension for official store release, we provide strict, pre-configured manifests in the **`manifests/`** folder:
-
-### **For Chrome Web Store**
-- Copy `manifests/manifest.chrome.json` to the root as `manifest.json`.
-- Zip the `manifest.json`, `src/`, and `icons/` folders.
-
-### **For Firefox Add-ons (AMO)**
-- Copy `manifests/manifest.firefox.json` to the root as `manifest.json`.
-- Zip the `manifest.json`, `src/`, and `icons/` folders.
-
----
-
-## 👨‍💻 Contributing
-Feel free to open issues or submit pull requests to help make **LocatorLens** the best Playwright inspector in the world!
+## 👨‍💻 Engineering Insights
+LocatorLens follows a **Semantic-First** philosophy. It ignores brittle XPaths and CSS coordinates whenever possible, focusing instead on the underlying **Accessibility Tree** to ensure your tests survive UI redesigns.
 
 🔗 **GitHub Repository**: [https://github.com/yogesh-bhatttk/Locator_Lens](https://github.com/yogesh-bhatttk/Locator_Lens)
 
-### **Current Roadmap:**
-- [ ] AI-powered locator refinement (coming soon)
-- [ ] Multiple framework support (Cypress, Selenium)
-- [ ] Custom `testId` attribute configuration
-
----
-
-## 📄 License
-This project is licensed under the **MIT License**.
-
-Developed with ❤️ for the Playwright community.
+Developed with ⚡️ and 🧠 for the global automation community.

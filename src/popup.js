@@ -69,4 +69,16 @@ document.addEventListener('DOMContentLoaded', () => {
       if (txt) txt.textContent = 'Close Result Panel';
     }
   });
+
+  // Real-time sync with background broadcasts (e.g. from page refresh)
+  chrome.runtime.onMessage.addListener((msg) => {
+    if (msg.type === 'START_INSPECT') {
+      isInspecting = true;
+      updateInspectUI();
+    }
+    if (msg.type === 'STOP_INSPECT') {
+      isInspecting = false;
+      updateInspectUI();
+    }
+  });
 });

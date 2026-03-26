@@ -1,7 +1,6 @@
-// LocatorLens – sidepanel.js
-// Runs in the persistent Chrome Side Panel
-
 let isInspecting = false;
+let currentFramework = 'playwright';
+let lastResultData = null;
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 function esc(s) {
@@ -11,10 +10,11 @@ function esc(s) {
 
 function hl(code) {
   return esc(code)
-    .replace(/\b(await|const|let)\b/g, '<span class="kw">$1</span>')
-    .replace(/\b(page)\b/g, '<span class="kw">$1</span>')
-    .replace(/\b(getByRole|getByLabel|getByPlaceholder|getByText|getByAltText|getByTitle|getByTestId|locator|click|fill|check|selectOption|expect)\b/g, '<span class="fn">$1</span>')
-    .replace(/(&#39;[^<]*?&#39;|&quot;[^<]*?&quot;)/g, '<span class="str">$1</span>');
+    .replace(/\b(await|const|let|var|function|return|if|else|for|while|try|catch|By|driver|cy|By\.CSS_SELECTOR|By\.ID|By\.NAME|By\.XPATH)\b/g, '<span class="kw">$1</span>')
+    .replace(/\b(page|browser|context|expect|test|find_element|get|contains|find_elements|shadow|shadowRoot)\b/g, '<span class="kw">$1</span>')
+    .replace(/\b(getByRole|getByLabel|getByPlaceholder|getByText|getByAltText|getByTitle|getByTestId|locator|click|fill|check|selectOption|press|type|hover|focus|blur|waitFor|toBeVisible|toHaveText|toBeChecked)\b/g, '<span class="fn">$1</span>')
+    .replace(/(&#39;[^<]*?&#39;|&quot;[^<]*?&quot;)/g, '<span class="str">$1</span>')
+    .replace(/([0-9]+)/g, '<span class="num">$1</span>');
 }
 
 function pillClass(s) {
@@ -82,15 +82,81 @@ function updateInspectUI() {
   }
 }
 
+// ── Format Translator ──────────────────────────────────────────────────────────
+function formatForFramework(loc, framework) {
+  const method = loc.method || '';
+  const code = loc.code || '';
+  const attr = loc.matchedAttr || '';
+  const action = loc.fullCode ? loc.fullCode.split('.').pop() : 'click()';
+
+  if (framework === 'playwright') return { code, fullCode: loc.fullCode };
+
+  // 🧪 Selenium Translator (Universal Style)
+  if (framework === 'selenium') {
+    let selCode = '';
+    if (method.includes('TestId')) {
+      const id = attr.split('"')[1] || '';
+      selCode = `driver.find_element(By.CSS_SELECTOR, "[data-testid='${id}']")`;
+    } else if (method.includes('getByRole')) {
+      const match = code.match(/getByRole\('([^']+)'(?:, \{ name: '([^']+)' \})?\)/);
+      if (match) {
+        const role = match[1];
+        const name = match[2];
+        selCode = name 
+          ? `driver.find_element(By.CSS_SELECTOR, "${role}[aria-label='${name}'], ${role}[name='${name}']")`
+          : `driver.find_element(By.CSS_SELECTOR, "${role}")`;
+      }
+    } else if (method.includes('id')) {
+      const id = attr.split('"')[1] || '';
+      selCode = `driver.find_element(By.ID, "${id}")`;
+    } else if (method.includes('name')) {
+      const name = attr.split('"')[1] || '';
+      selCode = `driver.find_element(By.NAME, "${name}")`;
+    } else if (method.includes('Text')) {
+      const txt = attr.split('"')[1] || '';
+      selCode = `driver.find_element(By.XPATH, "//*[contains(text(), '${txt}')]")`;
+    } else {
+      selCode = `driver.find_element(By.CSS_SELECTOR, "${attr.replace(/'/g, "\\'")}")`;
+    }
+    return { code: selCode, fullCode: `${selCode}.${action.replace('click()', 'click')}` };
+  }
+
+  // 🌲 Cypress Translator
+  if (framework === 'cypress') {
+    let cyCode = '';
+    if (method.includes('TestId')) {
+      const id = attr.split('"')[1] || '';
+      cyCode = `cy.get('[data-testid="${id}"]')`;
+    } else if (method.includes('getByRole')) {
+      const match = code.match(/getByRole\('([^']+)'(?:, \{ name: '([^']+)' \})?\)/);
+      if (match) {
+        const role = match[1];
+        const name = match[2];
+        cyCode = name ? `cy.get('${role}').contains('${name}')` : `cy.get('${role}')`;
+      }
+    } else if (method.includes('id')) {
+      cyCode = `cy.get('#${attr.split('"')[1]}')`;
+    } else if (method.includes('Text')) {
+      cyCode = `cy.contains('${attr.split('"')[1]}')`;
+    } else {
+      cyCode = `cy.get('${attr.replace(/'/g, "\\'")}')`;
+    }
+    return { code: cyCode, fullCode: `${cyCode}.${action.replace('click()', 'click()')}` };
+  }
+
+  return { code, fullCode: loc.fullCode };
+}
+
 // ── Render results ─────────────────────────────────────────────────────────────
 function renderResults(data) {
   if (!data) return;
+  lastResultData = data;
   const { elementData: el, locators, avoidList, proTip } = data;
 
   document.getElementById('idleState').style.display = 'none';
   document.getElementById('resultsState').style.display = '';
 
-  // ── Element bar ──
+  // ── Element bar ── (Keep as is)
   const elBar = document.getElementById('elBar');
   const chips = [];
   if (el.tag) chips.push(`<span class="el-chip"><span class="k">&lt;</span><span class="v">${esc(el.tag)}</span><span class="k">&gt;</span></span>`);
@@ -101,6 +167,12 @@ function renderResults(data) {
   if (el.ariaLabel) chips.push(`<span class="el-chip"><span class="k">aria: </span><span class="v">${esc(el.ariaLabel.slice(0, 25))}</span></span>`);
   if (el.placeholder) chips.push(`<span class="el-chip"><span class="k">ph: </span><span class="v">${esc(el.placeholder.slice(0, 25))}</span></span>`);
   if (el.hasUnstableClasses) chips.push(`<span class="el-chip"><span class="k">classes: </span><span class="v warn">⚠ auto-generated</span></span>`);
+  
+  if (el.isInShadow) {
+    chips.push(`<span class="el-chip shadow">🧬 SHADOW</span>`);
+    if (el.shadowHost) chips.push(`<span class="el-chip shadow"><span class="k">host: </span>${esc(el.shadowHost)}</span>`);
+  }
+  
   elBar.innerHTML = chips.join('');
 
   // ── Locator cards ──
@@ -108,8 +180,10 @@ function renderResults(data) {
   container.innerHTML = locators.map((loc, i) => {
     const rc = rankClass(loc.rank);
     const delayStyle = `animation-delay:${i * 0.06}s`;
-    const code = loc.code || '';
-    const fullCode = loc.fullCode || code;
+    
+    // Translate based on chosen framework
+    const { code, fullCode } = formatForFramework(loc, currentFramework);
+    
     return `
       <div class="card ${rc}" style="${delayStyle}">
         <div class="card-head">
@@ -228,6 +302,27 @@ document.addEventListener('DOMContentLoaded', () => {
     chrome.storage.local.get('lastElement', (result) => {
       if (result && result.lastElement) {
         renderResults(result.lastElement);
+      }
+    });
+  }
+
+  // Framework selection
+  const fwSelect = document.getElementById('framework-select');
+  fwSelect.addEventListener('change', (e) => {
+    currentFramework = e.target.value;
+    if (chrome.storage && chrome.storage.local) {
+      chrome.storage.local.set({ framework: currentFramework });
+    }
+    // Hot-swap re-render
+    if (lastResultData) renderResults(lastResultData);
+  });
+
+  // Restore framework preference
+  if (chrome.storage && chrome.storage.local) {
+    chrome.storage.local.get('framework', (r) => {
+      if (r && r.framework) {
+        currentFramework = r.framework;
+        fwSelect.value = currentFramework;
       }
     });
   }
