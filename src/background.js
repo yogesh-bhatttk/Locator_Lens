@@ -80,7 +80,6 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
         }
       });
     });
-    return true;
   }
 
   if (msg.type === 'STOP_INSPECT') {
@@ -91,7 +90,6 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
       chrome.tabs.sendMessage(tabId, { type: 'STOP_INSPECT' });
       relayToSidePanel({ type: 'STOP_INSPECT' });
     });
-    return true;
   }
 
   // ELEMENT_PICKED: store + relay to side panel
@@ -100,7 +98,6 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
       chrome.storage.local.set({ lastElement: msg.data }); // local storage for cross-browser compatibility
     }
     relayToSidePanel({ type: 'ELEMENT_PICKED', data: msg.data });
-    return true;
   }
 
   // Popup / SidePanel checking inspect state
@@ -116,7 +113,6 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
     chrome.tabs.query({ active: true, currentWindow: true }, (tabs) => {
       if (tabs[0]) openSidePanel(tabs[0].windowId);
     });
-    return true;
   }
 
   // CLOSE_SIDE_PANEL: only works in Firefox
@@ -124,7 +120,6 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
     if (typeof browser !== 'undefined' && browser.sidebarAction && browser.sidebarAction.close) {
       browser.sidebarAction.close().catch(() => { });
     }
-    return true;
   }
 
   // Track panel open/close
@@ -139,7 +134,6 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
   
   if (msg.type === 'GET_PANEL_STATE') {
     sendResponse({ active: activePanels.has('global') });
-    return true;
   }
 });
 
