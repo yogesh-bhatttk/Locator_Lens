@@ -9,3 +9,8 @@ dist-firefox/
 npm-debug.log*
 yarn-debug.log*
 yarn-error.log*
+
+# Private Workspaces & Config
+.agent/
+.agents/
+MISSION_SELECTOR_LAB.md

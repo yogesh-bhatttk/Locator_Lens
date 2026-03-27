@@ -263,6 +263,26 @@ chrome.runtime.onMessage.addListener((msg) => {
     isInspecting = true;
     updateInspectUI();
   }
+  if (msg.type === 'LAB_STATUS_UPDATE') {
+    const statusEl = document.getElementById('lab-status');
+    const countEl = document.getElementById('lab-count');
+    if (msg.count > 0) {
+      statusEl.textContent = `Identification successful. Found ${msg.count} match(es).`;
+      statusEl.className = 'lab-status success';
+      countEl.textContent = `(${msg.count})`;
+      countEl.style.display = 'inline';
+    } else {
+      statusEl.textContent = 'No matches found in the current DOM.';
+      statusEl.className = 'lab-status err';
+      countEl.style.display = 'none';
+    }
+  }
+  if (msg.type === 'LAB_ERROR') {
+    const statusEl = document.getElementById('lab-status');
+    statusEl.textContent = `Invalid Selector: ${msg.error}`;
+    statusEl.className = 'lab-status err';
+    document.getElementById('lab-count').style.display = 'none';
+  }
 });
 
 // ── DOMContentLoaded: bind all events + restore state ────────────────────────
@@ -289,7 +309,13 @@ document.addEventListener('DOMContentLoaded', () => {
     document.getElementById('idleState').style.display = '';
   });
 
-  // Check inspect state
+  // ── STARTUP: Force Absolute Reset ──
+  // This ensures that if the extension reloaded, any old listeners on the page are killed.
+  chrome.runtime.sendMessage({ type: 'STOP_INSPECT' });
+  isInspecting = false;
+  updateInspectUI();
+
+  // Check inspect state (verify if we should actually be active)
   chrome.runtime.sendMessage({ type: 'GET_INSPECT_STATE' }, (res) => {
     if (res && res.active) {
       isInspecting = true;
@@ -326,6 +352,30 @@ document.addEventListener('DOMContentLoaded', () => {
       }
     });
   }
+
+  // ── Selector Lab Events ──
+  const labInput = document.getElementById('lab-input');
+  const labValidateBtn = document.getElementById('lab-validate-btn');
+  const labClearBtn = document.getElementById('lab-clear-btn');
+
+  const runValidation = () => {
+    const selector = labInput.value.trim();
+    if (!selector) return;
+    chrome.runtime.sendMessage({ type: 'LAB_VALIDATE', selector });
+  };
+
+  labValidateBtn.addEventListener('click', runValidation);
+  labInput.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter') runValidation();
+  });
+
+  labClearBtn.addEventListener('click', () => {
+    labInput.value = '';
+    document.getElementById('lab-status').textContent = 'Ready to validate...';
+    document.getElementById('lab-status').className = 'lab-status';
+    document.getElementById('lab-count').style.display = 'none';
+    chrome.runtime.sendMessage({ type: 'LAB_CLEAR' });
+  });
 
   // Tell background/popup I am open!
   chrome.runtime.sendMessage({ type: 'PANEL_HEARTBEAT' });
