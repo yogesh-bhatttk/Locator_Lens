@@ -56,6 +56,14 @@
         100% { opacity: 1; box-shadow: 0 0 4px rgba(58, 223, 250, 0.3), inset 0 0 10px rgba(58, 223, 250, 0.1); }
       }
 
+      .ll-lab-highlight {
+        outline: 4px solid #ff00ff !important;
+        outline-offset: -4px !important;
+        background: rgba(255, 0, 255, 0.15) !important;
+        box-shadow: 0 0 12px rgba(255, 0, 255, 0.4) !important;
+        z-index: 2147483646 !important;
+      }
+
       #ll-tooltip {
         position: fixed !important;
         z-index: 2147483647 !important;
@@ -1000,13 +1008,21 @@
     console.log('[LocatorLens] Inspection Deactivated.');
   }
 
+  // 🛡️ INITIALIZATION: Force Neutral State
+  // Ensure we don't start in an active state on page load/script injection
+  stopInspect();
+
   // ── Message listener ───────────────────────────────────────────────────────
   chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
-    if (msg.type === 'START_INSPECT') startInspect();
-    if (msg.type === 'STOP_INSPECT') stopInspect();
-
+    if (msg.type === 'START_INSPECT') {
+      startInspect();
+      sendResponse({ ok: true });
+    } else if (msg.type === 'STOP_INSPECT') {
+      stopInspect();
+      sendResponse({ ok: true });
+    }
     // Handle context menu quick-copy
-    if (msg.type === 'CONTEXT_MENU_COPY') {
+    else if (msg.type === 'CONTEXT_MENU_COPY') {
       const target = lastRightClickedEl || document.body;
       const result = generateLocators(target);
 
@@ -1014,7 +1030,6 @@
         const fw = res.framework || 'playwright';
         let bestCode = result.locators[0] ? result.locators[0].code : '';
 
-        // Context Menu Framework Translation
         if (fw === 'selenium' && result.locators[0]) {
           const loc = result.locators[0];
           if (loc.method.includes('TestId')) bestCode = `driver.find_element(By.CSS_SELECTOR, "[data-testid='${loc.matchedAttr.split('"')[1]}']")`;
@@ -1029,7 +1044,6 @@
 
         if (bestCode) {
           navigator.clipboard.writeText(bestCode).then(() => {
-            // Visual confirmation: briefly flash the element
             const origOutline = target.style.outline;
             const origTransition = target.style.transition;
             target.style.transition = 'outline 0.1s';
@@ -1041,7 +1055,6 @@
           }).catch(() => { });
         }
 
-        // ONLY update the extension UI if we are actually in Inspect Mode
         if (isInspecting) {
           try {
             if (chrome.runtime && chrome.runtime.id) {
@@ -1049,11 +1062,42 @@
             }
           } catch (e) { }
         }
+        sendResponse({ ok: true });
       });
-      
+      return true; // Asynchronous response needed for storage.get
+    }
+
+    // 🔬 SELECTOR LAB: Validation Engine
+    else if (msg.type === 'LAB_VALIDATE') {
+      const { selector } = msg;
+      let matches = [];
+      document.querySelectorAll('.ll-lab-highlight').forEach(el => el.classList.remove('ll-lab-highlight'));
+
+      try {
+        if (selector.startsWith('//') || selector.startsWith('(')) {
+          const result = document.evaluate(selector, document, null, XPathResult.ORDERED_NODE_SNAPSHOT_TYPE, null);
+          for (let i = 0; i < result.snapshotLength; i++) {
+            matches.push(result.snapshotItem(i));
+          }
+        } else {
+          matches = Array.from(document.querySelectorAll(selector));
+        }
+
+        matches.forEach(el => {
+          if (el.nodeType === Node.ELEMENT_NODE) el.classList.add('ll-lab-highlight');
+        });
+
+        chrome.runtime.sendMessage({ type: 'LAB_STATUS_UPDATE', count: matches.length });
+        sendResponse({ ok: true, count: matches.length });
+      } catch (err) {
+        chrome.runtime.sendMessage({ type: 'LAB_ERROR', error: err.message });
+        sendResponse({ ok: false, error: err.message });
+      }
+    }
+
+    else if (msg.type === 'LAB_CLEAR') {
+      document.querySelectorAll('.ll-lab-highlight').forEach(el => el.classList.remove('ll-lab-highlight'));
       sendResponse({ ok: true });
-      return true;
     }
   });
-
 })();

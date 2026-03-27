@@ -585,6 +585,75 @@
       border-color: var(--error);
       color: var(--error);
     }
+    /* ── Selector Lab (New Module) ── */
+    .selector-lab {
+      margin: 0 18px 16px;
+      padding: 12px;
+      background: var(--surf-low);
+      border: 1px solid var(--border);
+      border-radius: 4px;
+      border-left: 3px solid var(--tertiary); /* Distinct from primary cyan */
+    }
+
+    .lab-header {
+      font-size: 10px;
+      font-weight: 700;
+      text-transform: uppercase;
+      letter-spacing: 0.1em;
+      color: var(--tertiary);
+      margin-bottom: 8px;
+      display: flex;
+      justify-content: space-between;
+    }
+
+    .lab-input-container {
+      display: flex;
+      gap: 6px;
+    }
+
+    .lab-input-container input {
+      flex: 1;
+      background: var(--bg);
+      border: 1px solid var(--border);
+      outline: none;
+      color: var(--text);
+      font-family: 'JetBrains Mono', monospace;
+      font-size: 11px;
+      padding: 6px 10px;
+      border-radius: 2px;
+    }
+
+    .lab-input-container input:focus {
+      border-color: var(--tertiary);
+    }
+
+    .lab-btn {
+      background: var(--surf2);
+      border: 1px solid var(--border);
+      color: var(--text);
+      padding: 0 10px;
+      border-radius: 2px;
+      cursor: pointer;
+      font-size: 14px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+    }
+
+    .lab-btn:hover {
+      background: var(--tertiary);
+      color: var(--bg);
+    }
+
+    .lab-status {
+      margin-top: 6px;
+      font-size: 9px;
+      color: var(--muted);
+      font-style: italic;
+    }
+
+    .lab-status.success { color: #50fa7b; }
+    .lab-status.err { color: var(--error); }
   </style>
 </head>
 
@@ -612,6 +681,21 @@
         <span id="btnText">Start Inspecting</span>
       </button>
     </div>
+
+    <!-- SELECTOR LAB MODULE -->
+    <div class="selector-lab">
+      <div class="lab-header">
+        <span>LAB 🔬</span>
+        <span id="lab-count" style="text-transform: none; display:none;"></span>
+      </div>
+      <div class="lab-input-container">
+        <input type="text" id="lab-input" placeholder="Type CSS or XPath..." autocomplete="off">
+        <button class="lab-btn" id="lab-validate-btn" title="Validate Selector">🔍</button>
+        <button class="lab-btn" id="lab-clear-btn" title="Clear Highlights">❌</button>
+      </div>
+      <div id="lab-status" class="lab-status">Ready to validate...</div>
+    </div>
+
     <div class="hint-row" id="hintRow">
       SELECT TARGET · <span>▲▼ ARROW TO NAVIGATE</span> · <span>ESC TO ABORT</span>
     </div>
