@@ -1,5 +1,12 @@
 let isInspecting = false;
 let currentFramework = 'playwright';
+
+// ── Safe DOM renderer (avoids innerHTML for AMO compliance) ───────────────────
+function safeRender(el, html) {
+  el.textContent = '';
+  var doc = new DOMParser().parseFromString(html, 'text/html');
+  while (doc.body.firstChild) el.appendChild(doc.body.firstChild);
+}
 let lastResultData = null;
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
@@ -173,11 +180,11 @@ function renderResults(data) {
     if (el.shadowHost) chips.push(`<span class="el-chip shadow"><span class="k">host: </span>${esc(el.shadowHost)}</span>`);
   }
   
-  elBar.innerHTML = chips.join('');
+  safeRender(elBar, chips.join(''));
 
   // ── Locator cards ──
   const container = document.getElementById('cardsContainer');
-  container.innerHTML = locators.map((loc, i) => {
+  safeRender(container, locators.map((loc, i) => {
     const rc = rankClass(loc.rank);
     const delayStyle = `animation-delay:${i * 0.06}s`;
     
@@ -205,7 +212,7 @@ function renderResults(data) {
         </div>
         <div class="card-explain">${esc(loc.explanation || '')}</div>
       </div>`;
-  }).join('');
+  }).join(''));
 
   // ── Avoid section ──
   const avoidLabel = document.getElementById('avoidLabel');
@@ -213,13 +220,13 @@ function renderResults(data) {
   if (avoidList && avoidList.length > 0) {
     avoidLabel.style.display = '';
     avoidSec.style.display = '';
-    avoidSec.innerHTML = `
+    safeRender(avoidSec, `
       <div class="avoid-title">⚠️ Avoid these locators</div>
       ${avoidList.map(a => `
         <div class="avoid-row">
           <span class="avoid-x">✗</span>
           <div><span class="avoid-code">${esc(a.locator)}</span><br>${esc(a.reason)}</div>
-        </div>`).join('')}`;
+        </div>`).join('')}`);
   } else {
     avoidLabel.style.display = 'none';
     avoidSec.style.display = 'none';

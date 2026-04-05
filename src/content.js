@@ -246,10 +246,15 @@
     const cls = el.className && typeof el.className === 'string'
       ? '.' + el.className.trim().split(/\s+/)[0] : '';
 
-    tooltip.innerHTML = `
-      <span class="ll-tag">&lt;${tag}${id || cls}&gt;</span>
-      <div class="ll-hint">Click to analyze · ▲/▼ to navigate · Esc to stop</div>
-    `;
+    tooltip.textContent = '';
+    const ttTag = document.createElement('span');
+    ttTag.className = 'll-tag';
+    ttTag.textContent = '<' + tag + (id || cls) + '>';
+    tooltip.appendChild(ttTag);
+    const ttHint = document.createElement('div');
+    ttHint.className = 'll-hint';
+    ttHint.textContent = 'Click to analyze · ▲/▼ to navigate · Esc to stop';
+    tooltip.appendChild(ttHint);
 
     // Position tooltip: prefer below, fall back to above
     const TH = 52, TW = 300;
@@ -347,10 +352,20 @@
 
     const toast = document.createElement('div');
     toast.id = 'll-toast';
-    toast.innerHTML = `
-      <span class="ll-toast-icon">✅</span>
-      <span><span class="ll-toast-label">Copied: </span><span class="ll-toast-code">${locatorCode}</span></span>
-    `;
+    const toastIcon = document.createElement('span');
+    toastIcon.className = 'll-toast-icon';
+    toastIcon.textContent = '✅';
+    toast.appendChild(toastIcon);
+    const toastWrap = document.createElement('span');
+    const toastLabel = document.createElement('span');
+    toastLabel.className = 'll-toast-label';
+    toastLabel.textContent = 'Copied: ';
+    toastWrap.appendChild(toastLabel);
+    const toastCode = document.createElement('span');
+    toastCode.className = 'll-toast-code';
+    toastCode.textContent = locatorCode;
+    toastWrap.appendChild(toastCode);
+    toast.appendChild(toastWrap);
     document.body.appendChild(toast);
 
     // Auto-dismiss after 3s with fade-out
