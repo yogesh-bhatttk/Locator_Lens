@@ -194,12 +194,26 @@
     // ── Traversal Bar ──
     traversalBar = document.createElement('div');
     traversalBar.id = 'll-traversal-bar';
-    traversalBar.innerHTML = `
-      <span class="ll-trav-lbl">NAVIGATE</span>
-      <button id="ll-trav-parent">▲ Parent</button>
-      <button id="ll-trav-child">▼ Child</button>
-      <span class="ll-trav-hint">↑↓ keys</span>
-    `;
+    const lbl = document.createElement('span');
+    lbl.className = 'll-trav-lbl';
+    lbl.textContent = 'NAVIGATE';
+
+    const btnParent = document.createElement('button');
+    btnParent.id = 'll-trav-parent';
+    btnParent.textContent = '▲ Parent';
+
+    const btnChild = document.createElement('button');
+    btnChild.id = 'll-trav-child';
+    btnChild.textContent = '▼ Child';
+
+    const hint = document.createElement('span');
+    hint.className = 'll-trav-hint';
+    hint.textContent = '↑↓ keys';
+
+    traversalBar.appendChild(lbl);
+    traversalBar.appendChild(btnParent);
+    traversalBar.appendChild(btnChild);
+    traversalBar.appendChild(hint);
     document.body.appendChild(traversalBar);
 
     // Bind traversal button events
