@@ -1,6 +1,6 @@
 # Privacy Policy – LocatorLens
 
-**Last updated:** April 6, 2026
+**Last updated:** April 9, 2026
 
 ## Overview
 
@@ -33,7 +33,6 @@ LocatorLens requests the following permissions, all used strictly for local func
 | `activeTab` | Access the current tab's DOM for element inspection |
 | `scripting` | Inject the inspector script into the active page |
 | `storage` | Save user preferences locally |
-| `tabs` | Detect page navigation to reset inspector state |
 | `contextMenus` | Add right-click menu for quick inspection |
 | `sidePanel` | Display locator results in the browser side panel |
 | `host_permissions` | Enable inspection on any website |
