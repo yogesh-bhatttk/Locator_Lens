@@ -35,7 +35,6 @@ LocatorLens requests the following permissions, all used strictly for local func
 | `storage` | Save user preferences locally |
 | `contextMenus` | Add right-click menu for quick inspection |
 | `sidePanel` | Display locator results in the browser side panel |
-| `host_permissions` | Enable inspection on any website |
 
 ## Third-Party Services
 
