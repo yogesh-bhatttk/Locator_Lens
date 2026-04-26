@@ -958,6 +958,195 @@
     .tab-content.active {
       display: block;
     }
+
+    /* ── POM Builder ─────────────────────────────────────────────────────── */
+    .pom-fw-bar {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 5px;
+      padding: 10px 14px 0;
+    }
+    .pom-fw-chip {
+      font-size: 9px;
+      font-weight: 700;
+      text-transform: uppercase;
+      letter-spacing: 0.07em;
+      padding: 4px 9px;
+      border-radius: 3px;
+      border: 1px solid var(--border);
+      color: var(--muted);
+      cursor: pointer;
+      transition: all .18s;
+    }
+    .pom-fw-chip:hover { border-color: var(--primary); color: var(--primary); }
+    .pom-fw-chip.active { background: var(--primary); border-color: var(--primary); color: var(--bg); }
+
+    .pom-split {
+      display: flex;
+      gap: 0;
+      height: calc(100vh - 195px);
+      min-height: 300px;
+      margin-top: 10px;
+    }
+    .pom-list-panel {
+      width: 48%;
+      display: flex;
+      flex-direction: column;
+      border-right: 1px solid var(--border);
+      overflow: hidden;
+    }
+    .pom-preview-panel {
+      flex: 1;
+      display: flex;
+      flex-direction: column;
+      overflow: hidden;
+    }
+    .pom-panel-header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding: 6px 10px;
+      background: var(--surf-low);
+      border-bottom: 1px solid var(--border);
+      flex-shrink: 0;
+    }
+    .pom-panel-header span {
+      font-size: 9px;
+      font-weight: 700;
+      text-transform: uppercase;
+      letter-spacing: 0.1em;
+      color: var(--muted);
+    }
+    .pom-entries {
+      flex: 1;
+      overflow-y: auto;
+      padding: 6px;
+    }
+    .pom-empty {
+      padding: 28px 14px;
+      text-align: center;
+      font-size: 11px;
+      color: var(--muted);
+      line-height: 1.7;
+    }
+    .pom-entry {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      padding: 7px 8px;
+      border-radius: 4px;
+      border: 1px solid var(--border);
+      margin-bottom: 5px;
+      background: var(--surf-low);
+      cursor: default;
+      transition: border-color .15s;
+    }
+    .pom-entry:hover { border-color: var(--primary); }
+    .pom-entry.drag-over { border-color: var(--primary); background: var(--surf2); }
+    .pom-drag-handle {
+      color: var(--muted);
+      font-size: 13px;
+      cursor: grab;
+      flex-shrink: 0;
+      user-select: none;
+      line-height: 1;
+    }
+    .pom-drag-handle:active { cursor: grabbing; }
+    .pom-entry-body { flex: 1; min-width: 0; }
+    .pom-entry-name-input {
+      background: transparent;
+      border: none;
+      border-bottom: 1px dashed var(--border);
+      color: var(--primary);
+      font-size: 11px;
+      font-weight: 700;
+      font-family: 'JetBrains Mono', monospace;
+      width: 100%;
+      padding: 0 2px;
+      outline: none;
+      cursor: text;
+    }
+    .pom-entry-name-input:focus { border-bottom-color: var(--primary); }
+    .pom-entry-locator {
+      font-size: 9px;
+      color: var(--muted);
+      margin-top: 3px;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+    .pom-entry-page {
+      font-size: 8px;
+      color: var(--muted);
+      opacity: 0.6;
+      margin-top: 1px;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+    .pom-health {
+      font-size: 8px;
+      font-weight: 700;
+      padding: 2px 5px;
+      border-radius: 2px;
+      flex-shrink: 0;
+      font-family: 'JetBrains Mono', monospace;
+      min-width: 34px;
+      text-align: center;
+    }
+    .pom-health.live    { color: #50fa7b; background: rgba(80,250,123,.1); border: 1px solid rgba(80,250,123,.3); }
+    .pom-health.gone    { color: var(--error); background: rgba(255,113,108,.1); border: 1px solid rgba(255,113,108,.3); }
+    .pom-health.multi   { color: #ffb86c; background: rgba(255,184,108,.1); border: 1px solid rgba(255,184,108,.3); }
+    .pom-health.pending { color: var(--muted); background: var(--surf-low); border: 1px solid var(--border); }
+    .pom-remove-btn {
+      background: transparent;
+      border: none;
+      color: var(--muted);
+      font-size: 13px;
+      cursor: pointer;
+      padding: 0 2px;
+      flex-shrink: 0;
+      line-height: 1;
+    }
+    .pom-remove-btn:hover { color: var(--error); }
+
+    .pom-code-area {
+      flex: 1;
+      background: var(--surf-low);
+      color: var(--fg);
+      border: none;
+      font-family: 'JetBrains Mono', 'Fira Code', monospace;
+      font-size: 9.5px;
+      line-height: 1.6;
+      padding: 10px 12px;
+      resize: none;
+      outline: none;
+      overflow-y: auto;
+    }
+    .pom-action-row {
+      display: flex;
+      gap: 6px;
+      padding: 8px 10px;
+      border-top: 1px solid var(--border);
+      flex-shrink: 0;
+      background: var(--surf-low);
+    }
+    .pom-action-row .inspect-btn {
+      flex: 1;
+      margin: 0;
+      font-size: 10px;
+      padding: 7px 0;
+    }
+    .pom-group-label {
+      font-size: 8px;
+      font-weight: 700;
+      text-transform: uppercase;
+      letter-spacing: 0.1em;
+      color: var(--muted);
+      padding: 8px 4px 4px;
+      border-bottom: 1px solid var(--border);
+      margin-bottom: 5px;
+    }
   </style>
 </head>
 
@@ -1089,16 +1278,49 @@
       </div>
 
       <div class="tab-content" id="tab-pom">
-        <div class="sec-label">Page Object Model Builder</div>
-        <div class="cards" id="pomList">
-          <div class="idle-state" id="pomEmptyState" style="padding: 20px;">🛒 Add locators to the POM from the
-            inspector tab.</div>
+        <!-- Framework Selector -->
+        <div class="pom-fw-bar">
+          <div class="pom-fw-chip active" data-pomfw="playwright-ts">PW · TypeScript</div>
+          <div class="pom-fw-chip" data-pomfw="playwright-js">PW · JavaScript</div>
+          <div class="pom-fw-chip" data-pomfw="selenium">Selenium</div>
+          <div class="pom-fw-chip" data-pomfw="cypress">Cypress</div>
+          <div class="pom-fw-chip" data-pomfw="wdio">WebdriverIO</div>
         </div>
-        <div class="clear-btn-wrap" style="margin-top:20px;">
-          <button class="inspect-btn" id="exportPOMBtn" style="margin-bottom: 10px;">💾 Export POM Code</button>
-          <button class="clear-btn" id="clearPOMBtn">✕ Clear POM</button>
+
+        <!-- Split Panel -->
+        <div class="pom-split">
+
+          <!-- LEFT: Element List -->
+          <div class="pom-list-panel">
+            <div class="pom-panel-header">
+              <span>🏗 Elements <span id="pomCountBadge" style="color:var(--primary);"></span></span>
+              <button class="pom-remove-btn" id="clearPOMBtn" title="Clear all" style="font-size:11px;">✕ Clear</button>
+            </div>
+            <div class="pom-entries" id="pomList">
+              <div class="pom-empty" id="pomEmptyState">
+                🛒 Inspect any element, then click<br><strong style="color:var(--primary);">+ POM</strong> on a locator card.
+              </div>
+            </div>
+          </div>
+
+          <!-- RIGHT: Code Preview -->
+          <div class="pom-preview-panel">
+            <div class="pom-panel-header">
+              <span id="pomPreviewFilename">PageObject.ts</span>
+              <div style="display:flex;gap:5px;">
+                <button class="copy-btn" id="copyPOMBtn" style="font-size:9px;">📋 Copy</button>
+                <button class="copy-btn" id="downloadPOMBtn" style="font-size:9px;background:var(--primary);color:var(--bg);">⬇ Download</button>
+              </div>
+            </div>
+            <textarea id="pomCodePreview" class="pom-code-area" readonly spellcheck="false" placeholder="// Code preview will appear here as you add elements..."></textarea>
+            <div class="pom-action-row">
+              <button class="inspect-btn" id="checkHealthBtn" style="background:var(--surf2);color:var(--fg);border:1px solid var(--border);">🩺 Check Health</button>
+            </div>
+          </div>
+
         </div>
       </div>
+
 
       <div class="tab-content" id="tab-settings">
         <div class="sec-label">Custom Attributes</div>
