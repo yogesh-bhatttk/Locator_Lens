@@ -8,11 +8,371 @@
 
   // ── State ──────────────────────────────────────────────────────────────────
   let isInspecting = false;
+  let isRecording = false;
   let hoveredEl = null;
   let overlay = null;
   let tooltip = null;
   let traversalBar = null;
   let lastRightClickedEl = null;
+  let customTestAttributes = ['data-testid', 'data-qa', 'data-cy', 'data-test', 'data-automation-id', 'data-e2e'];
+
+  // ── Recording Engine ──────────────────────────────────────────────────────
+  // Monotonic id per recording session so the side panel can dedupe true transport
+  // duplicates without merging distinct actions that share the same timestamp.
+  let recordActionSeq = 0;
+
+  function nextRecordEventId() {
+    if (typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function') {
+      return crypto.randomUUID();
+    }
+    return Date.now().toString(36) + '-' + Math.random().toString(36).slice(2, 12);
+  }
+
+  function sendRecordedAction(data) {
+    const payload = {
+      eventId: nextRecordEventId(),
+      sequence: ++recordActionSeq,
+      timestamp: data.timestamp != null ? data.timestamp : Date.now(),
+      url: data.url != null ? data.url : window.location.href,
+      action: data.action,
+      value: data.value != null ? data.value : '',
+      code: data.code != null ? data.code : '',
+      fullCode: data.fullCode != null ? data.fullCode : ''
+    };
+    try {
+      if (chrome.runtime && chrome.runtime.id) {
+        chrome.runtime.sendMessage({ type: 'RECORDED_ACTION', data: payload }, () => {
+          void chrome.runtime.lastError;
+        });
+      }
+    } catch (err) { /* context invalidated */ }
+  }
+
+  function recordFallbackLocator(el, methodChain) {
+    const chain = (methodChain || 'click()').replace(/;\s*$/, '');
+    if (el.id && typeof el.id === 'string' && el.id.trim()) {
+      const id = String(el.id).replace(/\\/g, '\\\\').replace(/'/g, "\\'");
+      return {
+        code: `page.locator('#${id}')`,
+        fullCode: `await page.locator('#${id}').${chain};`
+      };
+    }
+    const tag = (el.tagName && el.tagName.toLowerCase()) || 'body';
+    return {
+      code: `page.locator('${tag}')`,
+      fullCode: `await page.locator('${tag}').first().${chain};`
+    };
+  }
+
+  // Resolve the real element: composedPath()[0] can be a TEXT node inside <button>,
+  // which previously caused us to skip the whole interaction.
+  function resolvePrimaryTarget(e) {
+    const path = (typeof e.composedPath === 'function' && e.composedPath()) || [];
+    let n = path.length ? path[0] : e.target;
+    while (n && n.nodeType !== Node.ELEMENT_NODE) {
+      if (n instanceof ShadowRoot) n = n.host;
+      else n = n.parentNode;
+      if (!n || n === document || n === window) return null;
+    }
+    return n && n.nodeType === Node.ELEMENT_NODE ? n : null;
+  }
+
+  // pointerdown (preferred) + capture fires before target handlers; also covers
+  // more pointer types than mousedown alone. Falls back to mousedown if needed.
+  function onRecordPrimaryPointer(e) {
+    if (!isRecording) return;
+    if (typeof e.button === 'number' && e.button !== 0) return;
+    if (typeof e.isPrimary === 'boolean' && e.isPrimary === false) return;
+
+    const rawTarget = resolvePrimaryTarget(e);
+    if (!rawTarget) return;
+    if (rawTarget === overlay || rawTarget === tooltip) return;
+    if (traversalBar && traversalBar.contains(rawTarget)) return;
+
+    const el = rawTarget;
+    const tag = el.tagName.toLowerCase();
+    const type = (el.getAttribute('type') || '').toLowerCase();
+
+    // Text inputs & textarea: we used to ignore pointer here and rely only on "change".
+    // A click that only focuses the field never fires "change", so getByRole('textbox'…)
+    // interactions looked "missing". Record a .click() for focus; actual typing still
+    // comes from onRecordChange (fill) when the value is committed.
+    if ((tag === 'input' && !['submit', 'button', 'checkbox', 'radio', 'reset'].includes(type)) || tag === 'textarea') {
+      let best;
+      try {
+        const result = generateLocators(el);
+        best = result.locators && result.locators[0];
+      } catch (err) {
+        console.warn('[LocatorLens] generateLocators failed during recording:', err);
+      }
+      if (!best) {
+        const fb = recordFallbackLocator(el, 'click()');
+        best = { code: fb.code, fullCode: fb.fullCode };
+      } else {
+        const c = best.code;
+        best = Object.assign({}, best, { fullCode: `await ${c}.click();` });
+      }
+      sendRecordedAction({
+        action: 'click',
+        value: '',
+        code: best.code,
+        fullCode: best.fullCode
+      });
+      return;
+    }
+
+    let best;
+    try {
+      const result = generateLocators(el);
+      best = result.locators && result.locators[0];
+    } catch (err) {
+      console.warn('[LocatorLens] generateLocators failed during recording:', err);
+    }
+    if (!best) {
+      const fb = recordFallbackLocator(el, (type === 'checkbox' || type === 'radio') ? 'check()' : 'click()');
+      best = { code: fb.code, fullCode: fb.fullCode };
+    }
+
+    const actionType = (type === 'checkbox' || type === 'radio') ? 'check' : 'click';
+
+    sendRecordedAction({
+      action: actionType,
+      value: '',
+      code: best.code,
+      fullCode: best.fullCode
+    });
+  }
+
+  const _recordPointerOptions = typeof PointerEvent !== 'undefined'
+    ? { capture: true, passive: true }
+    : { capture: true };
+
+  /** Per-element debounce timers for the `input` event (React/controlled fields often skip native `change` until blur). */
+  const _inputDebounceTimers = new WeakMap();
+  /** After a debounced input emit, suppress the redundant native `change` for the same value. */
+  const _suppressChangeAfterInput = new WeakMap();
+
+  function isTextLikeField(el) {
+    if (!el || el.nodeType !== Node.ELEMENT_NODE) return false;
+    if (el.isContentEditable) return true;
+    const tag = el.tagName.toLowerCase();
+    if (tag === 'textarea') return true;
+    if (tag === 'input') {
+      const t = (el.getAttribute('type') || 'text').toLowerCase();
+      return !['submit', 'button', 'checkbox', 'radio', 'reset', 'file', 'hidden', 'image', 'color', 'range'].includes(t);
+    }
+    return false;
+  }
+
+  function getTextLikeValue(el) {
+    if (el.isContentEditable) {
+      return (el.innerText != null ? el.innerText : (el.textContent || '')).replace(/\r\n/g, '\n');
+    }
+    return el.value != null ? String(el.value) : '';
+  }
+
+  function sendFillForTextLike(el, markSuppressAfter) {
+    if (!isRecording) return;
+    let best;
+    try {
+      const result = generateLocators(el);
+      best = result.locators && result.locators[0];
+    } catch (err) {
+      console.warn('[LocatorLens] generateLocators failed during recording:', err);
+    }
+
+    const value = getTextLikeValue(el);
+    if (!best) {
+      const esc = value.replace(/\\/g, '\\\\').replace(/'/g, "\\'");
+      const fb = recordFallbackLocator(el, `fill('${esc}')`);
+      best = { code: fb.code, fullCode: fb.fullCode };
+    } else {
+      const esc = value.replace(/\\/g, '\\\\').replace(/'/g, "\\'");
+      best = Object.assign({}, best, { fullCode: `await ${best.code}.fill('${esc}');` });
+    }
+
+    sendRecordedAction({
+      action: 'fill',
+      value: value,
+      code: best.code,
+      fullCode: best.fullCode
+    });
+    if (markSuppressAfter) {
+      _suppressChangeAfterInput.set(el, { v: value, t: Date.now() });
+    }
+  }
+
+  function onRecordInputForDebounce(e) {
+    if (!isRecording) return;
+    const el = e.target;
+    if (!isTextLikeField(el)) return;
+    const prev = _inputDebounceTimers.get(el);
+    if (prev) clearTimeout(prev);
+    const t = setTimeout(() => {
+      _inputDebounceTimers.delete(el);
+      sendFillForTextLike(el, true);
+    }, 450);
+    _inputDebounceTimers.set(el, t);
+  }
+
+  function onRecordChange(e) {
+    if (!isRecording) return;
+    const el = e.target;
+    if (!el || el.nodeType !== Node.ELEMENT_NODE) return;
+    const tag = el.tagName.toLowerCase();
+    const type = (el.getAttribute('type') || '').toLowerCase();
+
+    if (tag === 'select' || type === 'checkbox' || type === 'radio') {
+      let best;
+      try {
+        const result = generateLocators(el);
+        best = result.locators && result.locators[0];
+      } catch (err) {
+        console.warn('[LocatorLens] generateLocators failed during recording:', err);
+      }
+
+      let actionType = 'fill';
+      let value = el.value || '';
+      if (tag === 'select') {
+        actionType = 'selectOption';
+        const opt = el.options[el.selectedIndex];
+        value = opt ? opt.textContent.trim() : el.value;
+      } else {
+        actionType = el.checked ? 'check' : 'uncheck';
+        value = '';
+      }
+
+      if (!best) {
+        let chain = `fill('${String(el.value || '').replace(/\\/g, '\\\\').replace(/'/g, "\\'")}')`;
+        if (tag === 'select') {
+          chain = `selectOption('${String(value).replace(/'/g, "\\'")}')`;
+        } else {
+          chain = el.checked ? 'check()' : 'uncheck()';
+        }
+        const fb = recordFallbackLocator(el, chain);
+        best = { code: fb.code, fullCode: fb.fullCode };
+      }
+
+      sendRecordedAction({
+        action: actionType,
+        value: value,
+        code: best.code,
+        fullCode: best.fullCode
+      });
+      return;
+    }
+
+    if (isTextLikeField(el) && e.type === 'change') {
+      const val = getTextLikeValue(el);
+      const sup = _suppressChangeAfterInput.get(el);
+      if (sup && (Date.now() - sup.t) < 2000 && sup.v === val) {
+        _suppressChangeAfterInput.delete(el);
+        return;
+      }
+      sendFillForTextLike(el, false);
+    }
+  }
+
+  function onRecordDblClick(e) {
+    if (!isRecording) return;
+    const el = resolvePrimaryTarget(e);
+    if (!el || el === overlay || (traversalBar && traversalBar.contains(el))) return;
+    let best;
+    try {
+      const result = generateLocators(el);
+      best = result.locators && result.locators[0];
+    } catch (err) {
+      console.warn('[LocatorLens] generateLocators (dblclick):', err);
+    }
+    if (!best) {
+      const fb = recordFallbackLocator(el, 'dblclick()');
+      best = { code: fb.code, fullCode: fb.fullCode };
+    } else {
+      best = Object.assign({}, best, { fullCode: `await ${best.code}.dblclick();` });
+    }
+    sendRecordedAction({
+      action: 'dblclick',
+      value: '',
+      code: best.code,
+      fullCode: best.fullCode
+    });
+  }
+
+  function onRecordKeydown(e) {
+    if (!isRecording) return;
+    // Only record meaningful keypresses
+    if (!['Enter', 'Tab', 'Escape'].includes(e.key)) return;
+
+    sendRecordedAction({
+      action: 'press',
+      value: e.key,
+      code: '',
+      fullCode: `await page.keyboard.press(${JSON.stringify(e.key)});`
+    });
+  }
+
+  function startRecording() {
+    if (isRecording) return;
+    recordActionSeq = 0;
+    isRecording = true;
+    if (typeof PointerEvent !== 'undefined') {
+      document.addEventListener('pointerdown', onRecordPrimaryPointer, _recordPointerOptions);
+    } else {
+      document.addEventListener('mousedown', onRecordPrimaryPointer, true);
+    }
+    document.addEventListener('input', onRecordInputForDebounce, true);
+    document.addEventListener('change', onRecordChange, true);
+    document.addEventListener('keydown', onRecordKeydown, true);
+    document.addEventListener('dblclick', onRecordDblClick, true);
+    console.log('[LocatorLens] Recording Started.');
+
+    const now = Date.now();
+    const href = window.location.href;
+    sendRecordedAction({
+      action: 'goto',
+      value: href,
+      code: '',
+      fullCode: `await page.goto(${JSON.stringify(href)});`,
+      timestamp: now
+    });
+    sendRecordedAction({
+      action: 'viewport',
+      value: `${window.innerWidth}x${window.innerHeight}`,
+      code: '',
+      fullCode: `await page.setViewportSize({ width: ${window.innerWidth}, height: ${window.innerHeight} });`,
+      timestamp: now + 1
+    });
+  }
+
+  function stopRecording() {
+    if (!isRecording) return;
+    isRecording = false;
+    document.removeEventListener('pointerdown', onRecordPrimaryPointer, _recordPointerOptions);
+    document.removeEventListener('mousedown', onRecordPrimaryPointer, true);
+    document.removeEventListener('input', onRecordInputForDebounce, true);
+    document.removeEventListener('change', onRecordChange, true);
+    document.removeEventListener('keydown', onRecordKeydown, true);
+    document.removeEventListener('dblclick', onRecordDblClick, true);
+    console.log('[LocatorLens] Recording Stopped.');
+  }
+
+  if (chrome.storage && chrome.storage.local) {
+    chrome.storage.local.get('customAttributes', (res) => {
+      if (res && res.customAttributes && res.customAttributes.length > 0) {
+        customTestAttributes = [...res.customAttributes, ...customTestAttributes];
+        // Remove duplicates
+        customTestAttributes = [...new Set(customTestAttributes)];
+      }
+    });
+
+    chrome.storage.onChanged.addListener((changes, namespace) => {
+      if (namespace === 'local' && changes.customAttributes) {
+        let newAttrs = changes.customAttributes.newValue || [];
+        customTestAttributes = [...newAttrs, 'data-testid', 'data-qa', 'data-cy', 'data-test', 'data-automation-id', 'data-e2e'];
+        customTestAttributes = [...new Set(customTestAttributes)];
+      }
+    });
+  }
 
   // ── Deep-Tracing Engine (Shadow DOM X-Ray) ────────────────────────────────
   function getDeepElementAt(x, y) {
@@ -389,524 +749,14 @@
     }, 3000);
   }
 
-  // ── ARIA role lookup ───────────────────────────────────────────────────────
-  const IMPLICIT_ROLES = {
-    a: (el) => el.href ? 'link' : null,
-    button: () => 'button',
-    h1: () => 'heading', h2: () => 'heading', h3: () => 'heading',
-    h4: () => 'heading', h5: () => 'heading', h6: () => 'heading',
-    img: (el) => (el.alt !== undefined ? 'img' : null),
-    input: (el) => {
-      const t = (el.type || 'text').toLowerCase();
-      const map = {
-        text: 'textbox', email: 'textbox', password: 'textbox',
-        search: 'searchbox', tel: 'textbox', url: 'textbox',
-        number: 'spinbutton', checkbox: 'checkbox', radio: 'radio',
-        submit: 'button', reset: 'button', button: 'button',
-        range: 'slider',
-      };
-      return map[t] || null;
-    },
-    select: () => 'combobox',
-    textarea: () => 'textbox',
-    nav: () => 'navigation',
-    main: () => 'main',
-    table: () => 'table',
-    tr: () => 'row',
-    td: () => 'cell',
-    th: () => 'columnheader',
-    ul: () => 'list',
-    ol: () => 'list',
-    li: () => 'listitem',
-    dialog: () => 'dialog',
-    form: () => 'form',
-    article: () => 'article',
-    aside: () => 'complementary',
-    header: () => 'banner',
-    footer: () => 'contentinfo',
-    section: () => 'region',
-    menuitem: () => 'menuitem',
-  };
 
-  function getRole(el) {
-    const explicit = el.getAttribute('role');
-    if (explicit) return explicit.trim().split(' ')[0];
-    const tag = el.tagName.toLowerCase();
-    const fn = IMPLICIT_ROLES[tag];
-    return fn ? fn(el) : null;
-  }
-
-  function getHeadingLevel(el) {
-    const m = el.tagName.match(/^H([1-6])$/i);
-    return m ? parseInt(m[1]) : null;
-  }
-
-  // ── Accessible name computation ────────────────────────────────────────────
-  function getAccessibleName(el) {
-    const ariaLabel = el.getAttribute('aria-label');
-    if (ariaLabel && ariaLabel.trim()) return ariaLabel.trim();
-
-    const labelledBy = el.getAttribute('aria-labelledby');
-    if (labelledBy) {
-      const names = labelledBy.split(' ')
-        .map(id => document.getElementById(id))
-        .filter(Boolean)
-        .map(e => e.textContent.trim())
-        .filter(Boolean);
-      if (names.length) return names.join(' ');
-    }
-
-    const tag = el.tagName.toLowerCase();
-    if (['input', 'select', 'textarea'].includes(tag)) {
-      if (el.id) {
-        const label = document.querySelector(`label[for="${CSS.escape(el.id)}"]`);
-        if (label) return label.textContent.trim();
-      }
-      const parentLabel = el.closest('label');
-      if (parentLabel) {
-        const clone = parentLabel.cloneNode(true);
-        clone.querySelectorAll('input,select,textarea').forEach(e => e.remove());
-        const t = clone.textContent.trim();
-        if (t) return t;
-      }
-    }
-
-    const textRoles = ['button', 'link', 'heading', 'menuitem', 'tab', 'option'];
-    const role = getRole(el);
-    if (role && textRoles.includes(role)) {
-      const t = (el.innerText || el.textContent || '').trim();
-      if (t) return t.slice(0, 80);
-    }
-
-    const title = el.getAttribute('title');
-    if (title && title.trim()) return title.trim();
-
-    if (tag === 'img') {
-      const alt = el.getAttribute('alt');
-      if (alt && alt.trim()) return alt.trim();
-    }
-
-    const ph = el.getAttribute('placeholder');
-    if (ph && ph.trim()) return ph.trim();
-
-    if (tag === 'input' && ['submit', 'button'].includes((el.type || '').toLowerCase())) {
-      const v = el.value;
-      if (v && v.trim()) return v.trim();
-    }
-
-    return null;
-  }
-
-  // ── Check if a string looks auto-generated / unstable ─────────────────────
-  function isUnstableClass(cls) {
-    return /^(sc-|css-|emotion-|makeStyles|jss\d|MuiButton-root-\d|[a-z]{2,4}-[a-zA-Z0-9]{6,}$)/.test(cls)
-      || /[a-zA-Z0-9]{7,}/.test(cls) && /\d{3,}/.test(cls);
-  }
-
-  function hasUnstableClasses(el) {
-    if (!el.className || typeof el.className !== 'string') return false;
-    return el.className.trim().split(/\s+/).some(isUnstableClass);
-  }
-
-  function isUnstableId(id) {
-    if (!id) return false;
-    return /^\d+$/.test(id) || /[_-]\d{3,}$/.test(id) || /\d{5,}/.test(id);
-  }
-
-  // ── Build a reliable CSS selector fallback ─────────────────────────────────
-  function buildCSSSelector(el) {
-    const parts = [];
-    let current = el;
-    while (current && current !== document.body && parts.length < 5) {
-      let part = current.tagName.toLowerCase();
-      if (current.id && !isUnstableId(current.id)) {
-        return `#${current.id}`;
-      }
-      const stableClasses = current.className && typeof current.className === 'string'
-        ? current.className.trim().split(/\s+/).filter(c => c && !isUnstableClass(c))
-        : [];
-      if (stableClasses.length) {
-        part += '.' + stableClasses.slice(0, 2).join('.');
-      }
-      // Nth-child fallback
-      const siblings = current.parentElement
-        ? Array.from(current.parentElement.children).filter(c => c.tagName === current.tagName)
-        : [];
-      if (siblings.length > 1) {
-        const idx = siblings.indexOf(current) + 1;
-        part += `:nth-of-type(${idx})`;
-      }
-      parts.unshift(part);
-      current = current.parentElement;
-    }
-    return parts.join(' > ');
-  }
-
-  // ── Find a unique parent for chaining ──────────────────────────────────────
-  function findUniqueParent(el) {
-    let parent = el.parentElement;
-    while (parent && parent !== document.body) {
-      const pTestId = parent.getAttribute('data-testid');
-      const pId = (!isUnstableId(parent.id)) ? parent.id : null;
-      const pRole = getRole(parent);
-      const pName = getAccessibleName(parent);
-      
-      if (pTestId || pId || (pRole && pName)) {
-        return { el: parent, testId: pTestId, id: pId, role: pRole, name: pName };
-      }
-      parent = parent.parentElement;
-    }
-    return null;
-  }
-
-  // ── Main locator generation engine ────────────────────────────────────────
   function generateLocators(el) {
-    const locators = [];
-    const tag = el.tagName.toLowerCase();
-    const role = getRole(el);
-    const name = getAccessibleName(el);
-
-    // 1. data-testid / data-qa / data-cy / data-test
-    const testAttrs = ['data-testid', 'data-qa', 'data-cy', 'data-test', 'data-automation-id', 'data-e2e'];
-    for (const attr of testAttrs) {
-      const val = el.getAttribute(attr);
-      if (val) {
-        const escaped = val.replace(/'/g, "\\'");
-        locators.push({
-          rank: 1,
-          method: 'getByTestId()',
-          matchedAttr: `${attr}="${val}"`,
-          stability: 'BEST',
-          code: `page.getByTestId('${escaped}')`,
-          fullCode: `await page.getByTestId('${escaped}').${suggestAction(el)};`,
-          explanation: `Uses the <${attr}> attribute which is purpose-built for testing. This is the most stable locator — it never changes with visual redesigns.`,
-          why: 'Stable test attribute'
-        });
-        break;
-      }
+    const E = globalThis.__LocatorLensEngine;
+    if (!E) {
+      console.error('[LocatorLens] Missing __LocatorLensEngine — ensure content-locator-engine.js is listed before content.js in the manifest.');
+      return { elementData: {}, locators: [], avoidList: [], proTip: '', a11y: [] };
     }
-
-    // 2. getByRole
-    if (role && name) {
-      const escaped = name.replace(/'/g, "\\'");
-      let codeBase = `page.getByRole('${role}', { name: '${escaped}' })`;
-      let extra = '';
-      if (role === 'heading') {
-        const level = getHeadingLevel(el);
-        if (level) {
-          codeBase = `page.getByRole('${role}', { name: '${escaped}', level: ${level} })`;
-          extra = ` at level ${level}`;
-        }
-      }
-      locators.push({
-        rank: locators.length + 1,
-        method: 'getByRole()',
-        matchedAttr: `role="${role}", name="${name}"${extra}`,
-        stability: locators.length === 0 ? 'BEST' : 'BEST',
-        code: codeBase,
-        fullCode: `await ${codeBase}.${suggestAction(el)};`,
-        explanation: `Finds the element by its ARIA role "${role}" and accessible name "${name}". This is Playwright's most recommended locator — it tests your app the same way screen readers use it.`,
-        why: 'Semantic ARIA role'
-      });
-    } else if (role && !name) {
-      locators.push({
-        rank: locators.length + 1,
-        method: 'getByRole()',
-        matchedAttr: `role="${role}" (no accessible name found)`,
-        stability: 'OK',
-        code: `page.getByRole('${role}')`,
-        fullCode: `await page.getByRole('${role}').${suggestAction(el)};`,
-        explanation: `Finds by role "${role}" but without a name filter — this may match multiple elements. Add an accessible name (aria-label, visible text) to make it unique.`,
-        why: 'Role only — may be ambiguous'
-      });
-    }
-
-    // 3. getByLabel
-    if (['input', 'select', 'textarea'].includes(tag)) {
-      let labelText = null;
-      if (el.id) {
-        const lbl = document.querySelector(`label[for="${CSS.escape(el.id)}"]`);
-        if (lbl) labelText = lbl.textContent.trim();
-      }
-      if (!labelText) {
-        const pLabel = el.closest('label');
-        if (pLabel) {
-          const clone = pLabel.cloneNode(true);
-          clone.querySelectorAll('input,select,textarea').forEach(e => e.remove());
-          labelText = clone.textContent.trim() || null;
-        }
-      }
-      if (!labelText) labelText = el.getAttribute('aria-label') || null;
-      if (labelText) {
-        const escaped = labelText.replace(/'/g, "\\'");
-        locators.push({
-          rank: locators.length + 1,
-          method: 'getByLabel()',
-          matchedAttr: `label text: "${labelText}"`,
-          stability: 'BEST',
-          code: `page.getByLabel('${escaped}')`,
-          fullCode: `await page.getByLabel('${escaped}').${suggestAction(el)};`,
-          explanation: `Finds the ${tag} element by its associated label "${labelText}". Ideal for form inputs — directly reflects what the user sees on screen.`,
-          why: 'Associated label text'
-        });
-      }
-    }
-
-    // 4. getByPlaceholder
-    const placeholder = el.getAttribute('placeholder');
-    if (placeholder && placeholder.trim()) {
-      const escaped = placeholder.trim().replace(/'/g, "\\'");
-      locators.push({
-        rank: locators.length + 1,
-        method: 'getByPlaceholder()',
-        matchedAttr: `placeholder="${placeholder.trim()}"`,
-        stability: 'GOOD',
-        code: `page.getByPlaceholder('${escaped}')`,
-        fullCode: `await page.getByPlaceholder('${escaped}').${suggestAction(el)};`,
-        explanation: `Finds the input by its placeholder text "${placeholder.trim()}". Good when no label is present — but note placeholder text can change with copy updates.`,
-        why: 'Placeholder attribute'
-      });
-    }
-
-    // 5. getByAltText
-    if (tag === 'img') {
-      const alt = el.getAttribute('alt');
-      if (alt && alt.trim()) {
-        const escaped = alt.trim().replace(/'/g, "\\'");
-        locators.push({
-          rank: locators.length + 1,
-          method: 'getByAltText()',
-          matchedAttr: `alt="${alt.trim()}"`,
-          stability: 'GOOD',
-          code: `page.getByAltText('${escaped}')`,
-          fullCode: `await page.getByAltText('${escaped}').${suggestAction(el)};`,
-          explanation: `Finds the image by its alt text "${alt.trim()}". The correct semantic approach for images — also important for accessibility.`,
-          why: 'Alt text attribute'
-        });
-      }
-    }
-
-    // 6. getByTitle
-    const titleAttr = el.getAttribute('title');
-    if (titleAttr && titleAttr.trim()) {
-      const escaped = titleAttr.trim().replace(/'/g, "\\'");
-      locators.push({
-        rank: locators.length + 1,
-        method: 'getByTitle()',
-        matchedAttr: `title="${titleAttr.trim()}"`,
-        stability: 'GOOD',
-        code: `page.getByTitle('${escaped}')`,
-        fullCode: `await page.getByTitle('${escaped}').${suggestAction(el)};`,
-        explanation: `Finds the element by its title attribute "${titleAttr.trim()}". Useful for icon buttons and tooltip elements without visible text.`,
-        why: 'Title attribute'
-      });
-    }
-
-    // 7. getByText
-    const visibleText = (el.innerText || el.textContent || '').trim();
-    if (visibleText && visibleText.length <= 100 && !['input', 'select', 'textarea', 'img'].includes(tag)) {
-      const escaped = visibleText.replace(/'/g, "\\'");
-      const allMatchingText = document.querySelectorAll('*');
-      let textMatchCount = 0;
-      for (const node of allMatchingText) {
-        if ((node.innerText || node.textContent || '').trim() === visibleText) textMatchCount++;
-        if (textMatchCount > 3) break;
-      }
-      const stability = textMatchCount > 2 ? 'OK' : 'GOOD';
-      const warning = textMatchCount > 2 ? ' Warning: this text may match multiple elements — consider using getByRole() instead.' : '';
-      locators.push({
-        rank: locators.length + 1,
-        method: 'getByText()',
-        matchedAttr: `visible text: "${visibleText.slice(0, 60)}"`,
-        stability,
-        code: `page.getByText('${escaped.slice(0, 60)}')`,
-        fullCode: `await page.getByText('${escaped.slice(0, 60)}').${suggestAction(el)};`,
-        explanation: `Finds by visible text content "${visibleText.slice(0, 60)}".${warning} Best used for non-interactive elements like paragraphs and labels.`,
-        why: 'Visible text content'
-      });
-    }
-
-    // 8. locator() by stable ID
-    if (el.id && !isUnstableId(el.id)) {
-      const escaped = el.id.replace(/'/g, "\\'");
-      locators.push({
-        rank: locators.length + 1,
-        method: "locator('#id')",
-        matchedAttr: `id="${el.id}"`,
-        stability: 'OK',
-        code: `page.locator('#${escaped}')`,
-        fullCode: `await page.locator('#${escaped}').${suggestAction(el)};`,
-        explanation: `Uses the element's ID "${el.id}". Acceptable if the ID is hand-written and stable — avoid if IDs are auto-generated (e.g. "btn-47" or "input_1234").`,
-        why: 'ID attribute'
-      });
-    }
-
-    // 9. CSS attribute selectors (name, type combos)
-    const name_attr = el.getAttribute('name');
-    if (name_attr && ['input', 'select', 'textarea'].includes(tag)) {
-      const escaped = name_attr.replace(/'/g, "\\'");
-      locators.push({
-        rank: locators.length + 1,
-        method: "locator('[name]')",
-        matchedAttr: `name="${name_attr}"`,
-        stability: 'OK',
-        code: `page.locator('[name="${escaped}"]')`,
-        fullCode: `await page.locator('[name="${escaped}"]').${suggestAction(el)};`,
-        explanation: `Uses the name attribute "${name_attr}". Moderately stable — name attributes are usually semantic but multiple elements can share the same name (e.g. radio groups).`,
-        why: 'Name attribute'
-      });
-    }
-
-    // 10. Chained / Filtered Locator (The Pro Approach)
-    const uParent = findUniqueParent(el);
-    if (uParent && locators.length > 0) {
-      let pCode = '';
-      if (uParent.testId) pCode = `page.getByTestId('${uParent.testId}')`;
-      else if (uParent.id) pCode = `page.locator('#${uParent.id}')`;
-      else if (uParent.role && uParent.name) pCode = `page.getByRole('${uParent.role}', { name: '${uParent.name.replace(/'/g, "\\'")}' })`;
-
-      if (pCode) {
-        const bestChild = locators[0].code.replace('page.', '');
-        locators.push({
-          rank: locators.length + 1,
-          method: 'Chained/Filtered',
-          matchedAttr: `Parent: ${uParent.testId || uParent.id || uParent.name}`,
-          stability: 'BEST',
-          code: `${pCode}.${bestChild}`,
-          fullCode: `await ${pCode}.${bestChild}.${suggestAction(el)};`,
-          explanation: `Uses a unique parent (${uParent.id || uParent.role}) to narrow down the search. This is the pro approach for elements in lists, tables, or complex dashboards where name alone is ambiguous.`,
-          why: 'Context-specific uniqueness'
-        });
-      }
-    }
-
-    // 11. Iframe Detection
-    const inIframe = window.self !== window.top;
-    if (inIframe) {
-      locators.unshift({
-        rank: 0,
-        method: 'Frame Switch',
-        matchedAttr: 'Inside Iframe',
-        stability: 'GOOD',
-        code: `page.frameLocator('iframe-selector')`,
-        fullCode: `await page.frameLocator('iframe').${locators[0] ? locators[0].code.replace('page.', '') : 'locator(...)'};`,
-        explanation: `Element is inside an Iframe. You must use frameLocator() to switch context before interacting. Replace 'iframe-selector' with the actual iframe ID or src.`,
-        why: 'Cross-document isolation'
-      });
-    }
-
-    // 10. CSS selector fallback
-    const cssSelector = buildCSSSelector(el);
-    const hasUnstable = hasUnstableClasses(el);
-    locators.push({
-      rank: locators.length + 1,
-      method: 'locator() CSS',
-      matchedAttr: cssSelector,
-      stability: hasUnstable ? 'AVOID' : 'OK',
-      code: `page.locator('${cssSelector.replace(/'/g, "\\'")}')`,
-      fullCode: `await page.locator('${cssSelector.replace(/'/g, "\\'")}').${suggestAction(el)};`,
-      explanation: hasUnstable
-        ? `This CSS selector contains auto-generated class names (like styled-components or MUI classes) that regenerate on every build. Using this WILL cause your tests to break regularly. Use a semantic locator instead.`
-        : `CSS selector fallback. Use only when semantic locators are not available. Prefer IDs and data attributes over class-based selectors.`,
-      why: 'CSS selector (fallback)'
-    });
-
-    // ── Stability-First Sorting ──────────────────────────────────────────────
-    const stabilityWeight = { 'BEST': 4, 'GOOD': 3, 'OK': 2, 'AVOID': 1 };
-    
-    locators.sort((a, b) => {
-      const wa = stabilityWeight[a.stability] || 0;
-      const wb = stabilityWeight[b.stability] || 0;
-      if (wa !== wb) return wb - wa;
-      return a.rank - b.rank; // Keep relative discovery order within same stability
-    });
-
-    // Re-rank (The 1, 2, 3 sequence)
-    locators.forEach((l, i) => { l.rank = i + 1; });
-
-    // ── Build avoid list ───────────────────────────────────────────────────────
-    const avoidList = [];
-    if (hasUnstableClasses(el)) {
-      const bad = el.className.trim().split(/\s+/).filter(isUnstableClass).slice(0, 3);
-      avoidList.push({
-        locator: `page.locator('.${bad[0]}')`,
-        reason: `"${bad[0]}" is an auto-generated class (styled-components / CSS-in-JS). It changes on every build and will break your tests.`
-      });
-    }
-    if (el.id && isUnstableId(el.id)) {
-      avoidList.push({
-        locator: `page.locator('#${el.id}')`,
-        reason: `The ID "${el.id}" appears auto-generated (contains large numbers). It may change between page loads or deploys.`
-      });
-    }
-    avoidList.push({
-      locator: `page.locator('${tag}:nth-child(n)')`,
-      reason: 'Position-based selectors break immediately when the UI is reordered or new elements are added.'
-    });
-    if (!el.getAttribute('data-testid') && !el.getAttribute('aria-label')) {
-      avoidList.push({
-        locator: 'XPath (//button[...])',
-        reason: 'XPath is verbose and very fragile. It breaks when HTML structure changes. Use getByRole() or getByLabel() instead.'
-      });
-    }
-
-    // ── Shadow DOM Detection ─────────────────────────────────────────────
-    let isInShadow = false;
-    let shadowHost = null;
-    const root = el.getRootNode();
-    if (root instanceof ShadowRoot) {
-      isInShadow = true;
-      shadowHost = root.host.tagName.toLowerCase();
-      if (root.host.id) shadowHost += `#${root.host.id}`;
-    }
-
-    // ── Collect element metadata ───────────────────────────────────────────
-    const elementData = {
-      tag,
-      type: el.getAttribute('type') || null,
-      id: el.id || null,
-      visibleText: visibleText.slice(0, 80) || null,
-      ariaLabel: el.getAttribute('aria-label') || null,
-      placeholder: placeholder || null,
-      alt: el.getAttribute('alt') || null,
-      testId: el.getAttribute('data-testid') || el.getAttribute('data-qa') || el.getAttribute('data-cy') || null,
-      role: role || tag,
-      title: titleAttr || null,
-      name: name_attr || null,
-      href: tag === 'a' ? el.getAttribute('href') : null,
-      classes: typeof el.className === 'string' ? el.className.trim().split(/\s+/).filter(Boolean).slice(0, 6) : [],
-      hasUnstableClasses: hasUnstable,
-      isInShadow,
-      shadowHost
-    };
-
-    // ── Pro tip based on element ───────────────────────────────────────────
-    let proTip = '';
-    if (isInShadow) {
-      proTip = `Found inside Shadow DOM (<${shadowHost}>). Playwright's getBy... locators pierce Shadow DOM automatically! For Selenium, you'll need driver.execute_script('return arguments[0].shadowRoot', host).`;
-    } else if (!el.getAttribute('data-testid')) {
-      proTip = `Ask your developers to add a <data-testid="${tag}-element"> attribute to this <${tag}>. It would make this the most stable locator possible and is a 5-second code change.`;
-    } else if (role === 'button' || role === 'link') {
-      proTip = `Great — this element has a data-testid. Use getByTestId() as primary and getByRole() as a backup assertion: expect(page.getByRole('${role}', { name: '...' })).toBeVisible()`;
-    } else {
-      proTip = `Combine your locator with an assertion: await expect(page.getByRole('${role || tag}')).toBeVisible() — Playwright auto-retries this until the element appears or times out.`;
-    }
-
-    return { elementData, locators, avoidList, proTip };
-  }
-
-  // ── Suggest a realistic Playwright action ─────────────────────────────────
-  function suggestAction(el) {
-    const tag = el.tagName.toLowerCase();
-    const type = (el.getAttribute('type') || '').toLowerCase();
-    if (tag === 'input') {
-      if (type === 'checkbox' || type === 'radio') return 'check()';
-      if (type === 'submit' || type === 'button') return 'click()';
-      return "fill('your value')";
-    }
-    if (tag === 'select') return "selectOption('option text')";
-    if (tag === 'textarea') return "fill('your text')";
-    return 'click()';
+    return E.generateLocators(el, customTestAttributes);
   }
 
   // ── Event handlers ─────────────────────────────────────────────────────────
@@ -1050,6 +900,15 @@
       stopInspect();
       sendResponse({ ok: true });
     }
+    // 🎬 RECORDING: Start/Stop recording user interactions
+    else if (msg.type === 'START_RECORDING') {
+      startRecording();
+      sendResponse({ ok: true });
+    }
+    else if (msg.type === 'STOP_RECORDING') {
+      stopRecording();
+      sendResponse({ ok: true });
+    }
     // Handle context menu quick-copy
     else if (msg.type === 'CONTEXT_MENU_COPY') {
       const target = lastRightClickedEl || document.body;
@@ -1127,6 +986,35 @@
     else if (msg.type === 'LAB_CLEAR') {
       document.querySelectorAll('.ll-lab-highlight').forEach(el => el.classList.remove('ll-lab-highlight'));
       sendResponse({ ok: true });
+    }
+
+    // 💥 STRESS TEST: Check if the last picked element survives without id/class
+    else if (msg.type === 'RUN_STRESS_TEST') {
+      const E = globalThis.__LocatorLensEngine;
+      if (!E) {
+        sendResponse({ ok: false, data: { survived: false } });
+        return;
+      }
+      const target = hoveredEl || lastRightClickedEl || document.body;
+      const role = E.getRole(target);
+      const name = E.getAccessibleName(target);
+      let survived = false;
+
+      if (role && name) {
+        const tag = target.tagName.toLowerCase();
+        const candidates = document.querySelectorAll(tag);
+        let semanticMatches = 0;
+        for (const c of candidates) {
+          if (E.getRole(c) === role && E.getAccessibleName(c) === name) {
+            semanticMatches++;
+          }
+        }
+        survived = semanticMatches === 1;
+      } else if (role) {
+        survived = false;
+      }
+
+      sendResponse({ ok: true, data: { survived } });
     }
   });
 })();
