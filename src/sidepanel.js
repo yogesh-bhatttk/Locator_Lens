@@ -1,5 +1,11 @@
 let isInspecting = false;
+let isRecording = false;
 let currentFramework = 'playwright';
+let savedPOMElements = [];
+let recordedActions = [];
+let recLastPageUrl = '';
+let _recorderSaveTimer = null;
+const LL_RECORDER_STATE_KEY = 'llRecorderState';
 
 // ── Safe DOM renderer (avoids innerHTML for AMO compliance) ───────────────────
 function safeRender(el, html) {
@@ -19,7 +25,7 @@ function hl(code) {
   return esc(code)
     .replace(/\b(await|const|let|var|function|return|if|else|for|while|try|catch|By|driver|cy|By\.CSS_SELECTOR|By\.ID|By\.NAME|By\.XPATH)\b/g, '<span class="kw">$1</span>')
     .replace(/\b(page|browser|context|expect|test|find_element|get|contains|find_elements|shadow|shadowRoot)\b/g, '<span class="kw">$1</span>')
-    .replace(/\b(getByRole|getByLabel|getByPlaceholder|getByText|getByAltText|getByTitle|getByTestId|locator|click|fill|check|selectOption|press|type|hover|focus|blur|waitFor|toBeVisible|toHaveText|toBeChecked)\b/g, '<span class="fn">$1</span>')
+    .replace(/\b(getByRole|getByLabel|getByPlaceholder|getByText|getByAltText|getByTitle|getByTestId|locator|click|dblclick|fill|check|selectOption|press|type|hover|focus|blur|waitFor|toBeVisible|toHaveText|toBeChecked)\b/g, '<span class="fn">$1</span>')
     .replace(/(&#39;[^<]*?&#39;|&quot;[^<]*?&quot;)/g, '<span class="str">$1</span>')
     .replace(/([0-9]+)/g, '<span class="num">$1</span>');
 }
@@ -43,20 +49,28 @@ function copyToClipboard(text, btn) {
     setTimeout(() => { btn.textContent = 'Copy'; btn.classList.remove('done'); }, 2000);
   };
 
-  if (navigator.clipboard && navigator.clipboard.writeText) {
-    navigator.clipboard.writeText(text).then(onSuccess).catch(onSuccess);
-  } else {
+  const fallbackCopy = () => {
     try {
-      const textArea = document.createElement("textarea");
+      const textArea = document.createElement('textarea');
       textArea.value = text;
-      textArea.style.position = "fixed";
+      textArea.style.position = 'fixed';
+      textArea.style.left = '-9999px';
       document.body.appendChild(textArea);
       textArea.focus();
       textArea.select();
       document.execCommand('copy');
       document.body.removeChild(textArea);
-    } catch (e) {}
-    onSuccess();
+      onSuccess();
+    } catch (e) {
+      btn.textContent = 'Copy failed';
+      setTimeout(() => { btn.textContent = 'Copy'; }, 2000);
+    }
+  };
+
+  if (navigator.clipboard && navigator.clipboard.writeText) {
+    navigator.clipboard.writeText(text).then(onSuccess).catch(fallbackCopy);
+  } else {
+    fallbackCopy();
   }
 }
 
@@ -158,10 +172,29 @@ function formatForFramework(loc, framework) {
 function renderResults(data) {
   if (!data) return;
   lastResultData = data;
-  const { elementData: el, locators, avoidList, proTip } = data;
+  const { elementData: el, locators, avoidList, proTip, a11y } = data;
 
   document.getElementById('idleState').style.display = 'none';
   document.getElementById('resultsState').style.display = '';
+
+  // ── A11y & Semantics ──
+  const a11yLabel = document.getElementById('a11yLabel');
+  const a11yContainer = document.getElementById('a11yContainer');
+  if (a11y && a11y.length > 0) {
+    a11yLabel.style.display = 'block';
+    a11yContainer.style.display = 'block';
+    safeRender(a11yContainer, a11y.map(issue => `
+      <div class="a11y-row">
+        <span class="a11y-severity ${issue.severity === 'high' ? 'high' : 'low'}">${issue.severity}</span>
+        <div class="a11y-msg">${esc(issue.message)}</div>
+      </div>
+    `).join(''));
+  } else {
+    // Show a "perfect" state if no issues found? 
+    // For now just hide to keep it clean, or show a subtle "No major issues"
+    a11yLabel.style.display = 'none';
+    a11yContainer.style.display = 'none';
+  }
 
   // ── Element bar ── (Keep as is)
   const elBar = document.getElementById('elBar');
@@ -205,7 +238,10 @@ function renderResults(data) {
         </div>
         <div class="card-code">
           <div class="code-txt">${hl(code)}</div>
-          <button class="copy-btn" data-code="${esc(fullCode)}">Copy</button>
+          <div style="display:flex; flex-direction:column; gap:4px;">
+            <button class="copy-btn" data-code="${esc(fullCode)}">Copy</button>
+            <button class="copy-btn add-pom-btn" data-code="${esc(code.replace('page.', ''))}" style="background:var(--primary-dim); color:var(--text);">+ POM</button>
+          </div>
         </div>
         <div class="why-row">
           <button class="toggle-explain">▶ Why?</button>
@@ -257,8 +293,8 @@ function toggleExplain(btn) {
   btn.textContent = open ? '▼ Why?' : '▶ Why?';
 }
 
-// ── Message listener ──────────────────────────────────────────────────────────
-chrome.runtime.onMessage.addListener((msg) => {
+// ── Message listener (also used by port bridge from background) ─────────────
+function handleRuntimeMessage(msg) {
   if (msg.type === 'ELEMENT_PICKED' && msg.data) {
     renderResults(msg.data);
   }
@@ -290,7 +326,27 @@ chrome.runtime.onMessage.addListener((msg) => {
     statusEl.className = 'lab-status err';
     document.getElementById('lab-count').style.display = 'none';
   }
-});
+  if (msg.type === 'STRESS_TEST_RESULT') {
+    const btn = document.getElementById('stressTestBtn');
+    btn.textContent = '💥 Stress Test';
+    alert(`Stress Test Complete!\nElement locatable without classes/id? ${msg.data.survived ? 'Yes ✅' : 'No ❌'}`);
+  }
+  if (msg.type === 'RECORDED_ACTION' && msg.data) {
+    appendToRecorder(msg.data);
+  }
+}
+
+chrome.runtime.onMessage.addListener(handleRuntimeMessage);
+
+(function connectSidePanelBridge() {
+  try {
+    const port = chrome.runtime.connect({ name: 'll-sidepanel' });
+    port.onMessage.addListener(handleRuntimeMessage);
+    port.onDisconnect.addListener(() => setTimeout(connectSidePanelBridge, 400));
+  } catch (e) {
+    setTimeout(connectSidePanelBridge, 800);
+  }
+})();
 
 // ── DOMContentLoaded: bind all events + restore state ────────────────────────
 document.addEventListener('DOMContentLoaded', () => {
@@ -300,11 +356,27 @@ document.addEventListener('DOMContentLoaded', () => {
   // Event delegation for card buttons
   const cardsContainer = document.getElementById('cardsContainer');
   cardsContainer.addEventListener('click', (e) => {
-    if (e.target.classList.contains('copy-btn')) {
+    if (e.target.classList.contains('copy-btn') && !e.target.classList.contains('add-pom-btn')) {
       handleCopy(e.target);
     } else if (e.target.classList.contains('toggle-explain')) {
       toggleExplain(e.target);
+    } else if (e.target.classList.contains('add-pom-btn')) {
+      const code = e.target.getAttribute('data-code').replace(/&amp;/g, '&').replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/&quot;/g, '"');
+      const name = prompt("Name this element (e.g. loginButton):", "element" + (savedPOMElements.length + 1));
+      if (name) {
+        savedPOMElements.push({ name, code });
+        chrome.storage.local.set({ savedPOMElements });
+        renderPOMList();
+        e.target.textContent = '✓ Added';
+        setTimeout(() => { e.target.textContent = '+ POM'; }, 2000);
+      }
     }
+  });
+
+  document.getElementById('stressTestBtn').addEventListener('click', () => {
+    const btn = document.getElementById('stressTestBtn');
+    btn.textContent = 'Testing...';
+    chrome.runtime.sendMessage({ type: 'RUN_STRESS_TEST' });
   });
 
   // Clear button
@@ -384,6 +456,488 @@ document.addEventListener('DOMContentLoaded', () => {
     chrome.runtime.sendMessage({ type: 'LAB_CLEAR' });
   });
 
-  // Tell background/popup I am open!
-  chrome.runtime.sendMessage({ type: 'PANEL_HEARTBEAT' });
+  // ── Tab Switching Logic ──
+  const tabs = document.querySelectorAll('.tab');
+  const tabContents = document.querySelectorAll('.tab-content');
+
+  tabs.forEach(tab => {
+    tab.addEventListener('click', () => {
+      // Remove active from all tabs and contents
+      tabs.forEach(t => t.classList.remove('active'));
+      tabContents.forEach(c => c.classList.remove('active'));
+
+      // Add active to clicked tab
+      tab.classList.add('active');
+      const targetId = tab.getAttribute('data-target');
+      document.getElementById(targetId).classList.add('active');
+    });
+  });
+
+  // ── POM Builder ──
+  function renderPOMList() {
+    const pomList = document.getElementById('pomList');
+    const emptyState = document.getElementById('pomEmptyState');
+    if (!emptyState) return; // Not initialized yet
+
+    if (savedPOMElements.length === 0) {
+      pomList.innerHTML = '';
+      pomList.appendChild(emptyState);
+      emptyState.style.display = 'block';
+      return;
+    }
+
+    pomList.innerHTML = savedPOMElements.map((el, i) => `
+      <div class="card" style="padding: 10px; display: flex; justify-content: space-between; align-items: center;">
+        <div style="flex: 1;">
+          <div style="font-weight: bold; color: var(--primary);">${esc(el.name)}</div>
+          <div style="font-family: monospace; font-size: 10px; color: var(--muted); margin-top: 4px;">${hl(el.code)}</div>
+        </div>
+        <button class="clear-btn remove-pom-btn" data-index="${i}" style="width: 30px; border-color: var(--error); color: var(--error);">✕</button>
+      </div>
+    `).join('');
+  }
+
+  document.getElementById('pomList').addEventListener('click', (e) => {
+    if (e.target.classList.contains('remove-pom-btn')) {
+      const idx = e.target.getAttribute('data-index');
+      savedPOMElements.splice(idx, 1);
+      chrome.storage.local.set({ savedPOMElements });
+      renderPOMList();
+    }
+  });
+
+  document.getElementById('clearPOMBtn').addEventListener('click', () => {
+    const emptyState = document.getElementById('pomEmptyState');
+    savedPOMElements = [];
+    chrome.storage.local.set({ savedPOMElements });
+    document.getElementById('pomList').innerHTML = '';
+    document.getElementById('pomList').appendChild(emptyState);
+    emptyState.style.display = 'block';
+  });
+
+  document.getElementById('exportPOMBtn').addEventListener('click', (e) => {
+    if (savedPOMElements.length === 0) return alert("Add locators first!");
+    
+    let code = '';
+    if (currentFramework === 'playwright') {
+        const lines = savedPOMElements.map(el => `    this.${el.name} = page.${el.code};`).join('\n');
+        code = `
+import { Page, Locator } from '@playwright/test';
+
+export class PageObject {
+  readonly page: Page;
+${savedPOMElements.map(el => `  readonly ${el.name}: Locator;`).join('\n')}
+
+  constructor(page: Page) {
+    this.page = page;
+${lines}
+  }
+}
+`.trim();
+    } else {
+        code = "// Custom POM export format for " + currentFramework + " coming soon!\n" + 
+               savedPOMElements.map(el => `const ${el.name} = driver.${el.code};`).join('\n');
+    }
+
+    copyToClipboard(code, e.target);
+  });
+
+  if (chrome.storage && chrome.storage.local) {
+    chrome.storage.local.get('savedPOMElements', (res) => {
+      if (res && res.savedPOMElements) {
+        savedPOMElements = res.savedPOMElements;
+        renderPOMList();
+      }
+    });
+  }
+
+  // Keep background aware the panel is open (single ping expires after ~12s).
+  const sendPanelHeartbeat = () => chrome.runtime.sendMessage({ type: 'PANEL_HEARTBEAT' });
+  sendPanelHeartbeat();
+  const panelHeartbeatId = setInterval(sendPanelHeartbeat, 4000);
+  window.addEventListener('beforeunload', () => clearInterval(panelHeartbeatId));
+
+  // ── Recorder Controls ──
+  document.getElementById('recordBtn').addEventListener('click', toggleRecording);
+
+  document.getElementById('clearTimelineBtn').addEventListener('click', () => {
+    recordedActions = [];
+    seenActionKeys.clear();
+    lastSyncedPreviewScript = '';
+    recLastPageUrl = '';
+    updateRecPageUrlUI();
+    if (chrome.storage && chrome.storage.local) {
+      chrome.storage.local.remove(LL_RECORDER_STATE_KEY);
+    }
+    renderTimeline();
+    updateCodePreview();
+  });
+
+  document.getElementById('exportTestBtn').addEventListener('click', (e) => {
+    const script = getExportedTestScript();
+    if (!script) return alert('Record some actions first, or paste a script into the editor.');
+    copyToClipboard(script, e.target);
+  });
+
+  document.getElementById('regenerateScriptBtn').addEventListener('click', () => {
+    if (recordedActions.length === 0) return;
+    const ta = document.getElementById('codePreview');
+    if (!ta) return;
+    const next = generateTestScript();
+    ta.value = next;
+    lastSyncedPreviewScript = next;
+    ta.focus();
+    scheduleRecorderPersist();
+  });
+
+  const codePreviewEl = document.getElementById('codePreview');
+  if (codePreviewEl) {
+    codePreviewEl.addEventListener('input', () => scheduleRecorderPersist());
+  }
+
+  const downloadTestBtn = document.getElementById('downloadTestBtn');
+  if (downloadTestBtn) {
+    downloadTestBtn.addEventListener('click', () => {
+      const script = getExportedTestScript();
+      if (!script) {
+        alert('Record some actions first, or paste a script into the editor.');
+        return;
+      }
+      const blob = new Blob([script], { type: 'text/plain;charset=utf-8' });
+      const a = document.createElement('a');
+      a.href = URL.createObjectURL(blob);
+      a.download = 'locatorlens-recorded-test.spec.ts';
+      a.click();
+      setTimeout(() => URL.revokeObjectURL(a.href), 2000);
+    });
+  }
+
+  document.getElementById('recorderTimeline').addEventListener('click', (e) => {
+    // 1. Handle step removal
+    if (e.target.classList.contains('remove-step-btn')) {
+      const idx = parseInt(e.target.getAttribute('data-index'));
+      const removed = recordedActions.splice(idx, 1)[0];
+      
+      // Also remove from seenActionKeys to allow re-recording if it was the same interaction
+      if (removed) {
+        seenActionKeys.delete(dedupeKeyForAction(removed));
+      }
+
+      renderTimeline();
+      updateCodePreview();
+      scheduleRecorderPersist();
+    }
+    // 2. Handle individual step copy
+    if (e.target.classList.contains('copy-btn') && e.target.closest('#recorderTimeline')) {
+        handleCopy(e.target);
+    }
+  });
+
+  // ── Settings (Custom Attributes) ──
+  const customAttrsInput = document.getElementById('custom-attrs-input');
+  const saveSettingsBtn = document.getElementById('save-settings-btn');
+  const settingsStatus = document.getElementById('settings-status');
+
+  if (chrome.storage && chrome.storage.local) {
+    chrome.storage.local.get('customAttributes', (res) => {
+      if (res && res.customAttributes) {
+        customAttrsInput.value = res.customAttributes.join(', ');
+      }
+    });
+  }
+
+  saveSettingsBtn.addEventListener('click', () => {
+    const rawArgs = customAttrsInput.value.split(',').map(s => s.trim()).filter(s => s);
+    chrome.storage.local.set({ customAttributes: rawArgs }, () => {
+      settingsStatus.textContent = "Saved! Reload page to apply.";
+      settingsStatus.className = 'lab-status success';
+      setTimeout(() => {
+        settingsStatus.textContent = "";
+        settingsStatus.className = 'lab-status';
+      }, 3000);
+    });
+  });
+
+  loadRecorderState();
 });
+
+// ── Recording Toggle (hoisted) ──
+function toggleRecording() {
+  isRecording = !isRecording;
+  updateRecordUI();
+  chrome.runtime.sendMessage({ type: isRecording ? 'START_RECORDING' : 'STOP_RECORDING' });
+}
+
+function updateRecordUI() {
+  const btn = document.getElementById('recordBtn');
+  const icon = document.getElementById('recBtnIcon');
+  const txt = document.getElementById('recBtnText');
+  const hint = document.getElementById('recHint');
+
+  if (isRecording) {
+    btn.style.background = 'var(--surf2)';
+    btn.style.color = 'var(--error)';
+    btn.style.border = '1px solid var(--error)';
+    btn.style.boxShadow = '0 0 15px rgba(255, 113, 108, 0.3)';
+    icon.textContent = '⏹';
+    txt.textContent = 'Stop Recording';
+    hint.style.display = 'block';
+  } else {
+    btn.style.background = 'var(--error)';
+    btn.style.color = 'var(--bg)';
+    btn.style.border = 'none';
+    btn.style.boxShadow = '0 0 15px rgba(255, 113, 108, 0.2)';
+    icon.textContent = '⏺';
+    txt.textContent = 'Start Recording';
+    hint.style.display = 'none';
+    if (recordedActions.length > 0) updateCodePreview();
+  }
+}
+
+// ── Recorder Timeline (hoisted so message listener can call them) ──
+function renderTimeline() {
+  const timelineList = document.getElementById('recorderTimeline');
+  if (!timelineList) return;
+
+  const countEl = document.getElementById('recCount');
+
+  if (recordedActions.length === 0) {
+    timelineList.innerHTML = `<div class="ll-rec-empty">🎬 Hit <strong style="color: var(--primary);">Start Recording</strong> then use the page. Clicks, double-clicks, typing, and Enter/Tab/Escape are captured.</div>`;
+    if (countEl) { countEl.style.display = 'none'; }
+    return;
+  }
+
+  if (countEl) {
+    countEl.textContent = `(${recordedActions.length})`;
+    countEl.style.display = 'inline';
+  }
+
+  const actionIcons = {
+    'goto': '🌐', 'viewport': '🖥️', 'click': '👆', 'dblclick': '👆👆', 'fill': '⌨️', 'check': '☑️',
+    'uncheck': '⬜', 'selectOption': '📃', 'press': '⌨️'
+  };
+
+  let html = '';
+  try {
+    html = recordedActions.map((act, i) => {
+      const icon = actionIcons[act.action] || '🔵';
+      const label = String(act.action || 'step').toUpperCase();
+      let codeStr = '';
+      try {
+        codeStr = buildActionCode(act);
+      } catch (err) {
+        codeStr = String(act.fullCode || '// (unavailable)').slice(0, 500);
+      }
+      const valueStr = String(act.value != null ? act.value : '');
+      const valuePreview = valueStr.slice(0, 80);
+
+      return `
+      <div class="ll-rec-step">
+        <div class="ll-rec-step-head">
+           <span class="ll-rec-step-label">${icon} #${i + 1} ${esc(label)}</span>
+           <div class="ll-rec-step-actions">
+             <button type="button" class="clear-btn copy-btn" data-code="${esc(codeStr)}">Copy</button>
+             <button type="button" class="clear-btn remove-step-btn" data-index="${i}">✕</button>
+           </div>
+        </div>
+        ${valueStr ? `<div class="ll-rec-step-value">value: "${esc(valuePreview)}"</div>` : ''}
+        <div class="ll-rec-step-code">${hl(codeStr)}</div>
+      </div>
+    `;
+    }).join('');
+  } catch (err) {
+    console.warn('[LocatorLens] renderTimeline failed:', err);
+    html = recordedActions.map((act, i) => `
+      <div class="ll-rec-step">
+        <div class="ll-rec-step-head"><span class="ll-rec-step-label">#${i + 1} ${esc(String(act.action || ''))}</span></div>
+        <pre class="ll-rec-step-code" style="white-space:pre-wrap;">${esc(String(act.fullCode || act.code || ''))}</pre>
+      </div>`).join('');
+  }
+
+  timelineList.innerHTML = html;
+}
+
+function buildActionCode(act) {
+  const locator = act.code || '';
+  const valStr = String(act.value != null ? act.value : '');
+  switch (act.action) {
+    case 'goto':
+      return `await page.goto(${JSON.stringify(valStr)});`;
+    case 'viewport': {
+      const raw = valStr || '0x0';
+      const parts = raw.split('x');
+      const w = parts[0] || '0';
+      const h = parts[1] != null && parts[1] !== '' ? parts[1] : (parts[0] || '0');
+      return `await page.setViewportSize({ width: ${Number(w) || 0}, height: ${Number(h) || 0} });`;
+    }
+    case 'click':
+      return `await ${locator}.click();`;
+    case 'dblclick':
+      return `await ${locator}.dblclick();`;
+    case 'fill':
+      return `await ${locator}.fill('${valStr.replace(/\\/g, '\\\\').replace(/'/g, "\\'")}');`;
+    case 'check':
+      return `await ${locator}.check();`;
+    case 'uncheck':
+      return `await ${locator}.uncheck();`;
+    case 'selectOption':
+      return `await ${locator}.selectOption('${valStr.replace(/'/g, "\\'")}');`;
+    case 'press':
+      return `await page.keyboard.press(${JSON.stringify(valStr)});`;
+    default:
+      return act.fullCode || `await ${locator}.click();`;
+  }
+}
+
+function generateTestScript() {
+  const lines = recordedActions.map(act => `  ${buildActionCode(act)}`).join('\n');
+  return `import { test, expect } from '@playwright/test';
+
+test('recorded test', async ({ page }) => {
+${lines}
+});
+`;
+}
+
+/** Text shown in the editor, or generated from the timeline if the editor is empty. */
+function getExportedTestScript() {
+  const ta = document.getElementById('codePreview');
+  if (!ta || ta.style.display === 'none') {
+    return recordedActions.length ? generateTestScript() : '';
+  }
+  const v = ta.value.trim();
+  return v || (recordedActions.length ? generateTestScript() : '');
+}
+
+/** Last script we pushed into the editor (so we can refresh while focused if unchanged). */
+let lastSyncedPreviewScript = '';
+
+function updateCodePreview() {
+  const previewEl = document.getElementById('codePreview');
+  const labelEl = document.getElementById('codePreviewLabel');
+  if (!previewEl || !labelEl) return;
+
+  if (recordedActions.length === 0) {
+    previewEl.style.display = 'none';
+    labelEl.style.display = 'none';
+    previewEl.value = '';
+    lastSyncedPreviewScript = '';
+    return;
+  }
+
+  labelEl.style.display = '';
+  previewEl.style.display = '';
+
+  const next = generateTestScript();
+  if (document.activeElement === previewEl) {
+    if (previewEl.value === lastSyncedPreviewScript) {
+      previewEl.value = next;
+      lastSyncedPreviewScript = next;
+    }
+    return;
+  }
+
+  previewEl.value = next;
+  lastSyncedPreviewScript = next;
+}
+
+let seenActionKeys = new Set();
+
+function updateRecPageUrlUI() {
+  const el = document.getElementById('recPageUrl');
+  if (!el) return;
+  if (recLastPageUrl) {
+    el.textContent = 'Page: ' + recLastPageUrl;
+    el.style.display = 'block';
+  } else {
+    el.textContent = '';
+    el.style.display = 'none';
+  }
+}
+
+function scheduleRecorderPersist() {
+  if (!chrome.storage || !chrome.storage.local) return;
+  clearTimeout(_recorderSaveTimer);
+  _recorderSaveTimer = setTimeout(persistRecorderState, 200);
+}
+
+function persistRecorderState() {
+  if (!chrome.storage || !chrome.storage.local) return;
+  const ta = document.getElementById('codePreview');
+  const codePreview = ta && ta.style.display !== 'none' ? (ta.value || '') : '';
+  chrome.storage.local.set({
+    [LL_RECORDER_STATE_KEY]: {
+      actions: recordedActions,
+      seenKeys: Array.from(seenActionKeys),
+      codePreview: codePreview,
+      lastPageUrl: recLastPageUrl
+    }
+  });
+}
+
+function loadRecorderState(callback) {
+  if (!chrome.storage || !chrome.storage.local) {
+    if (typeof callback === 'function') callback();
+    return;
+  }
+  chrome.storage.local.get(LL_RECORDER_STATE_KEY, (r) => {
+    const s = r && r[LL_RECORDER_STATE_KEY];
+    if (s && Array.isArray(s.actions) && s.actions.length > 0) {
+      recordedActions = s.actions;
+      seenActionKeys = new Set(Array.isArray(s.seenKeys) ? s.seenKeys : []);
+      recLastPageUrl = typeof s.lastPageUrl === 'string' ? s.lastPageUrl : '';
+      const ta = document.getElementById('codePreview');
+      const label = document.getElementById('codePreviewLabel');
+      const savedEdits = s.codePreview != null && String(s.codePreview).trim() !== '';
+      if (ta && savedEdits) {
+        ta.value = s.codePreview;
+        lastSyncedPreviewScript = s.codePreview;
+        ta.style.display = '';
+        if (label) label.style.display = '';
+      }
+      updateRecPageUrlUI();
+      renderTimeline();
+      if (!savedEdits) {
+        updateCodePreview();
+      }
+    } else if (s && typeof s.lastPageUrl === 'string' && s.lastPageUrl) {
+      recLastPageUrl = s.lastPageUrl;
+      updateRecPageUrlUI();
+    }
+    if (typeof callback === 'function') callback();
+  });
+}
+
+function dedupeKeyForAction(actionData) {
+  if (actionData.eventId && typeof actionData.eventId === 'string') {
+    return 'eid:' + actionData.eventId;
+  }
+  const tabId = typeof actionData.tabId === 'number' && !Number.isNaN(actionData.tabId) ? actionData.tabId : 0;
+  if (typeof actionData.sequence === 'number' && !Number.isNaN(actionData.sequence)) {
+    return 'seq:' + tabId + ':' + actionData.sequence;
+  }
+  const code = actionData.code || '';
+  const val = actionData.value != null ? String(actionData.value) : '';
+  return `${tabId}_${actionData.timestamp}_${actionData.action}_${val}_${code}`;
+}
+
+function appendToRecorder(actionData) {
+  if (!actionData) return;
+
+  const key = dedupeKeyForAction(actionData);
+  if (seenActionKeys.has(key)) return;
+  seenActionKeys.add(key);
+
+  recordedActions.push(Object.assign({}, actionData));
+  if (actionData.url && typeof actionData.url === 'string') {
+    recLastPageUrl = actionData.url;
+    updateRecPageUrlUI();
+  }
+  renderTimeline();
+  updateCodePreview();
+  scheduleRecorderPersist();
+
+  // Auto-scroll timeline to bottom
+  const timelineList = document.getElementById('recorderTimeline');
+  if (timelineList) timelineList.scrollTop = timelineList.scrollHeight;
+}

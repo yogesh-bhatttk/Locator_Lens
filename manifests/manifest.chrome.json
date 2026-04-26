@@ -35,6 +35,7 @@
         "<all_urls>"
       ],
       "js": [
+        "src/content-locator-engine.js",
         "src/content.js"
       ],
       "run_at": "document_idle"

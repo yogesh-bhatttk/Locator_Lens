@@ -1,6 +1,19 @@
 // LocatorLens – background.js (Service Worker)
 // Handles communication between popup, side panel, and content script
 
+/** Load order matters: engine defines __LocatorLensEngine before content.js runs. */
+const CONTENT_SCRIPT_FILES = ['src/content-locator-engine.js', 'src/content.js'];
+
+/** Long-lived channel so the service worker can push UI updates (recording, picks) to the side panel reliably. */
+let llSidePanelPort = null;
+chrome.runtime.onConnect.addListener((port) => {
+  if (port.name !== 'll-sidepanel') return;
+  llSidePanelPort = port;
+  port.onDisconnect.addListener(() => {
+    if (llSidePanelPort === port) llSidePanelPort = null;
+  });
+});
+
 // Track inspect mode per tab
 const inspectTabs = new Set();
 const activePanels = new Set(); // Track which tabs have an open side panel
@@ -32,7 +45,7 @@ chrome.contextMenus.onClicked.addListener((info, tab) => {
   chrome.tabs.sendMessage(tab.id, { type: 'CONTEXT_MENU_COPY' }, (res) => {
     if (chrome.runtime.lastError) {
       chrome.scripting.executeScript(
-        { target: { tabId: tab.id }, files: ['src/content.js'] },
+        { target: { tabId: tab.id }, files: CONTENT_SCRIPT_FILES },
         () => {
           setTimeout(() => {
             chrome.tabs.sendMessage(tab.id, { type: 'CONTEXT_MENU_COPY' });
@@ -57,8 +70,16 @@ function openSidePanel(windowId) {
 
 // ── Helper: relay message to side panel ──────────────────────────────────────
 function relayToSidePanel(msg) {
+  if (llSidePanelPort) {
+    try {
+      llSidePanelPort.postMessage(msg);
+      return;
+    } catch (e) {
+      llSidePanelPort = null;
+    }
+  }
   chrome.runtime.sendMessage(msg, () => {
-    void chrome.runtime.lastError; // suppress if panel is closed
+    void chrome.runtime.lastError;
   });
 }
 
@@ -83,7 +104,7 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
         if (chrome.runtime.lastError) {
           chrome.scripting.executeScript({
             target: { tabId },
-            files: ['src/content.js']
+            files: CONTENT_SCRIPT_FILES
           }, () => {
             chrome.tabs.sendMessage(tabId, { type: 'START_INSPECT' });
           });
@@ -136,19 +157,93 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
 
   // Track panel open/close with timeout safety
   if (msg.type === 'PANEL_HEARTBEAT') {
-    const key = (sender.tab && sender.tab.id) ? sender.tab.id : 'global';
+    // Side panel / extension pages often have no sender.tab; treat as one logical panel.
+    const key = 'global';
     activePanels.add(key);
-    
-    // Using a simple timeout to remove the panel from active state if it goes silent
-    if (globalThis[`timeout_${key}`]) clearTimeout(globalThis[`timeout_${key}`]);
-    globalThis[`timeout_${key}`] = setTimeout(() => {
+    if (globalThis._llPanelHeartbeatTimer) clearTimeout(globalThis._llPanelHeartbeatTimer);
+    globalThis._llPanelHeartbeatTimer = setTimeout(() => {
       activePanels.delete(key);
-    }, 4500); 
+    }, 12000);
   }
-  
+
   if (msg.type === 'GET_PANEL_STATE') {
-    // We check for 'global' as the side panel is usually global for the window in Chrome
-    sendResponse({ active: activePanels.has('global') });
+    sendResponse({ active: activePanels.size > 0 });
+  }
+
+  // RUN_STRESS_TEST: relay from side panel to content script
+  if (msg.type === 'RUN_STRESS_TEST') {
+    chrome.tabs.query({ active: true, currentWindow: true }, (tabs) => {
+      if (!tabs[0]) return;
+      const tabId = tabs[0].id;
+      const finish = (res) => {
+        if (res && res.data) {
+          relayToSidePanel({ type: 'STRESS_TEST_RESULT', data: res.data });
+        }
+      };
+      chrome.tabs.sendMessage(tabId, { type: 'RUN_STRESS_TEST' }, (res) => {
+        if (chrome.runtime.lastError) {
+          chrome.scripting.executeScript({ target: { tabId }, files: CONTENT_SCRIPT_FILES }, () => {
+            void chrome.runtime.lastError;
+            setTimeout(() => {
+              chrome.tabs.sendMessage(tabId, { type: 'RUN_STRESS_TEST' }, finish);
+            }, 100);
+          });
+          return;
+        }
+        finish(res);
+      });
+    });
+  }
+
+  // 🎬 RECORDING: Start/Stop recording on the active tab
+  if (msg.type === 'START_RECORDING') {
+    chrome.tabs.query({ active: true, currentWindow: true }, (tabs) => {
+      if (!tabs[0]) return;
+      const tabId = tabs[0].id;
+      chrome.tabs.sendMessage(tabId, { type: 'START_RECORDING' }, (r) => {
+        if (chrome.runtime.lastError) {
+          // Inject content script first, then start recording
+          chrome.scripting.executeScript({
+            target: { tabId },
+            files: CONTENT_SCRIPT_FILES
+          }, () => {
+            void chrome.runtime.lastError;
+            setTimeout(() => {
+              chrome.tabs.sendMessage(tabId, { type: 'START_RECORDING' }, () => void chrome.runtime.lastError);
+            }, 80);
+          });
+        }
+      });
+    });
+  }
+
+  if (msg.type === 'STOP_RECORDING') {
+    chrome.tabs.query({ active: true, currentWindow: true }, (tabs) => {
+      if (!tabs[0]) return;
+      chrome.tabs.sendMessage(tabs[0].id, { type: 'STOP_RECORDING' }, () => {
+        void chrome.runtime.lastError;
+      });
+    });
+  }
+
+  // RECORDED_ACTION: relay from content script to side panel (slim payload — large locator arrays can fail clone)
+  if (msg.type === 'RECORDED_ACTION') {
+    const d = msg.data || {};
+    const tabId = sender && sender.tab ? sender.tab.id : 0;
+    relayToSidePanel({
+      type: 'RECORDED_ACTION',
+      data: {
+        action: d.action,
+        value: d.value,
+        code: d.code,
+        fullCode: d.fullCode,
+        sequence: d.sequence,
+        timestamp: d.timestamp,
+        url: d.url,
+        tabId,
+        eventId: d.eventId
+      }
+    });
   }
 });
 
