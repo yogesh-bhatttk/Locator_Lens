@@ -1,51 +1,65 @@
-# 🏗️ LocatorLens: The Master Building Process & Architecture (v1.5.0)
+# LocatorLens — build process and architecture
 
-This document tracks the architectural decisions and high-fidelity features of **LocatorLens: Lumina Cyber HUD**.
-
----
-
-## 🎨 1. The "Lumina Cyber HUD" 
-A tactical, high-fidelity developer interface featuring:
-- **Glassmorphic Tonal Stacking**: Depth via `backdrop-filter: blur()`.
-- **Atmospheric Glow**: Signature Neon Cyan (#3adffa) accenting.
-- **Holographic Animations**: Smooth card entries and breathing status pulses.
-- **Proprietary Scrollbars**: Custom 4px sliders for a hardware-interface feel.
+This document describes how the extension is structured and how distribution folders relate to `src/`. Feature descriptions match the **Playwright-only** implementation (side panel badge, POM TS/JS, recorder, selector lab).
 
 ---
 
-## 🛰️ 2. Universal Framework Matrix
-A real-time translation engine that allows hot-swaping between:
-- **Playwright**: Semantic locators (Roles, Labels, TestIDs).
-- **Selenium**: Python/Java/C# compatible `By` selectors.
-- **Cypress**: `cy.get()` and `cy.contains()` chains.
+## 1. Lumina-style HUD (side panel / popup)
+
+- Dark theme, monospace accents, and motion used for scanlines and status—not a separate runtime.
+- Side panel is the primary surface: **Inspect**, **Record**, **POM**, **Settings** tabs.
 
 ---
 
-## 🧬 3. Shadow DOM X-Ray Engine
-Industry-leading "piercing" technology:
-- **Deep-Trace Algorithm**: A recursive coordinate-based search that looksthrough Shadow Hosts to find inner "Leaf" elements.
-- **Real-Time Hover Piercing**: Highlighting stays accurate even inside complex Web Components.
-- **Shadow Sentinel**: Automatic UI branding (`🧬 SHADOW`) when an encapsulated element is detected.
+## 2. Playwright locator pipeline
+
+- **`content-locator-engine.js`** (injected before `content.js`) ranks candidate locators and attaches explanations.
+- **`content.js`** handles overlay, pick, keyboard traversal, stress test messaging, recorder hooks, and selector-lab validation messages to/from the page.
+- **`sidepanel.js`** renders cards via **`formatForPlaywright()`** (pass-through of engine `code` / `fullCode`), copy buttons, POM add-from-card, and all POM/recorder logic.
+
+There is **no** in-product translation to Selenium or Cypress.
 
 ---
 
-## 🕹️ 4. Precision Navigation & Traversal
-- **Boundary Jumper**: Keyboard shortcuts (Arrow Up/Down) that "vault" between Shadow DOM roots and the Light DOM.
-- **Parent Chaining**: Logic that automatically connects target elements to stable anchors.
+## 3. Shadow DOM–aware inspection
+
+- Deep element resolution at pointer coordinates across **open** shadow roots where the browser exposes the tree.
+- UI surfaces a **SHADOW** hint when the picked node lives inside a shadow root.
 
 ---
 
-## 🛡️ 5. Reliability & State Sync
-- **Navigation Shield**: Broadcaster in `background.js` that resets all UI states (Popup, Sidepanel, Page) upon tab refresh.
-- **Heartbeat Sync**: 4.5s polling between the Sidepanel and Background to maintain state awareness.
-- **Total Decommissioning**: Full purge of all event listeners on "Stop Inspecting" to prevent ghost effects.
+## 4. Precision navigation
+
+- Arrow **Up** / **Down** adjust the current target along parent/child relationships while inspecting.
+- **Escape** stops inspection and tears down listeners and overlay state.
 
 ---
 
-## 🚀 6. Distribution & Local Dev
-We use a **Dual-Dist Junction Architecture** for zero-warning development:
-- **`dist-chrome/`**: Clean MV3 manifest for Chromium.
-- **`dist-firefox/`**: Clean MV3 manifest for Gecko.
-- **src/ Mirroring**: Source folders are junctioned into dist folders for instant cross-browser updates.
+## 5. Reliability and state
 
-**Developed with ⚡️ and 🧠 by Yogesh & Antigravity.** 🕺🏅🥇🚀✨🏁🏆
+- **Background** relays messages between the content script, side panel, and popup where needed.
+- **Side panel heartbeat** keeps lightweight awareness that the panel is open.
+- **Stop inspecting** removes listeners and overlay to avoid “ghost” hover behavior.
+
+---
+
+## 6. POM and test scaffold
+
+- Saved elements live in **`chrome.storage.local`** (`savedPOMElements`).
+- **generatePOMCode** emits Playwright **TypeScript** (with `Locator` types) or **JavaScript** page objects; optional **inferActions** helpers use **`expect`** when action methods are enabled.
+- **generateTestScaffold** emits a **`.spec.ts`** file that imports page classes from **`./PageObject`** (align your download filename with your repo layout).
+
+---
+
+## 7. Distribution and local dev
+
+Some setups use a **dual-dist** layout (`dist-chrome/`, `dist-firefox/`) with junctions or copies of `src/` and manifest variants so each browser loads a clean MV3 manifest. Your **`setup.bat` / `setup.sh`** scripts define the exact flow for this repo.
+
+If you load **unpack from repo root**, `manifest.json` is the source of truth for that workflow.
+
+---
+
+## 8. Optional architecture graph (`graphify-out/`)
+
+- **`GRAPH_REPORT.md`** — human-readable summary of modules and communities (may lag code until you re-run your graph pipeline).
+- **`graph.html` / `graph.json`** — interactive **vis-network** graph; opening `graph.html` pulls **vis-network** from a CDN (see privacy policy). Regenerate when large refactors land so labels match `src/`.

@@ -2,7 +2,7 @@
   "manifest_version": 3,
   "name": "LocatorLens – Smart Locator Automation",
   "version": "1.1.6",
-  "description": "Inspect any element on any page and instantly get ranked Playwright locators with explanations. Built for QA engineers and automation testers.",
+  "description": "Inspect elements and get ranked Playwright locators, selector lab, recording, and POM/test scaffolds—all locally.",
   "browser_specific_settings": {
     "gecko": {
       "id": "locatorlens@yogesh-bhatttk.com",

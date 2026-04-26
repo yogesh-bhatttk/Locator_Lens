@@ -1,54 +1,63 @@
 # Privacy Policy – LocatorLens
 
-**Last updated:** April 9, 2026
+**Last updated:** April 27, 2026
 
 ## Overview
 
-LocatorLens is a browser extension that inspects web page elements and generates automation test locators. Your privacy is important to us.
+LocatorLens is a browser extension that inspects web page elements and surfaces **Playwright**-style locators, a selector lab, optional interaction recording, and a Page Object Model (POM) builder. Your privacy is important to us.
 
-## Data Collection
+## Data collection and transmission
 
-**LocatorLens does NOT collect, store, or transmit any user data.**
+**LocatorLens does not collect, store, or transmit your data to LocatorLens servers.** There are no LocatorLens-operated backends, analytics endpoints, or advertising SDKs.
 
-Specifically, we do NOT collect:
-- Personal information (name, email, address, etc.)
-- Browsing history or web activity
-- Cookies or tracking data
-- Authentication credentials
-- Financial information
-- Location data
+Specifically, we do **not**:
 
-## How the Extension Works
+- Collect personal information (name, email, address, etc.) for our own use
+- Log your browsing history to a remote service
+- Use third-party analytics or crash reporting tied to our infrastructure
+- Sell or broker user data
 
-- LocatorLens reads the DOM structure of the active web page **only when you activate the inspector**.
-- All processing happens **locally in your browser**. No data is sent to any external server.
-- User preferences (such as selected framework) are stored **locally** using Chrome's `storage.local` API and never leave your device.
+## How the extension works
+
+- The content script reads the DOM of the active page **only while you use inspection, recording, selector validation, or related features you start**.
+- Locator ranking and explanations run **entirely in your browser** (see `content-locator-engine.js` and `content.js`).
+- The side panel and popup run in extension UI contexts; they do not send page content to us.
+
+## Data kept locally on your device
+
+Chrome’s `chrome.storage.local` (or the equivalent in other Chromium-based browsers / Firefox) may persist **only for your convenience**, for example:
+
+- Last inspection result (so the side panel can show it after reopening)
+- Saved POM elements and related settings (actions/JSDoc toggles)
+- Recorder timeline / generated script draft (if you use recording)
+- Other UI preferences
+
+This data **stays on your machine** inside the browser profile. It is **not** synced to LocatorLens by the extension itself.
+
+**Export / import:** If you use **Download**, **Export session**, or copy generated code, that is **you** saving or sharing data through your OS or clipboard—not an automatic upload by LocatorLens.
 
 ## Permissions
 
-LocatorLens requests the following permissions, all used strictly for local functionality:
+Permissions are used **only** to deliver the features below. Exact lists may vary slightly by browser; see `manifest.json` and `manifests/manifest.*.json` for the authoritative set.
 
-| Permission | Purpose |
-|---|---|
-| `activeTab` | Access the current tab's DOM for element inspection |
-| `scripting` | Inject the inspector script into the active page |
-| `storage` | Save user preferences locally |
-| `contextMenus` | Add right-click menu for quick inspection |
-| `sidePanel` | Display locator results in the browser side panel |
-| `host_permissions` | Enable background tracking required for precise context menu functionality on all sites |
+| Permission / access | Purpose |
+|---------------------|---------|
+| `activeTab` | Operate on the tab you are using when you invoke the extension |
+| `scripting` | Inject the inspector / recorder / selector-lab logic when needed |
+| `storage` | Persist local preferences and saved POM data (see above) |
+| `contextMenus` | Optional quick actions from the right-click menu (where enabled) |
+| `sidePanel` (Chromium) | Show results in the browser side panel |
+| `host_permissions` / `<all_urls>` matches | Allow the content script to run on pages you open so inspection and validation work on your sites |
 
-## Third-Party Services
+## Third-party services
 
-LocatorLens does **not** use any third-party analytics, tracking, or advertising services.
+- **Vis-Network** (loaded from `unpkg.com`) is used **only** in the optional local `graphify-out/graph.html` architecture viewer, if you open that file. It is not used by the extension runtime against arbitrary pages you visit for inspection.
+- The extension itself does **not** embed remote trackers or ads.
 
-## Data Sharing
+## Changes to this policy
 
-We do **not** sell, transfer, or share any user data with third parties.
-
-## Changes to This Policy
-
-If we update this privacy policy, changes will be reflected in this document with an updated date.
+Updates will be reflected in this document with a revised **Last updated** date.
 
 ## Contact
 
-If you have questions about this privacy policy, please open an issue on the [GitHub repository](https://github.com/yogesh-bhatttk/Locator_Lens).
+Questions about this policy: open an issue on the [GitHub repository](https://github.com/yogesh-bhatttk/Locator_Lens).

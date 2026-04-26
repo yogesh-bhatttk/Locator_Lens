@@ -1,71 +1,83 @@
-# 🎯 LocatorLens: Lumina Cyber HUD (v1.5.0)
+# LocatorLens — Playwright locator HUD
 
 [![Chrome](https://img.shields.io/badge/Chrome-Ready-green?logo=google-chrome&logoColor=white)]()
 [![Firefox](https://img.shields.io/badge/Firefox-Ready-orange?logo=firefox-browser&logoColor=white)]()
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 
-**LocatorLens** is a next-generation, high-fidelity browser inspector for modern automation engineers. Featuring the **Lumina Cyber HUD**, it provides real-time, multi-framework locator generation with deep-trace "X-Ray" vision for even the most complex web applications.
+**LocatorLens** is a browser extension for **Playwright**-oriented test automation: inspect any element, get **ranked locators** with short explanations, validate selectors, record flows, and build **page objects** and **test scaffolds** from the side panel.
+
+Extension version is defined in `manifest.json` (currently **1.1.6**).
 
 ---
 
-## 📽 Key Features
+## Key features
 
-### 1. 🌌 Lumina Cyber HUD
-Experience a tactical-grade developer interface with holographic animations, scanline textures, and a high-focus obsidian/cyan aesthetic. 
+### Inspector and ranked locators
+- Semantic-first ranking (`getByTestId`, `getByRole`, `getByLabel`, etc.) via `content-locator-engine.js`.
+- Side panel shows stability hints, accessibility notes where available, and “why this locator” copy.
+- **Playwright-only** output: no Selenium or Cypress code paths in the product UI.
 
-### 2. 🛰️ Universal Framework Matrix
-Switch between **Playwright**, **Selenium (Python/Java/C#)**, and **Cypress** on-the-fly. The HUD instantly translates semantic locators into the correct syntax for your chosen framework.
+### Shadow DOM–aware picking
+- Coordinate-based deep hit testing so targets inside **open shadow roots** can be inspected and described.
 
-### 3. 🧬 Shadow DOM X-Ray Vision
-Pierce the veil of encapsulated Web Components. Our **Deep-Trace Engine** automatically identifies Shadow Roots and provides "Shadow-aware" locators that work where others fail.
+### DOM traversal while inspecting
+- **Arrow Up / Down** to move between parent and child elements; **Escape** to stop.
 
-### 4. 🕹️ Precision Navigation
-Use **Arrow Up/Down** keyboard shortcuts to traverse the DOM tree. Our "Boundary Jumper" logic allows you to navigate in and out of Shadow DOM layers seamlessly.
+### Selector lab
+- Type a CSS selector or XPath in the side panel to **highlight matches** on the active page (with counts and errors surfaced in the UI).
 
-### 5. 🛡️ Stability Intelligence
-- **Ranked Locators**: Automatically prioritizes `getByTestId()`, `getByRole()`, and `getByLabel()`.
-- **Anti-Ghost Guard**: Total event-listener decommissioning ensures zero "ghost-hover" effects when inspection is stopped.
-- **Auto-Sync**: Real-time state synchronization between Popup, Sidepanel, and Page.
+### Recorder (side panel)
+- Capture clicks, typing (debounced fills), and some keys; sync an editable **Playwright test** draft and copy/download.
 
----
+### POM builder
+- Add locators from cards into a **saved list**, rename inline, drag to reorder, optional **health** checks against the live page.
+- Export **TypeScript or JavaScript** page objects with optional **action methods** and **JSDoc**.
+- **Generate test** downloads a `.spec.ts` scaffold that imports from `./PageObject` (same pattern as the combined POM file you download).
 
-## 🚀 Quick Start (Masterpiece Edition)
-
-### **1. Initial Setup (Zero-Warning Mode)**
-To ensure you have 0 warnings in your browser, run the setup script for your target platform:
-- **Windows**: Open terminal in project root and run `setup.bat chrome` (or `firefox`)
-- **Mac/Linux**: Open terminal in project root and run `./setup.sh chrome` (or `firefox`)
-
-### **2. Chrome, Edge, or Brave**
-1.  Open your browser and navigate to `chrome://extensions`.
-2.  Enable **"Developer mode"** (top-right).
-3.  Click **"Load unpacked"** and select the **root project folder**.
-
-### **3. Firefox**
-1.  Navigate to `about:debugging#/runtime/this-firefox`.
-2.  Click **"Load Temporary Add-on..."**.
-3.  Select the **`manifest.json`** file in the root project folder.
+### Lumina-style UI
+- Dark “HUD” styling in the side panel and popup (cosmetic only; behavior is the same on all themes).
 
 ---
 
-## 📁 Project Structure
+## Quick start
+
+### Windows
+From the project root: `setup.bat chrome` or `setup.bat firefox`.
+
+### macOS / Linux
+`./setup.sh chrome` or `./setup.sh firefox`.
+
+### Chrome, Edge, or Brave
+1. Open `chrome://extensions`.
+2. Enable **Developer mode**.
+3. **Load unpacked** and choose the **project root** (or your `dist-chrome` folder if you use the dual-dist layout—see `build_process.md`).
+
+### Firefox
+1. Open `about:debugging#/runtime/this-firefox`.
+2. **Load Temporary Add-on…** and select **`manifest.json`** in the project root.
+
+---
+
+## Project layout
 
 ```text
-├── src/                # Core JavaScript and HTML logic
-│   ├── background.js   # Master Relay & Navigation Shield
-│   ├── content.js      # Deep-Trace X-Ray Engine & Page Injection
-│   ├── sidepanel.js    # Multi-Framework Translator & HUD Logic
-│   └── sidepanel.html  # Lumina Cyber HUD UI (CSS/HTML)
-├── dist-chrome/        # Chrome-optimized build (Junctioned)
-├── dist-firefox/       # Firefox-optimized build (Junctioned)
-└── icons/              # High-fidelity Lumina branding icons
+├── src/
+│   ├── background.js           # Extension service worker / messaging
+│   ├── content-locator-engine.js  # Locator ranking (injected first)
+│   ├── content.js              # Overlay, inspect, recorder, selector lab
+│   ├── sidepanel.js / .html    # Main UI: inspect, record, POM, settings
+│   ├── popup.js / .html        # Compact launcher
+├── manifests/                  # Browser-specific manifest variants
+├── graphify-out/               # Optional architecture graph (see GRAPH_REPORT.md)
+├── icons/
+└── manifest.json               # Primary manifest (see setup scripts for dist copies)
 ```
 
 ---
 
-## 👨‍💻 Engineering Insights
-LocatorLens follows a **Semantic-First** philosophy. It ignores brittle XPaths and CSS coordinates whenever possible, focusing instead on the underlying **Accessibility Tree** to ensure your tests survive UI redesigns.
+## Engineering notes
 
-🔗 **GitHub Repository**: [https://github.com/yogesh-bhatttk/Locator_Lens](https://github.com/yogesh-bhatttk/Locator_Lens)
+- **Semantic-first**: prefer roles, labels, and test ids over long CSS chains or positional selectors when the DOM exposes them.
+- **Privacy**: no LocatorLens-operated cloud; see `PRIVACY_POLICY.md`.
 
-Developed with ⚡️ and 🧠 for the global automation community.
+**Repository:** [github.com/yogesh-bhatttk/Locator_Lens](https://github.com/yogesh-bhatttk/Locator_Lens)

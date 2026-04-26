@@ -373,13 +373,13 @@
       "norm_label": "updateinspectui()"
     },
     {
-      "label": "formatForFramework()",
+      "label": "formatForPlaywright()",
       "file_type": "code",
-      "source_file": "dist-chrome\\src\\sidepanel.js",
-      "source_location": "L93",
+      "source_file": "src\\sidepanel.js",
+      "source_location": "L438",
       "id": "sidepanel_formatforframework",
       "community": 1,
-      "norm_label": "formatforframework()"
+      "norm_label": "formatforplaywright()"
     },
     {
       "label": "renderResults()",
@@ -426,12 +426,12 @@
       "norm_label": "lumina cyber hud"
     },
     {
-      "label": "Universal Framework Matrix",
+      "label": "Playwright-only HUD & POM",
       "file_type": "document",
       "source_file": "README.md",
       "id": "universal_framework_matrix",
       "community": 6,
-      "norm_label": "universal framework matrix"
+      "norm_label": "playwright-only hud & pom"
     },
     {
       "label": "Shadow DOM X-Ray Engine",
@@ -466,28 +466,28 @@
       "norm_label": "navigation shield"
     },
     {
-      "label": "Playwright Translator",
+      "label": "Locator cards (Playwright)",
       "file_type": "code",
       "source_file": "src/sidepanel.js",
       "id": "playwright_translator",
       "community": 6,
-      "norm_label": "playwright translator"
+      "norm_label": "locator cards (playwright)"
     },
     {
-      "label": "Selenium Translator",
+      "label": "generatePOMCode()",
       "file_type": "code",
       "source_file": "src/sidepanel.js",
       "id": "selenium_translator",
       "community": 6,
-      "norm_label": "selenium translator"
+      "norm_label": "generatepomcode()"
     },
     {
-      "label": "Cypress Translator",
+      "label": "generateTestScaffold()",
       "file_type": "code",
       "source_file": "src/sidepanel.js",
       "id": "cypress_translator",
       "community": 6,
-      "norm_label": "cypress translator"
+      "norm_label": "generatetestscaffold()"
     },
     {
       "label": "Selector Lab",
