@@ -1,0 +1,13 @@
+# Line endings: keep text as LF in Git (clear diffs, GitHub-friendly).
+# Windows CMD batch files stay CRLF so they run reliably when checked out on Windows.
+* text=auto eol=lf
+*.bat text eol=crlf
+
+# Binary assets — no end-of-line normalization
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.gif binary
+*.webp binary
+*.ico binary
+*.zip binary
