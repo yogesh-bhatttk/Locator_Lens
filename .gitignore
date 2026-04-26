@@ -15,3 +15,7 @@ yarn-error.log*
 .agents/
 MISSION_SELECTOR_LAB.md
 screenshots/
+
+# Graphify
+graphify-out/.graphify_python
+graphify-out/cache/
