@@ -95,7 +95,7 @@
       position: relative;
     }
 
-    #framework-select {
+    .fw-playwright-badge {
       background: var(--surf-low);
       border: 1px solid var(--border);
       color: var(--primary);
@@ -103,16 +103,9 @@
       font-size: 10px;
       padding: 4px 8px;
       border-radius: 4px;
-      outline: none;
-      cursor: pointer;
       text-transform: uppercase;
       letter-spacing: 0.05em;
-      transition: all 0.2s;
-    }
-
-    #framework-select:hover {
-      border-color: var(--primary);
-      box-shadow: 0 0 10px rgba(58, 223, 250, 0.1);
+      white-space: nowrap;
     }
 
     .logo {
@@ -1147,6 +1140,94 @@
       border-bottom: 1px solid var(--border);
       margin-bottom: 5px;
     }
+    /* v3 — fragile badge */
+    .pom-entry-fragile { border-left: 2px solid #ffb86c; }
+
+    .pom-stability {
+      font-size: 8px;
+      font-weight: 700;
+      padding: 2px 5px;
+      border-radius: 3px;
+      letter-spacing: 0.04em;
+      text-transform: uppercase;
+      white-space: nowrap;
+    }
+    .pom-stability.pom-stab-best  { color: #50fa7b; background: rgba(80,250,123,.12); border: 1px solid rgba(80,250,123,.35); }
+    .pom-stability.pom-stab-good  { color: #8be9fd; background: rgba(139,233,253,.1); border: 1px solid rgba(139,233,253,.3); }
+    .pom-stability.pom-stab-ok    { color: var(--muted); background: var(--surf-low); border: 1px solid var(--border); }
+    .pom-stability.pom-stab-avoid { color: var(--error); background: rgba(255,113,108,.1); border: 1px solid rgba(255,113,108,.3); }
+    .pom-fragile-badge {
+      font-size: 7.5px;
+      font-weight: 700;
+      color: #ffb86c;
+      background: rgba(255,184,108,.12);
+      border: 1px solid rgba(255,184,108,.35);
+      border-radius: 2px;
+      padding: 1px 4px;
+      flex-shrink: 0;
+      white-space: nowrap;
+    }
+    /* v3 — toggle row */
+    .pom-v3-toolbar {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      padding: 6px 10px;
+      border-bottom: 1px solid var(--border);
+      background: var(--surf-low);
+      flex-wrap: wrap;
+      flex-shrink: 0;
+    }
+    .pom-toggle-group {
+      display: flex;
+      align-items: center;
+      gap: 5px;
+      font-size: 9px;
+      font-weight: 700;
+      color: var(--muted);
+      text-transform: uppercase;
+      letter-spacing: .05em;
+    }
+    .pom-toggle {
+      position: relative;
+      width: 26px;
+      height: 13px;
+    }
+    .pom-toggle input { opacity: 0; width: 0; height: 0; position: absolute; }
+    .pom-toggle-slider {
+      position: absolute;
+      inset: 0;
+      background: var(--border);
+      border-radius: 13px;
+      cursor: pointer;
+      transition: background .2s;
+    }
+    .pom-toggle-slider::before {
+      content: '';
+      position: absolute;
+      width: 9px; height: 9px;
+      left: 2px; top: 2px;
+      background: #fff;
+      border-radius: 50%;
+      transition: transform .2s;
+    }
+    .pom-toggle input:checked + .pom-toggle-slider { background: var(--primary); }
+    .pom-toggle input:checked + .pom-toggle-slider::before { transform: translateX(13px); }
+    .pom-v3-sep { width: 1px; height: 12px; background: var(--border); flex-shrink: 0; }
+    .pom-v3-btn {
+      font-size: 9px;
+      font-weight: 700;
+      padding: 4px 8px;
+      border-radius: 4px;
+      border: 1px solid var(--border);
+      cursor: pointer;
+      letter-spacing: .02em;
+      white-space: nowrap;
+      transition: opacity .15s;
+    }
+    .pom-v3-btn:hover { opacity: .8; }
+    .pom-v3-btn.accent { background: var(--primary); color: var(--bg); border-color: var(--primary); }
+    .pom-v3-btn.muted  { background: var(--surf2); color: var(--fg); }
   </style>
 </head>
 
@@ -1156,14 +1237,10 @@
       <div class="logo">🥷</div>
       <div class="brand">
         <div class="brand-name">LocatorLens</div>
-        <div class="brand-sub">Framework Matrix Active</div>
+        <div class="brand-sub">Playwright locators</div>
       </div>
       <div class="fw-select-wrap">
-        <select id="framework-select">
-          <option value="playwright">Playwright</option>
-          <option value="selenium">Selenium</option>
-          <option value="cypress">Cypress</option>
-        </select>
+        <span class="fw-playwright-badge" title="Locator output is Playwright only">Playwright</span>
       </div>
       <div class="status-dot" id="statusDot"></div>
     </div>
@@ -1278,13 +1355,32 @@
       </div>
 
       <div class="tab-content" id="tab-pom">
-        <!-- Framework Selector -->
+        <!-- POM language (Playwright API) -->
         <div class="pom-fw-bar">
           <div class="pom-fw-chip active" data-pomfw="playwright-ts">PW · TypeScript</div>
           <div class="pom-fw-chip" data-pomfw="playwright-js">PW · JavaScript</div>
-          <div class="pom-fw-chip" data-pomfw="selenium">Selenium</div>
-          <div class="pom-fw-chip" data-pomfw="cypress">Cypress</div>
-          <div class="pom-fw-chip" data-pomfw="wdio">WebdriverIO</div>
+        </div>
+
+        <!-- v3 Toolbar -->
+        <div class="pom-v3-toolbar">
+          <div class="pom-toggle-group" title="Generate action methods alongside property declarations">
+            <span>Actions</span>
+            <label class="pom-toggle">
+              <input type="checkbox" id="pomActionsToggle" checked>
+              <span class="pom-toggle-slider"></span>
+            </label>
+          </div>
+          <div class="pom-toggle-group" title="Add JSDoc comments to every property and method">
+            <span>JSDoc</span>
+            <label class="pom-toggle">
+              <input type="checkbox" id="pomJsdocToggle" checked>
+              <span class="pom-toggle-slider"></span>
+            </label>
+          </div>
+          <div class="pom-v3-sep"></div>
+          <button class="pom-v3-btn accent" id="generateTestBtn" title="Download a ready-to-run Playwright .spec.ts test scaffold">⚡ Generate Test</button>
+          <button class="pom-v3-btn muted" id="exportSessionBtn" title="Export all POM elements as a shareable JSON session">📤 Export</button>
+          <button class="pom-v3-btn muted" id="importSessionBtn" title="Import a team session JSON file (merges with current)">📥 Import</button>
         </div>
 
         <!-- Split Panel -->

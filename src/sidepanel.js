@@ -1,6 +1,5 @@
 let isInspecting = false;
 let isRecording = false;
-let currentFramework = 'playwright';
 let currentPOMFramework = 'playwright-ts';
 let savedPOMElements = [];
 let recordedActions = [];
@@ -43,11 +42,23 @@ function pillLabel(s) {
   const m = { BEST: '★ BEST', GOOD: '✓ GOOD', OK: '~ OK', AVOID: '✗ AVOID' };
   return m[String(s).toUpperCase()] || s;
 }
+
+function pomStabilityClass(s) {
+  const u = String(s || '').toUpperCase();
+  if (u === 'BEST') return 'pom-stab-best';
+  if (u === 'GOOD') return 'pom-stab-good';
+  if (u === 'AVOID') return 'pom-stab-avoid';
+  return 'pom-stab-ok';
+}
 function rankClass(r) {
   return r === 1 ? 'r1' : r === 2 ? 'r2' : r === 3 ? 'r3' : 'rX';
 }
 
-// ── POM code generation ──────────────────────────────────────────────────────────────────
+// ── POM v3 Feature Flags ─────────────────────────────────────────────────────
+let pomActionsEnabled = true;
+let pomJsdocEnabled   = true;
+
+// ── POM Helpers ───────────────────────────────────────────────────────────────
 function toPascalCase(str) {
   return String(str || 'Page').replace(/[^a-zA-Z0-9\s]/g, ' ').trim()
     .split(/\s+/).filter(Boolean)
@@ -55,29 +66,147 @@ function toPascalCase(str) {
     || 'Page';
 }
 
+function toCamelCase(str) {
+  const words = String(str || '').replace(/[^a-zA-Z0-9\s]/g, ' ').trim().split(/\s+/).filter(Boolean);
+  return words.map((w, i) => i === 0 ? w.toLowerCase() : w.charAt(0).toUpperCase() + w.slice(1).toLowerCase()).join('') || 'element';
+}
+
+function toSnakeCase(str) {
+  return String(str || '').replace(/([A-Z])/g, '_$1').toLowerCase().replace(/^_/, '').replace(/[^a-z0-9_]/g, '_').replace(/_+/g, '_');
+}
+
+/** Valid JS identifier for generated class fields & methods (reserved words, leading digits). */
+const POM_JS_RESERVED = new Set([
+  'arguments', 'await', 'break', 'case', 'catch', 'class', 'const', 'continue', 'debugger', 'default', 'delete', 'do',
+  'else', 'enum', 'eval', 'export', 'extends', 'false', 'finally', 'for', 'function', 'if', 'implements', 'import', 'in',
+  'instanceof', 'interface', 'let', 'new', 'null', 'package', 'private', 'protected', 'public', 'return', 'static', 'super',
+  'switch', 'this', 'throw', 'true', 'try', 'typeof', 'var', 'void', 'while', 'with', 'yield',
+]);
+
+function sanitizePOMIdentifier(raw) {
+  let s = toCamelCase(String(raw || 'element').replace(/^[^a-zA-Z_$]+/, ''));
+  if (!s) s = 'element';
+  if (/^[0-9]/.test(s)) s = 'el' + s;
+  if (POM_JS_RESERVED.has(s)) s += 'El';
+  return s;
+}
+
+function escapeJsDocLine(s) {
+  return String(s || '').replace(/\*\//g, '*\\/');
+}
+
+/** Ensures unique `genName` per field inside one page object class. */
+function resolvePOMFieldNames(elements) {
+  const used = new Set();
+  return elements.map(el => {
+    let base = sanitizePOMIdentifier(el.name);
+    let genName = base;
+    let n = 2;
+    while (used.has(genName)) {
+      genName = `${base}${n++}`;
+    }
+    used.add(genName);
+    return { ...el, genName };
+  });
+}
+
 function autoName(el, index) {
-  const text = (el.visibleText || el.ariaLabel || el.placeholder || '').slice(0, 40);
-  const clean = String(text).replace(/[^a-zA-Z0-9\s]/g, ' ').trim()
-    .split(/\s+/).filter(Boolean)
-    .map((w, i) => i === 0 ? w.toLowerCase() : w.charAt(0).toUpperCase() + w.slice(1).toLowerCase())
-    .join('');
-  if (clean && clean.length > 1) return clean;
+  const text = (el.visibleText || el.ariaLabel || el.placeholder || el.attr || '').slice(0, 40);
+  const clean = toCamelCase(text);
+  if (clean && clean.length > 1 && !/^[0-9]/.test(clean)) return clean;
   return (el.tag || 'element') + (index + 1);
 }
 
-function getLocatorCode(item, framework) {
-  if (!item.loc) return item.code || '';
-  if (framework === 'playwright-ts' || framework === 'playwright-js') {
-    return (item.loc.code || '').replace(/^page\./, '');
-  }
-  const { code } = formatForFramework(item.loc, framework === 'selenium' ? 'selenium' : framework === 'cypress' ? 'cypress' : 'playwright');
-  return code || item.code || '';
+function isFragileLocator(item) {
+  const m = String(item.method || '').toLowerCase();
+  const a = String(item.attr  || item.code || '');
+  return m.includes('nth') || m.includes('xpath') ||
+    /\.([\w-]+)/.test(a) && !a.includes('[data-') ||
+    /nth-of-type|nth-child/.test(a) ||
+    (m === 'css' && !a.includes('[data-'));
 }
 
-function generatePOMCode(framework) {
-  if (!savedPOMElements.length) return '// No elements yet.\n// Go to the Inspector tab and click + POM on any locator card.';
+function hasDuplicate(name, code, skipIdx) {
+  return savedPOMElements.some((el, i) =>
+    i !== skipIdx && (el.name === name || el.code === code || (el.attr && el.attr === code)));
+}
 
-  // Group by page
+// ── Action method inference (Playwright-native) ───────────────────────────────
+function inferActions(el) {
+  const tag = String(el.tag || '').toLowerCase();
+  const type = String(el.inputType || el.type || '').toLowerCase();
+  const name = sanitizePOMIdentifier(el.name);
+  const Cap = name.charAt(0).toUpperCase() + name.slice(1);
+  const actions = [];
+
+  const fillTypes = new Set(['text', 'email', 'password', 'search', 'tel', 'url', 'number', 'date', 'time', 'datetime-local', 'month', 'week', 'color', '']);
+  const isFillInput = tag === 'input' && (fillTypes.has(type) || !type);
+
+  if (tag === 'button' || tag === 'a' || type === 'submit' || type === 'button' || type === 'reset') {
+    actions.push({ method: `click${Cap}`, body: `await this.${name}.click();`, doc: `Click ${name}` });
+    actions.push({ method: `waitFor${Cap}`, body: `await this.${name}.waitFor({ state: 'visible' });`, doc: `Wait until ${name} is visible` });
+    actions.push({ method: `expect${Cap}Visible`, body: `await expect(this.${name}).toBeVisible();`, doc: `Assert ${name} is visible` });
+  } else if (tag === 'input' && type === 'radio') {
+    actions.push({ method: `check${Cap}`, body: `await this.${name}.check();`, doc: `Select ${name} radio` });
+    actions.push({ method: `is${Cap}Checked`, body: `return await this.${name}.isChecked();`, returnType: 'Promise<boolean>', doc: `Whether ${name} is selected` });
+  } else if (tag === 'input' && type === 'checkbox') {
+    actions.push({ method: `check${Cap}`, body: `await this.${name}.check();`, doc: `Check ${name}` });
+    actions.push({ method: `uncheck${Cap}`, body: `await this.${name}.uncheck();`, doc: `Uncheck ${name}` });
+    actions.push({ method: `is${Cap}Checked`, body: `return await this.${name}.isChecked();`, returnType: 'Promise<boolean>', doc: `Whether ${name} is checked` });
+  } else if (tag === 'input' && type === 'hidden') {
+    actions.push({ method: `expect${Cap}Value`, body: `await expect(this.${name}).toHaveValue(expected);`, param: 'expected: string', doc: `Assert ${name} hidden value` });
+  } else if (tag === 'input' && type === 'file') {
+    actions.push({
+      method: `upload${Cap}`,
+      body: `await this.${name}.setInputFiles(files);`,
+      param: 'files: string | string[] | Buffer | { name: string; mimeType: string; buffer: Buffer }',
+      doc: `Attach file(s) to ${name}`,
+    });
+  } else if (tag === 'input' && type === 'range') {
+    actions.push({ method: `set${Cap}Value`, body: `await this.${name}.fill(String(value));`, param: 'value: number', doc: `Set ${name} slider value` });
+  } else if (isFillInput) {
+    actions.push({ method: `fill${Cap}`, body: `await this.${name}.fill(value);`, param: 'value: string', doc: `Fill ${name}` });
+    actions.push({ method: `clear${Cap}`, body: `await this.${name}.clear();`, doc: `Clear ${name}` });
+    actions.push({ method: `expect${Cap}Value`, body: `await expect(this.${name}).toHaveValue(expected);`, param: 'expected: string', doc: `Assert ${name} value` });
+  } else if (tag === 'select') {
+    actions.push({ method: `select${Cap}Option`, body: `await this.${name}.selectOption(option);`, param: 'option: string | { label?: string; value?: string; index?: number }', doc: `Select option in ${name}` });
+  } else if (tag === 'textarea') {
+    actions.push({ method: `fill${Cap}`, body: `await this.${name}.fill(value);`, param: 'value: string', doc: `Fill ${name}` });
+    actions.push({ method: `expect${Cap}Value`, body: `await expect(this.${name}).toHaveValue(expected);`, param: 'expected: string', doc: `Assert ${name} text` });
+  } else {
+    actions.push({ method: `click${Cap}`, body: `await this.${name}.click();`, doc: `Click ${name}` });
+    actions.push({ method: `get${Cap}Text`, body: `return await this.${name}.textContent();`, returnType: 'Promise<string | null>', doc: `Read text from ${name}` });
+    actions.push({ method: `expect${Cap}Visible`, body: `await expect(this.${name}).toBeVisible();`, doc: `Assert ${name} is visible` });
+  }
+  return actions;
+}
+
+// ── JSDoc builder ─────────────────────────────────────────────────────────────
+function makeJsDoc(el, indentStr) {
+  if (!pomJsdocEnabled) return '';
+  const lines = [];
+  lines.push(`/**`);
+  if (el.loc && el.loc.method) lines.push(` * @locator ${el.loc.method}('${escapeJsDocLine(el.attr || '')}')`);
+  if (el.loc && el.loc.stability) lines.push(` * @stability ${String(el.loc.stability).toLowerCase()}`);
+  if (el.loc && el.loc.rank != null) lines.push(` * @rank ${el.loc.rank} (from LocatorLens ranking)`);
+  if (el.loc && el.loc.fullCode) lines.push(` * @example ${escapeJsDocLine(el.loc.fullCode)}`);
+  if (el.capturedAt) lines.push(` * @capturedAt ${el.capturedAt.slice(0, 10)}`);
+  if (el.pageUrl) lines.push(` * @page ${escapeJsDocLine(el.pageUrl)}`);
+  lines.push(` */`);
+  return lines.map(l => indentStr + l).join('\n') + '\n';
+}
+
+// ── Locator code for POM (Playwright only) ────────────────────────────────────
+function getLocatorCode(item) {
+  if (!item.loc) return item.code || '';
+  return (item.loc.code || item.code || '').replace(/^page\./, '');
+}
+
+// ── Main code generator ───────────────────────────────────────────────────────
+function generatePOMCode(framework) {
+  if (!savedPOMElements.length)
+    return '// No elements yet.\n// Go to the Inspector tab and click + POM on any locator card.';
+
   const groups = {};
   savedPOMElements.forEach(el => {
     const key = el.pageTitle || el.pageUrl || 'PageObject';
@@ -85,63 +214,125 @@ function generatePOMCode(framework) {
     groups[key].elements.push(el);
   });
 
+  const timestamp = new Date().toISOString().slice(0, 10);
+  const banner = `// ─────────────────────────────────────────────────────────────
+// Generated by LocatorLens  •  ${timestamp}
+// ─────────────────────────────────────────────────────────────\n`;
+
   const headers = {
-    'playwright-ts': `import { Page, Locator } from '@playwright/test';
-`,
-    'playwright-js': `// Generated by LocatorLens\n`,
-    'selenium':      `# Generated by LocatorLens\nfrom selenium.webdriver.common.by import By\n`,
-    'cypress':       `// Generated by LocatorLens\n`,
-    'wdio':          `// Generated by LocatorLens\n`,
-  };
-  const filenames = {
-    'playwright-ts': 'PageObject.ts', 'playwright-js': 'PageObject.js',
-    'selenium': 'page_object.py', 'cypress': 'PageObject.js', 'wdio': 'PageObject.js',
+    'playwright-ts': `${banner}import { Page, Locator${pomActionsEnabled ? ', expect' : ''} } from '@playwright/test';\n`,
+    'playwright-js': `${banner}${pomActionsEnabled ? "import { expect } from '@playwright/test';\n" : ''}`,
   };
 
-  const blocks = Object.entries(groups).map(([pageKey, { url, elements }]) => {
-    const rawName = pageKey.replace(/https?:\/\/[^/]+/, '').replace(/[^a-zA-Z0-9]/g, ' ').trim();
+  const blocks = Object.entries(groups).map(([pageKey, { url, elements: rawEls }]) => {
+    const rawName  = pageKey.replace(/https?:\/\/[^/]+/, '').replace(/[^a-zA-Z0-9]/g, ' ').trim();
     const className = (toPascalCase(rawName) || 'Page') + 'Page';
+    const elements = resolvePOMFieldNames(rawEls);
 
+    // ── Playwright TypeScript ──
     if (framework === 'playwright-ts') {
-      const decls = elements.map(el => `  readonly ${el.name}: Locator;`).join('\n');
-      const assigns = elements.map(el => `    this.${el.name} = page.${getLocatorCode(el, framework)};`).join('\n');
-      return `// ${url || pageKey}\nexport class ${className} {\n${decls}\n\n  constructor(readonly page: Page) {\n${assigns}\n  }\n}`;
-    }
-    if (framework === 'playwright-js') {
-      const assigns = elements.map(el => `    this.${el.name} = page.${getLocatorCode(el, framework)};`).join('\n');
-      return `// ${url || pageKey}\nexport class ${className} {\n  constructor(page) {\n${assigns}\n  }\n}`;
-    }
-    if (framework === 'selenium') {
-      const props = elements.map(el => {
-        const snakeName = el.name.replace(/([A-Z])/g, '_$1').toLowerCase().replace(/^_/, '');
-        const c = getLocatorCode(el, 'selenium');
-        return `    @property\n    def ${snakeName}(self):\n        return ${c}`;
-      }).join('\n\n');
-      return `# ${url || pageKey}\nclass ${className}:\n    def __init__(self, driver):\n        self.driver = driver\n\n${props}`;
-    }
-    if (framework === 'cypress') {
-      const methods = elements.map(el => `  ${el.name}: () => ${getLocatorCode(el, 'cypress')},`).join('\n');
-      return `// ${url || pageKey}\nexport const ${className} = {\n${methods}\n};`;
-    }
-    if (framework === 'wdio') {
-      const getters = elements.map(el => {
-        const attr = String(el.attr || el.code || '').replace(/^page\./, '');
-        let wdioSel = `$(${JSON.stringify(attr)})`;
-        if (el.loc && el.loc.matchedAttr) {
-          const ma = el.loc.matchedAttr;
-          if (/testid/i.test(el.loc.method || '')) wdioSel = `$('[data-testid="${ma.replace(/^["']/,'').replace(/["']$/,'')}"]')`;
-          else if (/^#/.test(ma)) wdioSel = `$('${ma}')`;
-          else if (/^\[/.test(ma)) wdioSel = `$('${ma}')`;
-        }
-        return `  get ${el.name}() { return ${wdioSel}; }`;
+      const decls   = elements.map(el => {
+        const jsdoc = makeJsDoc(el, '  ');
+        const fragile = isFragileLocator(el) ? '  // ⚠ FRAGILE — consider a more stable locator\n' : '';
+        return `${jsdoc}${fragile}  readonly ${el.genName}: Locator;`;
       }).join('\n');
-      return `// ${url || pageKey}\nexport class ${className} {\n${getters}\n}`;
+
+      const assigns  = elements.map(el => `    this.${el.genName} = page.${getLocatorCode(el)};`).join('\n');
+
+      let methods = '';
+      if (pomActionsEnabled) {
+        methods = '\n' + elements.flatMap(el => {
+          const elFor = { ...el, name: el.genName };
+          return inferActions(elFor).map(a => {
+            const jsdoc = pomJsdocEnabled ? `  /** ${a.doc} */\n` : '';
+            const param  = a.param ? `${a.param}` : '';
+            const ret    = a.returnType ? `: ${a.returnType}` : ': Promise<void>';
+            return `${jsdoc}  async ${a.method}(${param})${ret} {\n    ${a.body}\n  }`;
+          });
+        }).join('\n\n') + '\n';
+      }
+
+      return `// Page: ${url || pageKey}\nexport class ${className} {\n${decls}\n\n  constructor(readonly page: Page) {\n${assigns}\n  }${methods}}`;
     }
+
+    // ── Playwright JavaScript ──
+    if (framework === 'playwright-js') {
+      const assigns = elements.map(el => `    this.${el.genName} = page.${getLocatorCode(el)};`).join('\n');
+      let methods = '';
+      if (pomActionsEnabled) {
+        methods = '\n' + elements.flatMap(el => {
+          const elFor = { ...el, name: el.genName };
+          return inferActions(elFor).map(a => {
+            const jsdoc = pomJsdocEnabled ? `  /** ${a.doc} */\n` : '';
+            const paramJs = a.param ? a.param.split(':')[0].trim() : '';
+            return `${jsdoc}  async ${a.method}(${paramJs}) {\n    ${a.body}\n  }`;
+          });
+        }).join('\n\n') + '\n';
+      }
+      return `// Page: ${url || pageKey}\nexport class ${className} {\n  constructor(page) {\n${assigns}\n  }${methods}}`;
+    }
+
     return '';
   });
 
-  return (headers[framework] || '') + '\n' + blocks.join('\n\n');
+  return (headers[framework] || headers['playwright-ts']) + '\n' + blocks.join('\n\n');
 }
+
+// ── Test Scaffold Generator ───────────────────────────────────────────────────
+function generateTestScaffold() {
+  if (!savedPOMElements.length) return '// No elements yet.';
+  const timestamp = new Date().toISOString().slice(0, 10);
+
+  const groups = {};
+  savedPOMElements.forEach(el => {
+    const key = el.pageTitle || el.pageUrl || 'PageObject';
+    if (!groups[key]) groups[key] = { url: el.pageUrl || '', elements: [] };
+    groups[key].elements.push(el);
+  });
+
+  const classNames = Object.keys(groups).map(pageKey => {
+    const rawName = pageKey.replace(/https?:\/\/[^/]+/, '').replace(/[^a-zA-Z0-9]/g, ' ').trim();
+    return (toPascalCase(rawName) || 'Page') + 'Page';
+  });
+  const uniqueClassNames = [...new Set(classNames)];
+  const imports = uniqueClassNames.length
+    ? `import { ${uniqueClassNames.join(', ')} } from './PageObject';`
+    : '';
+
+  const suites = Object.entries(groups).map(([pageKey, { url, elements: rawEls }]) => {
+    const rawName   = pageKey.replace(/https?:\/\/[^/]+/, '').replace(/[^a-zA-Z0-9]/g, ' ').trim();
+    const className = (toPascalCase(rawName) || 'Page') + 'Page';
+    const varName   = className.charAt(0).toLowerCase() + className.slice(1);
+    const elements  = resolvePOMFieldNames(rawEls);
+
+    const actionTests = elements.flatMap(el => {
+      const elFor = { ...el, name: el.genName };
+      const actions = inferActions(elFor);
+      return actions.slice(0, 2).map(a => {
+        const param = a.param
+          ? (a.param.includes('expected') ? `'TODO'` : a.param.includes('number') ? '42' : a.param.includes('files') ? `'./fixtures/TODO.pdf'` : `'TODO'`)
+          : '';
+        const assertLine = a.body.includes('expect(')
+          ? ''
+          : `    await expect(${varName}.${el.genName}).toBeVisible();\n`;
+        return `\n  test('${a.doc}', async () => {\n${assertLine}    await ${varName}.${a.method}(${param});\n  });`;
+      });
+    }).join('');
+
+    return `test.describe('${className}', () => {\n  let ${varName}: ${className};\n\n  test.beforeEach(async ({ page }) => {\n    ${varName} = new ${className}(page);\n    await page.goto('${(url || 'TODO: enter URL').replace(/'/g, "\\'")}');\n  });${actionTests}\n});`;
+  }).join('\n\n');
+
+  return `// ────────────────────────────────────────────────────────────
+// Test Scaffold — generated by LocatorLens  •  ${timestamp}
+// Run with: npx playwright test
+// POM classes: import from the same file you downloaded (e.g. ./PageObject).
+// ────────────────────────────────────────────────────────────
+import { test, expect } from '@playwright/test';
+${imports}
+
+${suites}`;
+}
+
 
 function updatePOMPreview() {
   const textarea = document.getElementById('pomCodePreview');
@@ -150,7 +341,7 @@ function updatePOMPreview() {
   if (!textarea) return;
   const code = generatePOMCode(currentPOMFramework);
   textarea.value = code;
-  const names = { 'playwright-ts':'PageObject.ts','playwright-js':'PageObject.js','selenium':'page_object.py','cypress':'PageObject.js','wdio':'PageObject.js' };
+  const names = { 'playwright-ts': 'PageObject.ts', 'playwright-js': 'PageObject.js' };
   if (filename) filename.textContent = names[currentPOMFramework] || 'PageObject.ts';
   if (countBadge) countBadge.textContent = savedPOMElements.length ? `(${savedPOMElements.length})` : '';
 }
@@ -243,69 +434,9 @@ function updateInspectUI() {
   }
 }
 
-// ── Format Translator ──────────────────────────────────────────────────────────
-function formatForFramework(loc, framework) {
-  const method = loc.method || '';
-  const code = loc.code || '';
-  const attr = loc.matchedAttr || '';
-  const action = loc.fullCode ? loc.fullCode.split('.').pop() : 'click()';
-
-  if (framework === 'playwright') return { code, fullCode: loc.fullCode };
-
-  // 🧪 Selenium Translator (Universal Style)
-  if (framework === 'selenium') {
-    let selCode = '';
-    if (method.includes('TestId')) {
-      const id = attr.split('"')[1] || '';
-      selCode = `driver.find_element(By.CSS_SELECTOR, "[data-testid='${id}']")`;
-    } else if (method.includes('getByRole')) {
-      const match = code.match(/getByRole\('([^']+)'(?:, \{ name: '([^']+)' \})?\)/);
-      if (match) {
-        const role = match[1];
-        const name = match[2];
-        selCode = name 
-          ? `driver.find_element(By.CSS_SELECTOR, "${role}[aria-label='${name}'], ${role}[name='${name}']")`
-          : `driver.find_element(By.CSS_SELECTOR, "${role}")`;
-      }
-    } else if (method.includes('id')) {
-      const id = attr.split('"')[1] || '';
-      selCode = `driver.find_element(By.ID, "${id}")`;
-    } else if (method.includes('name')) {
-      const name = attr.split('"')[1] || '';
-      selCode = `driver.find_element(By.NAME, "${name}")`;
-    } else if (method.includes('Text')) {
-      const txt = attr.split('"')[1] || '';
-      selCode = `driver.find_element(By.XPATH, "//*[contains(text(), '${txt}')]")`;
-    } else {
-      selCode = `driver.find_element(By.CSS_SELECTOR, "${attr.replace(/'/g, "\\'")}")`;
-    }
-    return { code: selCode, fullCode: `${selCode}.${action.replace('click()', 'click')}` };
-  }
-
-  // 🌲 Cypress Translator
-  if (framework === 'cypress') {
-    let cyCode = '';
-    if (method.includes('TestId')) {
-      const id = attr.split('"')[1] || '';
-      cyCode = `cy.get('[data-testid="${id}"]')`;
-    } else if (method.includes('getByRole')) {
-      const match = code.match(/getByRole\('([^']+)'(?:, \{ name: '([^']+)' \})?\)/);
-      if (match) {
-        const role = match[1];
-        const name = match[2];
-        cyCode = name ? `cy.get('${role}').contains('${name}')` : `cy.get('${role}')`;
-      }
-    } else if (method.includes('id')) {
-      cyCode = `cy.get('#${attr.split('"')[1]}')`;
-    } else if (method.includes('Text')) {
-      cyCode = `cy.contains('${attr.split('"')[1]}')`;
-    } else {
-      cyCode = `cy.get('${attr.replace(/'/g, "\\'")}')`;
-    }
-    return { code: cyCode, fullCode: `${cyCode}.${action.replace('click()', 'click()')}` };
-  }
-
-  return { code, fullCode: loc.fullCode };
+// ── Locator display (Playwright only) ─────────────────────────────────────────
+function formatForPlaywright(loc) {
+  return { code: loc.code || '', fullCode: loc.fullCode };
 }
 
 // ── Render results ─────────────────────────────────────────────────────────────
@@ -361,8 +492,7 @@ function renderResults(data) {
     const rc = rankClass(loc.rank);
     const delayStyle = `animation-delay:${i * 0.06}s`;
     
-    // Translate based on chosen framework
-    const { code, fullCode } = formatForFramework(loc, currentFramework);
+    const { code, fullCode } = formatForPlaywright(loc);
     
     return `
       <div class="card ${rc}" style="${delayStyle}">
@@ -385,6 +515,7 @@ function renderResults(data) {
               data-method="${esc(loc.method)}"
               data-attr="${esc(loc.matchedAttr)}"
               data-tag="${esc(el.tag || '')}"
+              data-type="${esc(el.type || '')}"
               data-text="${esc((el.visibleText || '').slice(0,40))}"
               data-aria="${esc((el.ariaLabel || '').slice(0,40))}"
               data-ph="${esc((el.placeholder || '').slice(0,40))}"
@@ -515,17 +646,41 @@ document.addEventListener('DOMContentLoaded', () => {
     } else if (e.target.classList.contains('add-pom-btn')) {
       const btn = e.target;
       const code = btn.getAttribute('data-code').replace(/&amp;/g, '&').replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/&quot;/g, '"');
-      const method = btn.getAttribute('data-method') || '';
-      const attr   = btn.getAttribute('data-attr') || '';
-      const elTag  = btn.getAttribute('data-tag') || 'element';
-      const elText = btn.getAttribute('data-text') || '';
-      const elAria = btn.getAttribute('data-aria') || '';
-      const elPh   = btn.getAttribute('data-ph') || '';
-      const elName = autoName({ tag: elTag, visibleText: elText, ariaLabel: elAria, placeholder: elPh }, savedPOMElements.length);
+      const method      = btn.getAttribute('data-method') || '';
+      const attr        = btn.getAttribute('data-attr') || '';
+      const elTag       = btn.getAttribute('data-tag') || 'element';
+      const elText      = btn.getAttribute('data-text') || '';
+      const elAria      = btn.getAttribute('data-aria') || '';
+      const elPh        = btn.getAttribute('data-ph') || '';
+      const elInputType = btn.getAttribute('data-type') || '';
+      const elNameRaw   = autoName({ tag: elTag, visibleText: elText, ariaLabel: elAria, placeholder: elPh, attr }, savedPOMElements.length);
+      const elName        = sanitizePOMIdentifier(elNameRaw);
+
+      // Duplicate detection
+      const dupCode = savedPOMElements.some(el => el.code === code);
+      const dupName = savedPOMElements.some(el => el.name === elName);
+      if (dupCode) {
+        const existing = savedPOMElements.find(el => el.code === code);
+        showPomWarning(`⚠ Already in POM as "${existing ? existing.name : elName}" — adding anyway.`);
+      } else if (dupName) {
+        showPomWarning(`⚠ Name "${elName}" already exists — adding with suffix.`);
+      }
+      const finalName = dupName && !dupCode
+        ? elName + (savedPOMElements.filter(el => el.name.startsWith(elName)).length + 1)
+        : elName;
+
       chrome.tabs.query({ active: true, currentWindow: true }, (tabs) => {
         const pageUrl   = (tabs && tabs[0] && tabs[0].url)   || 'Unknown Page';
         const pageTitle = (tabs && tabs[0] && tabs[0].title) || pageUrl;
-        savedPOMElements.push({ name: elName, code, method, attr, pageUrl, pageTitle, health: 'pending' });
+        const loc = lastResultData && lastResultData.locators
+          ? lastResultData.locators.find(l => l.matchedAttr === attr) || null : null;
+        const inputType = elInputType || (lastResultData && lastResultData.elementData && lastResultData.elementData.type) || '';
+        savedPOMElements.push({
+          name: sanitizePOMIdentifier(finalName), code, method, attr,
+          tag: elTag, inputType,
+          pageUrl, pageTitle, loc, health: 'pending',
+          capturedAt: new Date().toISOString()
+        });
         chrome.storage.local.set({ savedPOMElements });
         renderPOMList();
         updatePOMPreview();
@@ -567,26 +722,6 @@ document.addEventListener('DOMContentLoaded', () => {
     chrome.storage.local.get('lastElement', (result) => {
       if (result && result.lastElement) {
         renderResults(result.lastElement);
-      }
-    });
-  }
-
-  // Framework selection
-  const fwSelect = document.getElementById('framework-select');
-  fwSelect.addEventListener('change', (e) => {
-    currentFramework = e.target.value;
-    if (chrome.storage && chrome.storage.local) {
-      chrome.storage.local.set({ framework: currentFramework });
-    }
-    if (lastResultData) renderResults(lastResultData);
-  });
-
-  // Restore framework preference
-  if (chrome.storage && chrome.storage.local) {
-    chrome.storage.local.get('framework', (r) => {
-      if (r && r.framework) {
-        currentFramework = r.framework;
-        fwSelect.value = currentFramework;
       }
     });
   }
@@ -658,15 +793,23 @@ document.addEventListener('DOMContentLoaded', () => {
     Object.entries(groups).forEach(([pageKey, items]) => {
       if (multiGroup) html += `<div class="pom-group-label">${esc(pageKey)}</div>`;
       items.forEach(({ el, i }) => {
+        const fragile   = isFragileLocator(el);
+        const stab      = el.loc && el.loc.stability;
+        const stabHtml  = stab ? `<span class="pom-stability ${pomStabilityClass(stab)}" title="Locator ranking stability">${esc(pillLabel(stab))}</span>` : '';
         const healthClass = el.health || 'pending';
         const healthText  = healthClass === 'live' ? '● LIVE' : healthClass === 'gone' ? '✗ GONE' : healthClass === 'multi' ? `~ ${el.healthCount || '?'}` : '...';
+        const capturedLabel = el.capturedAt ? new Date(el.capturedAt).toLocaleDateString() : '';
         html += `
-          <div class="pom-entry" draggable="true" data-idx="${i}">
+          <div class="pom-entry${fragile ? ' pom-entry-fragile' : ''}" draggable="true" data-idx="${i}">
             <span class="pom-drag-handle" title="Drag to reorder">⠇</span>
             <div class="pom-entry-body">
-              <input class="pom-entry-name-input" type="text" value="${esc(el.name)}" data-idx="${i}" title="Click to rename" />
+              <div style="display:flex;align-items:center;gap:4px;flex-wrap:wrap;">
+                <input class="pom-entry-name-input" type="text" value="${esc(el.name)}" data-idx="${i}" title="Click to rename" />
+                ${stabHtml}
+                ${fragile ? '<span class="pom-fragile-badge" title="Fragile locator — may break when DOM changes">⚠ FRAGILE</span>' : ''}
+              </div>
               <div class="pom-entry-locator" title="${esc(el.code)}">${esc(el.code)}</div>
-              ${el.pageUrl ? `<div class="pom-entry-page">${esc(el.pageUrl)}</div>` : ''}
+              ${el.pageUrl ? `<div class="pom-entry-page">${esc(el.pageUrl)}${capturedLabel ? ` · ${capturedLabel}` : ''}</div>` : ''}
             </div>
             <span class="pom-health ${healthClass}">${healthText}</span>
             <button class="pom-remove-btn" data-remove="${i}" title="Remove">×</button>
@@ -681,7 +824,9 @@ document.addEventListener('DOMContentLoaded', () => {
       input.addEventListener('blur', () => {
         const idx = parseInt(input.getAttribute('data-idx'), 10);
         if (!isNaN(idx) && savedPOMElements[idx]) {
-          savedPOMElements[idx].name = input.value.trim() || savedPOMElements[idx].name;
+          const raw = input.value.trim() || savedPOMElements[idx].name;
+          savedPOMElements[idx].name = sanitizePOMIdentifier(raw);
+          input.value = savedPOMElements[idx].name;
           chrome.storage.local.set({ savedPOMElements });
           updatePOMPreview();
         }
@@ -747,13 +892,41 @@ document.addEventListener('DOMContentLoaded', () => {
   document.getElementById('downloadPOMBtn').addEventListener('click', () => {
     if (savedPOMElements.length === 0) return;
     const code = generatePOMCode(currentPOMFramework);
-    const names = { 'playwright-ts':'PageObject.ts','playwright-js':'PageObject.js','selenium':'page_object.py','cypress':'PageObject.js','wdio':'PageObject.js' };
+    const names = { 'playwright-ts': 'PageObject.ts', 'playwright-js': 'PageObject.js' };
     const blob = new Blob([code], { type: 'text/plain' });
     const url = URL.createObjectURL(blob);
     const a = document.createElement('a');
     a.href = url; a.download = names[currentPOMFramework] || 'PageObject.ts';
     a.click(); URL.revokeObjectURL(url);
   });
+
+  // ── POM v3 Feature Handlers ─────────────────────────────────────────────────
+
+  // Warning toast
+  function showPomWarning(msg) {
+    let w = document.getElementById('pomWarnToast');
+    if (!w) {
+      w = document.createElement('div');
+      w.id = 'pomWarnToast';
+      w.style.cssText = 'position:fixed;bottom:60px;left:50%;transform:translateX(-50%);background:#ffb86c;color:#1e1e2e;padding:6px 12px;border-radius:4px;font-size:10px;font-weight:700;z-index:9999;max-width:280px;text-align:center;box-shadow:0 2px 8px rgba(0,0,0,.4);';
+      document.body.appendChild(w);
+    }
+    w.textContent = msg; w.style.display = 'block';
+    clearTimeout(w._t);
+    w._t = setTimeout(() => { w.style.display = 'none'; }, 3500);
+  }
+
+  // Actions toggle
+  const actionsToggle = document.getElementById('pomActionsToggle');
+  if (actionsToggle) {
+    actionsToggle.addEventListener('change', () => { pomActionsEnabled = actionsToggle.checked; updatePOMPreview(); });
+  }
+
+  // JSDoc toggle
+  const jsdocToggle = document.getElementById('pomJsdocToggle');
+  if (jsdocToggle) {
+    jsdocToggle.addEventListener('change', () => { pomJsdocEnabled = jsdocToggle.checked; updatePOMPreview(); });
+  }
 
   // Clear POM
   document.getElementById('clearPOMBtn').addEventListener('click', () => {
@@ -762,10 +935,99 @@ document.addEventListener('DOMContentLoaded', () => {
     renderPOMList();
   });
 
+  // Generate Test Scaffold
+  document.getElementById('generateTestBtn').addEventListener('click', () => {
+    if (!savedPOMElements.length) return showPomWarning('Add elements first.');
+    const code = generateTestScaffold();
+    const blob = new Blob([code], { type: 'text/plain' });
+    const url  = URL.createObjectURL(blob);
+    const a    = document.createElement('a');
+    a.href = url; a.download = 'locatorlens.spec.ts';
+    a.click(); URL.revokeObjectURL(url);
+  });
+
+  // Export Session
+  document.getElementById('exportSessionBtn').addEventListener('click', () => {
+    if (!savedPOMElements.length) return showPomWarning('Nothing to export yet.');
+    const session = {
+      version: '3.0', exportedAt: new Date().toISOString(), framework: currentPOMFramework,
+      pages: Object.values(savedPOMElements.reduce((acc, el) => {
+        const k = el.pageUrl || 'Unknown';
+        (acc[k] = acc[k] || { url: el.pageUrl || '', title: el.pageTitle || '', elements: [] }).elements.push(el);
+        return acc;
+      }, {}))
+    };
+    const blob = new Blob([JSON.stringify(session, null, 2)], { type: 'application/json' });
+    const url  = URL.createObjectURL(blob);
+    const a    = document.createElement('a');
+    a.href = url; a.download = 'locatorlens-session.json';
+    a.click(); URL.revokeObjectURL(url);
+  });
+
+  // Import Session
+  document.getElementById('importSessionBtn').addEventListener('click', () => {
+    const fi = document.createElement('input');
+    fi.type = 'file'; fi.accept = '.json';
+    fi.addEventListener('change', () => {
+      const file = fi.files[0]; if (!file) return;
+      const reader = new FileReader();
+      reader.onload = (ev) => {
+        try {
+          const session = JSON.parse(ev.target.result);
+          if (!session.pages) throw new Error('Invalid format');
+          const imported = session.pages.flatMap(p =>
+            (p.elements || []).map(el => ({
+              ...el,
+              name: sanitizePOMIdentifier(el.name || 'element'),
+              pageUrl: p.url || el.pageUrl || '',
+              pageTitle: p.title || el.pageTitle || '',
+              health: 'pending',
+            }))
+          );
+          if (!imported.length) return showPomWarning('No elements found.');
+          const existing = new Set(savedPOMElements.map(el => el.code));
+          const toAdd = imported.filter(el => !existing.has(el.code));
+          const skipped = imported.length - toAdd.length;
+          savedPOMElements = [...savedPOMElements, ...toAdd];
+          chrome.storage.local.set({ savedPOMElements });
+          renderPOMList(); updatePOMPreview();
+          showPomWarning(`✓ Imported ${toAdd.length} element${toAdd.length!==1?'s':''}${skipped?` (${skipped} duplicate${skipped>1?'s':''} skipped)`:''}.`);
+        } catch (err) { showPomWarning('⚠ Could not read file: ' + err.message); }
+      };
+      reader.readAsText(file);
+    });
+    fi.click();
+  });
+
+  // Check Health
+  document.getElementById('checkHealthBtn').addEventListener('click', () => {
+    if (!savedPOMElements.length) return;
+    savedPOMElements.forEach(el => { el.health = 'pending'; el.healthCount = null; });
+    renderPOMList(); _pomHealthQueue = [];
+    let i = 0;
+    function checkNext() {
+      if (i >= savedPOMElements.length) { if (!_pomHealthActive) processPomHealthQueue(); return; }
+      const item = savedPOMElements[i];
+      const attr = String(item.attr || item.code || '');
+      let selector = null;
+      if (/^[\[#.]/.test(attr)) selector = attr;
+      else if (/testid/i.test(item.method || '')) selector = `[data-testid="${attr.replace(/^["']/,'').replace(/["']$/,'')}"]`;
+      else if (/\bid\b/i.test(item.method||'') && !/testid/i.test(item.method||'')) selector = `#${attr.replace(/^["']/,'').replace(/["']$/,'')}`;
+      else if (/name/i.test(item.method||'')) selector = `[name="${attr.replace(/^["']/,'').replace(/["']$/,'')}"]`;
+      if (selector) _pomHealthQueue.push({ idx: i, selector });
+      i++; setTimeout(checkNext, 30);
+    }
+    checkNext();
+  });
+
   if (chrome.storage && chrome.storage.local) {
     chrome.storage.local.get('savedPOMElements', (res) => {
       if (res && res.savedPOMElements) {
-        savedPOMElements = res.savedPOMElements;
+        savedPOMElements = res.savedPOMElements.map(el => ({
+          ...el,
+          name: sanitizePOMIdentifier(el.name || 'element'),
+        }));
+        chrome.storage.local.set({ savedPOMElements });
         renderPOMList();
       }
     });

@@ -549,7 +549,7 @@
     // ── Pro tip based on element ───────────────────────────────────────────
     let proTip = '';
     if (isInShadow) {
-      proTip = `Found inside Shadow DOM (<${shadowHost}>). Playwright's getBy... locators pierce Shadow DOM automatically! For Selenium, you'll need driver.execute_script('return arguments[0].shadowRoot', host).`;
+      proTip = `Found inside Shadow DOM (<${shadowHost}>). Playwright's getBy... locators pierce shadow roots automatically — no extra shadowRoot plumbing needed.`;
     } else if (!el.getAttribute('data-testid')) {
       proTip = `Ask your developers to add a <data-testid="${tag}-element"> attribute to this <${tag}>. It would make this the most stable locator possible and is a 5-second code change.`;
     } else if (role === 'button' || role === 'link') {

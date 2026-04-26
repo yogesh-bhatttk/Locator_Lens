@@ -787,36 +787,18 @@
 
     const result = generateLocators(el);
 
-    // Get current framework preference for the toast
-    chrome.storage.local.get('framework', (res) => {
-      const fw = res.framework || 'playwright';
-      let bestCode = result.locators[0] ? result.locators[0].code : '';
-
-      // Simple toast translation
-      if (fw === 'selenium' && result.locators[0]) {
-        const loc = result.locators[0];
-        if (loc.method.includes('TestId')) bestCode = `driver.find_element(By.CSS_SELECTOR, "[data-testid='${loc.matchedAttr.split('"')[1]}']")`;
-        else if (loc.id) bestCode = `driver.find_element(By.ID, "${el.id}")`;
-        else bestCode = `driver.find_element(By.CSS_SELECTOR, "${bestCode.replace("page.locator('", "").replace("')", "")}")`;
-      } else if (fw === 'cypress' && result.locators[0]) {
-        const loc = result.locators[0];
-        if (loc.method.includes('TestId')) bestCode = `cy.get('[data-testid="${loc.matchedAttr.split('"')[1]}"]')`;
-        else if (loc.id) bestCode = `cy.get('#${el.id}')`;
-        else bestCode = `cy.get('${bestCode.replace("page.locator('", "").replace("')", "")}')`;
-      }
-
-      if (bestCode) {
-        if (navigator.clipboard && navigator.clipboard.writeText) {
-          navigator.clipboard.writeText(bestCode).then(() => {
-            showToast(bestCode);
-          }).catch(() => {
-            showToast(bestCode);
-          });
-        } else {
+    const bestCode = result.locators[0] ? result.locators[0].code : '';
+    if (bestCode) {
+      if (navigator.clipboard && navigator.clipboard.writeText) {
+        navigator.clipboard.writeText(bestCode).then(() => {
           showToast(bestCode);
-        }
+        }).catch(() => {
+          showToast(bestCode);
+        });
+      } else {
+        showToast(bestCode);
       }
-    });
+    }
 
     // Flash the overlay green
     if (overlay) {
@@ -914,45 +896,28 @@
       const target = lastRightClickedEl || document.body;
       const result = generateLocators(target);
 
-      chrome.storage.local.get('framework', (res) => {
-        const fw = res.framework || 'playwright';
-        let bestCode = result.locators[0] ? result.locators[0].code : '';
+      const bestCode = result.locators[0] ? result.locators[0].code : '';
+      if (bestCode) {
+        navigator.clipboard.writeText(bestCode).then(() => {
+          const origOutline = target.style.outline;
+          const origTransition = target.style.transition;
+          target.style.transition = 'outline 0.1s';
+          target.style.outline = '3px solid #00ff9d';
+          setTimeout(() => {
+            target.style.outline = origOutline;
+            target.style.transition = origTransition;
+          }, 800);
+        }).catch(() => { });
+      }
 
-        if (fw === 'selenium' && result.locators[0]) {
-          const loc = result.locators[0];
-          if (loc.method.includes('TestId')) bestCode = `driver.find_element(By.CSS_SELECTOR, "[data-testid='${loc.matchedAttr.split('"')[1]}']")`;
-          else if (loc.id) bestCode = `driver.find_element(By.ID, "${target.id}")`;
-          else bestCode = `driver.find_element(By.CSS_SELECTOR, "${bestCode.replace("page.locator('", "").replace("')", "")}")`;
-        } else if (fw === 'cypress' && result.locators[0]) {
-          const loc = result.locators[0];
-          if (loc.method.includes('TestId')) bestCode = `cy.get('[data-testid="${loc.matchedAttr.split('"')[1]}"]')`;
-          else if (loc.id) bestCode = `cy.get('#${target.id}')`;
-          else bestCode = `cy.get('${bestCode.replace("page.locator('", "").replace("')", "")}')`;
-        }
-
-        if (bestCode) {
-          navigator.clipboard.writeText(bestCode).then(() => {
-            const origOutline = target.style.outline;
-            const origTransition = target.style.transition;
-            target.style.transition = 'outline 0.1s';
-            target.style.outline = '3px solid #00ff9d';
-            setTimeout(() => {
-              target.style.outline = origOutline;
-              target.style.transition = origTransition;
-            }, 800);
-          }).catch(() => { });
-        }
-
-        if (isInspecting) {
-          try {
-            if (chrome.runtime && chrome.runtime.id) {
-              chrome.runtime.sendMessage({ type: 'ELEMENT_PICKED', data: result });
-            }
-          } catch (e) { }
-        }
-        sendResponse({ ok: true });
-      });
-      return true; // Asynchronous response needed for storage.get
+      if (isInspecting) {
+        try {
+          if (chrome.runtime && chrome.runtime.id) {
+            chrome.runtime.sendMessage({ type: 'ELEMENT_PICKED', data: result });
+          }
+        } catch (e) { }
+      }
+      sendResponse({ ok: true });
     }
 
     // 🔬 SELECTOR LAB: Validation Engine
