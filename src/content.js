@@ -16,6 +16,15 @@
   let lastRightClickedEl = null;
   let customTestAttributes = ['data-testid', 'data-qa', 'data-cy', 'data-test', 'data-automation-id', 'data-e2e'];
 
+  // Recorder modes (driven by the side panel via messages)
+  let isPaused = false;       // pause/resume while recording
+  let assertMode = false;     // when on, a click records an assertion instead of an interaction
+  let assertType = 'toBeVisible';
+
+  // Output target for quick-copy (context menu + click-to-copy), synced from the side panel.
+  let llFramework = 'playwright';
+  let llLanguage = 'typescript';
+
   // ── Recording Engine ──────────────────────────────────────────────────────
   // Monotonic id per recording session so the side panel can dedupe true transport
   // duplicates without merging distinct actions that share the same timestamp.
@@ -37,7 +46,9 @@
       action: data.action,
       value: data.value != null ? data.value : '',
       code: data.code != null ? data.code : '',
-      fullCode: data.fullCode != null ? data.fullCode : ''
+      fullCode: data.fullCode != null ? data.fullCode : '',
+      target: data.target != null ? data.target : null,
+      assertType: data.assertType != null ? data.assertType : null
     };
     try {
       if (chrome.runtime && chrome.runtime.id) {
@@ -54,14 +65,70 @@
       const id = String(el.id).replace(/\\/g, '\\\\').replace(/'/g, "\\'");
       return {
         code: `page.locator('#${id}')`,
-        fullCode: `await page.locator('#${id}').${chain};`
+        fullCode: `await page.locator('#${id}').${chain};`,
+        target: { kind: 'id', value: el.id }
       };
     }
     const tag = (el.tagName && el.tagName.toLowerCase()) || 'body';
     return {
       code: `page.locator('${tag}')`,
-      fullCode: `await page.locator('${tag}').first().${chain};`
+      fullCode: `await page.locator('${tag}').first().${chain};`,
+      target: { kind: 'css', value: tag }
     };
+  }
+
+  function bestLocatorFor(el, fallbackChain) {
+    let best;
+    try {
+      const result = generateLocators(el);
+      best = result.locators && result.locators[0];
+    } catch (err) {
+      console.warn('[LocatorLens] generateLocators failed during recording:', err);
+    }
+    if (!best) {
+      const fb = recordFallbackLocator(el, fallbackChain || 'click()');
+      best = { code: fb.code, fullCode: fb.fullCode, target: fb.target };
+    }
+    return best;
+  }
+
+  // Alt+Click → record a hover step.
+  function recordHover(el) {
+    const best = bestLocatorFor(el, 'hover()');
+    sendRecordedAction({
+      action: 'hover',
+      value: '',
+      code: best.code,
+      fullCode: `await ${best.code}.hover();`,
+      target: best.target
+    });
+  }
+
+  function computeAssertValue(el, type) {
+    if (type === 'toHaveText') return (el.innerText || el.textContent || '').trim().slice(0, 200);
+    if (type === 'toHaveValue') return el.value != null ? String(el.value) : '';
+    if (type === 'toBeChecked') return el.checked ? 'true' : 'false';
+    return '';
+  }
+
+  // Assert mode → record an assertion on the clicked element.
+  function recordAssertion(el) {
+    const best = bestLocatorFor(el, 'click()');
+    const type = assertType || 'toBeVisible';
+    const value = computeAssertValue(el, type);
+    let call = 'toBeVisible()';
+    if (type === 'toHaveText') call = `toHaveText(${JSON.stringify(value)})`;
+    else if (type === 'toHaveValue') call = `toHaveValue(${JSON.stringify(value)})`;
+    else if (type === 'toBeEnabled') call = 'toBeEnabled()';
+    else if (type === 'toBeChecked') call = value === 'false' ? 'not.toBeChecked()' : 'toBeChecked()';
+    sendRecordedAction({
+      action: 'assert',
+      assertType: type,
+      value: value,
+      code: best.code,
+      fullCode: `await expect(${best.code}).${call};`,
+      target: best.target
+    });
   }
 
   // Resolve the real element: composedPath()[0] can be a TEXT node inside <button>,
@@ -80,7 +147,7 @@
   // pointerdown (preferred) + capture fires before target handlers; also covers
   // more pointer types than mousedown alone. Falls back to mousedown if needed.
   function onRecordPrimaryPointer(e) {
-    if (!isRecording) return;
+    if (!isRecording || isPaused) return;
     if (typeof e.button === 'number' && e.button !== 0) return;
     if (typeof e.isPrimary === 'boolean' && e.isPrimary === false) return;
 
@@ -92,6 +159,11 @@
     const el = rawTarget;
     const tag = el.tagName.toLowerCase();
     const type = (el.getAttribute('type') || '').toLowerCase();
+
+    // Alt+Click records a hover; assert mode records an assertion. Both short-circuit
+    // the normal click/fill capture below.
+    if (e.altKey) { recordHover(el); return; }
+    if (assertMode) { recordAssertion(el); return; }
 
     // Text inputs & textarea: we used to ignore pointer here and rely only on "change".
     // A click that only focuses the field never fires "change", so getByRole('textbox'…)
@@ -107,7 +179,7 @@
       }
       if (!best) {
         const fb = recordFallbackLocator(el, 'click()');
-        best = { code: fb.code, fullCode: fb.fullCode };
+        best = { code: fb.code, fullCode: fb.fullCode, target: fb.target };
       } else {
         const c = best.code;
         best = Object.assign({}, best, { fullCode: `await ${c}.click();` });
@@ -116,7 +188,8 @@
         action: 'click',
         value: '',
         code: best.code,
-        fullCode: best.fullCode
+        fullCode: best.fullCode,
+        target: best && best.target
       });
       return;
     }
@@ -130,7 +203,7 @@
     }
     if (!best) {
       const fb = recordFallbackLocator(el, (type === 'checkbox' || type === 'radio') ? 'check()' : 'click()');
-      best = { code: fb.code, fullCode: fb.fullCode };
+      best = { code: fb.code, fullCode: fb.fullCode, target: fb.target };
     }
 
     const actionType = (type === 'checkbox' || type === 'radio') ? 'check' : 'click';
@@ -139,7 +212,8 @@
       action: actionType,
       value: '',
       code: best.code,
-      fullCode: best.fullCode
+      fullCode: best.fullCode,
+      target: best && best.target
     });
   }
 
@@ -172,7 +246,7 @@
   }
 
   function sendFillForTextLike(el, markSuppressAfter) {
-    if (!isRecording) return;
+    if (!isRecording || isPaused || assertMode) return;
     let best;
     try {
       const result = generateLocators(el);
@@ -185,7 +259,7 @@
     if (!best) {
       const esc = value.replace(/\\/g, '\\\\').replace(/'/g, "\\'");
       const fb = recordFallbackLocator(el, `fill('${esc}')`);
-      best = { code: fb.code, fullCode: fb.fullCode };
+      best = { code: fb.code, fullCode: fb.fullCode, target: fb.target };
     } else {
       const esc = value.replace(/\\/g, '\\\\').replace(/'/g, "\\'");
       best = Object.assign({}, best, { fullCode: `await ${best.code}.fill('${esc}');` });
@@ -195,7 +269,8 @@
       action: 'fill',
       value: value,
       code: best.code,
-      fullCode: best.fullCode
+      fullCode: best.fullCode,
+      target: best && best.target
     });
     if (markSuppressAfter) {
       _suppressChangeAfterInput.set(el, { v: value, t: Date.now() });
@@ -203,7 +278,7 @@
   }
 
   function onRecordInputForDebounce(e) {
-    if (!isRecording) return;
+    if (!isRecording || isPaused || assertMode) return;
     const el = e.target;
     if (!isTextLikeField(el)) return;
     const prev = _inputDebounceTimers.get(el);
@@ -216,7 +291,7 @@
   }
 
   function onRecordChange(e) {
-    if (!isRecording) return;
+    if (!isRecording || isPaused || assertMode) return;
     const el = e.target;
     if (!el || el.nodeType !== Node.ELEMENT_NODE) return;
     const tag = el.tagName.toLowerCase();
@@ -250,14 +325,15 @@
           chain = el.checked ? 'check()' : 'uncheck()';
         }
         const fb = recordFallbackLocator(el, chain);
-        best = { code: fb.code, fullCode: fb.fullCode };
+        best = { code: fb.code, fullCode: fb.fullCode, target: fb.target };
       }
 
       sendRecordedAction({
         action: actionType,
         value: value,
         code: best.code,
-        fullCode: best.fullCode
+        fullCode: best.fullCode,
+        target: best && best.target
       });
       return;
     }
@@ -274,7 +350,7 @@
   }
 
   function onRecordDblClick(e) {
-    if (!isRecording) return;
+    if (!isRecording || isPaused || assertMode) return;
     const el = resolvePrimaryTarget(e);
     if (!el || el === overlay || (traversalBar && traversalBar.contains(el))) return;
     let best;
@@ -286,7 +362,7 @@
     }
     if (!best) {
       const fb = recordFallbackLocator(el, 'dblclick()');
-      best = { code: fb.code, fullCode: fb.fullCode };
+      best = { code: fb.code, fullCode: fb.fullCode, target: fb.target };
     } else {
       best = Object.assign({}, best, { fullCode: `await ${best.code}.dblclick();` });
     }
@@ -294,12 +370,13 @@
       action: 'dblclick',
       value: '',
       code: best.code,
-      fullCode: best.fullCode
+      fullCode: best.fullCode,
+      target: best && best.target
     });
   }
 
   function onRecordKeydown(e) {
-    if (!isRecording) return;
+    if (!isRecording || isPaused || assertMode) return;
     // Only record meaningful keypresses
     if (!['Enter', 'Tab', 'Escape'].includes(e.key)) return;
 
@@ -311,10 +388,16 @@
     });
   }
 
-  function startRecording() {
+  // rearm = true when the background re-attaches capture after a full-page navigation.
+  // In that case we only resume listening; we do NOT record a goto/viewport, because the
+  // navigation was already produced by the previously-recorded action (the frameworks
+  // auto-wait for it), and re-recording the size would be noise.
+  function startRecording(rearm) {
     if (isRecording) return;
     recordActionSeq = 0;
     isRecording = true;
+    isPaused = false;
+    assertMode = false;
     if (typeof PointerEvent !== 'undefined') {
       document.addEventListener('pointerdown', onRecordPrimaryPointer, _recordPointerOptions);
     } else {
@@ -324,7 +407,9 @@
     document.addEventListener('change', onRecordChange, true);
     document.addEventListener('keydown', onRecordKeydown, true);
     document.addEventListener('dblclick', onRecordDblClick, true);
-    console.log('[LocatorLens] Recording Started.');
+    console.log('[LocatorLens] Recording Started.' + (rearm ? ' (resumed after navigation)' : ''));
+
+    if (rearm) return;
 
     const now = Date.now();
     const href = window.location.href;
@@ -347,6 +432,8 @@
   function stopRecording() {
     if (!isRecording) return;
     isRecording = false;
+    isPaused = false;
+    assertMode = false;
     document.removeEventListener('pointerdown', onRecordPrimaryPointer, _recordPointerOptions);
     document.removeEventListener('mousedown', onRecordPrimaryPointer, true);
     document.removeEventListener('input', onRecordInputForDebounce, true);
@@ -357,20 +444,25 @@
   }
 
   if (chrome.storage && chrome.storage.local) {
-    chrome.storage.local.get('customAttributes', (res) => {
+    chrome.storage.local.get(['customAttributes', 'llFramework', 'llLanguage'], (res) => {
       if (res && res.customAttributes && res.customAttributes.length > 0) {
         customTestAttributes = [...res.customAttributes, ...customTestAttributes];
         // Remove duplicates
         customTestAttributes = [...new Set(customTestAttributes)];
       }
+      if (res && res.llFramework) llFramework = res.llFramework;
+      if (res && res.llLanguage) llLanguage = res.llLanguage;
     });
 
     chrome.storage.onChanged.addListener((changes, namespace) => {
-      if (namespace === 'local' && changes.customAttributes) {
+      if (namespace !== 'local') return;
+      if (changes.customAttributes) {
         let newAttrs = changes.customAttributes.newValue || [];
         customTestAttributes = [...newAttrs, 'data-testid', 'data-qa', 'data-cy', 'data-test', 'data-automation-id', 'data-e2e'];
         customTestAttributes = [...new Set(customTestAttributes)];
       }
+      if (changes.llFramework) llFramework = changes.llFramework.newValue || 'playwright';
+      if (changes.llLanguage) llLanguage = changes.llLanguage.newValue || 'typescript';
     });
   }
 
@@ -759,6 +851,15 @@
     return E.generateLocators(el, customTestAttributes);
   }
 
+  // Locator expression for quick-copy, honoring the side panel's framework/language.
+  function copyLocatorCode(loc) {
+    if (window.LLCodegen && loc && loc.target) {
+      const expr = window.LLCodegen.locatorExpr(loc.target, llFramework, llLanguage);
+      if (expr) return expr;
+    }
+    return (loc && loc.code) || '';
+  }
+
   // ── Event handlers ─────────────────────────────────────────────────────────
   function onMouseOver(e) {
     if (!isInspecting) return;
@@ -787,7 +888,7 @@
 
     const result = generateLocators(el);
 
-    const bestCode = result.locators[0] ? result.locators[0].code : '';
+    const bestCode = result.locators[0] ? copyLocatorCode(result.locators[0]) : '';
     if (bestCode) {
       if (navigator.clipboard && navigator.clipboard.writeText) {
         navigator.clipboard.writeText(bestCode).then(() => {
@@ -884,11 +985,24 @@
     }
     // 🎬 RECORDING: Start/Stop recording user interactions
     else if (msg.type === 'START_RECORDING') {
-      startRecording();
+      startRecording(msg.rearm);
       sendResponse({ ok: true });
     }
     else if (msg.type === 'STOP_RECORDING') {
       stopRecording();
+      sendResponse({ ok: true });
+    }
+    else if (msg.type === 'PAUSE_RECORDING') {
+      isPaused = true;
+      sendResponse({ ok: true });
+    }
+    else if (msg.type === 'RESUME_RECORDING') {
+      isPaused = false;
+      sendResponse({ ok: true });
+    }
+    else if (msg.type === 'SET_ASSERT_MODE') {
+      assertMode = !!msg.on;
+      if (msg.assertType) assertType = msg.assertType;
       sendResponse({ ok: true });
     }
     // Handle context menu quick-copy
@@ -896,7 +1010,7 @@
       const target = lastRightClickedEl || document.body;
       const result = generateLocators(target);
 
-      const bestCode = result.locators[0] ? result.locators[0].code : '';
+      const bestCode = result.locators[0] ? copyLocatorCode(result.locators[0]) : '';
       if (bestCode) {
         navigator.clipboard.writeText(bestCode).then(() => {
           const origOutline = target.style.outline;

@@ -217,6 +217,69 @@
     return null;
   }
 
+  // ── Live uniqueness: how many elements does a locator actually match? ───────
+  // Counts are capped at 10 (we only care about unique vs ambiguous) for speed.
+  const UNIQ_CAP = 10;
+  function attrSelectorValue(v) {
+    return String(v == null ? '' : v).replace(/\\/g, '\\\\').replace(/"/g, '\\"');
+  }
+  function countBySelector(sel) {
+    try { return Math.min(document.querySelectorAll(sel).length, UNIQ_CAP); } catch (e) { return null; }
+  }
+  function countByText(text) {
+    let count = 0;
+    const all = document.querySelectorAll('*');
+    for (let i = 0; i < all.length; i++) {
+      const node = all[i];
+      const t = (node.innerText || node.textContent || '').trim();
+      if (t !== text) continue;
+      // innermost only (mirrors Playwright getByText) — skip if a child holds the same text
+      let childHas = false;
+      for (let c = 0; c < node.children.length; c++) {
+        if ((node.children[c].innerText || node.children[c].textContent || '').trim() === text) { childHas = true; break; }
+      }
+      if (!childHas && ++count >= UNIQ_CAP) break;
+    }
+    return count;
+  }
+  function countByRole(role, name) {
+    let count = 0, scanned = 0;
+    const all = document.querySelectorAll('*');
+    for (let i = 0; i < all.length; i++) {
+      if (++scanned > 5000) break;
+      if (getRole(all[i]) !== role) continue;
+      if (name && getAccessibleName(all[i]) !== name) continue;
+      if (++count >= UNIQ_CAP) break;
+    }
+    return count;
+  }
+  function countByLabel(labelText) {
+    let count = 0;
+    const controls = document.querySelectorAll('input, select, textarea');
+    for (let i = 0; i < controls.length; i++) {
+      if (getAccessibleName(controls[i]) === labelText && ++count >= UNIQ_CAP) break;
+    }
+    return count;
+  }
+  function countTargetMatches(t) {
+    if (!t) return null;
+    try {
+      switch (t.kind) {
+        case 'testid': return countBySelector('[' + t.attr + '="' + attrSelectorValue(t.value) + '"]');
+        case 'id': return countBySelector('#' + CSS.escape(String(t.value)));
+        case 'name': return countBySelector('[name="' + attrSelectorValue(t.value) + '"]');
+        case 'placeholder': return countBySelector('[placeholder="' + attrSelectorValue(t.value) + '"]');
+        case 'altText': return countBySelector('img[alt="' + attrSelectorValue(t.value) + '"]');
+        case 'title': return countBySelector('[title="' + attrSelectorValue(t.value) + '"]');
+        case 'css': return countBySelector(t.value);
+        case 'text': return countByText(t.value);
+        case 'role': return countByRole(t.role, t.name);
+        case 'label': return countByLabel(t.value);
+        default: return null;
+      }
+    } catch (e) { return null; }
+  }
+
   // ── Main locator generation engine ────────────────────────────────────────
   function generateLocators(el, customTestAttributes) {
     const locators = [];
@@ -234,6 +297,7 @@
           method: 'getByTestId() / Custom',
           matchedAttr: `${attr}="${val}"`,
           stability: 'BEST',
+          target: { kind: 'testid', attr: attr, value: val },
           code: `page.locator('[${attr}="${escaped}"]')`,
           fullCode: `await page.locator('[${attr}="${escaped}"]').${suggestAction(el)};`,
           explanation: `Uses the <${attr}> attribute which is purpose-built for testing or custom configuration. This is highly stable.`,
@@ -260,6 +324,7 @@
         method: 'getByRole()',
         matchedAttr: `role="${role}", name="${name}"${extra}`,
         stability: locators.length === 0 ? 'BEST' : 'BEST',
+        target: { kind: 'role', role: role, name: name, level: (role === 'heading' ? getHeadingLevel(el) : null) },
         code: codeBase,
         fullCode: `await ${codeBase}.${suggestAction(el)};`,
         explanation: `Finds the element by its ARIA role "${role}" and accessible name "${name}". This is Playwright's most recommended locator — it tests your app the same way screen readers use it.`,
@@ -271,6 +336,7 @@
         method: 'getByRole()',
         matchedAttr: `role="${role}" (no accessible name found)`,
         stability: 'OK',
+        target: { kind: 'role', role: role },
         code: `page.getByRole('${role}')`,
         fullCode: `await page.getByRole('${role}').${suggestAction(el)};`,
         explanation: `Finds by role "${role}" but without a name filter — this may match multiple elements. Add an accessible name (aria-label, visible text) to make it unique.`,
@@ -301,6 +367,7 @@
           method: 'getByLabel()',
           matchedAttr: `label text: "${labelText}"`,
           stability: 'BEST',
+          target: { kind: 'label', value: labelText },
           code: `page.getByLabel('${escaped}')`,
           fullCode: `await page.getByLabel('${escaped}').${suggestAction(el)};`,
           explanation: `Finds the ${tag} element by its associated label "${labelText}". Ideal for form inputs — directly reflects what the user sees on screen.`,
@@ -318,6 +385,7 @@
         method: 'getByPlaceholder()',
         matchedAttr: `placeholder="${placeholder.trim()}"`,
         stability: 'GOOD',
+        target: { kind: 'placeholder', value: placeholder.trim() },
         code: `page.getByPlaceholder('${escaped}')`,
         fullCode: `await page.getByPlaceholder('${escaped}').${suggestAction(el)};`,
         explanation: `Finds the input by its placeholder text "${placeholder.trim()}". Good when no label is present — but note placeholder text can change with copy updates.`,
@@ -335,6 +403,7 @@
           method: 'getByAltText()',
           matchedAttr: `alt="${alt.trim()}"`,
           stability: 'GOOD',
+          target: { kind: 'altText', value: alt.trim() },
           code: `page.getByAltText('${escaped}')`,
           fullCode: `await page.getByAltText('${escaped}').${suggestAction(el)};`,
           explanation: `Finds the image by its alt text "${alt.trim()}". The correct semantic approach for images — also important for accessibility.`,
@@ -352,6 +421,7 @@
         method: 'getByTitle()',
         matchedAttr: `title="${titleAttr.trim()}"`,
         stability: 'GOOD',
+        target: { kind: 'title', value: titleAttr.trim() },
         code: `page.getByTitle('${escaped}')`,
         fullCode: `await page.getByTitle('${escaped}').${suggestAction(el)};`,
         explanation: `Finds the element by its title attribute "${titleAttr.trim()}". Useful for icon buttons and tooltip elements without visible text.`,
@@ -376,6 +446,7 @@
         method: 'getByText()',
         matchedAttr: `visible text: "${visibleText.slice(0, 60)}"`,
         stability,
+        target: { kind: 'text', value: visibleText.slice(0, 60) },
         code: `page.getByText('${escaped.slice(0, 60)}')`,
         fullCode: `await page.getByText('${escaped.slice(0, 60)}').${suggestAction(el)};`,
         explanation: `Finds by visible text content "${visibleText.slice(0, 60)}".${warning} Best used for non-interactive elements like paragraphs and labels.`,
@@ -391,6 +462,7 @@
         method: "locator('#id')",
         matchedAttr: `id="${el.id}"`,
         stability: 'OK',
+        target: { kind: 'id', value: el.id },
         code: `page.locator('#${escaped}')`,
         fullCode: `await page.locator('#${escaped}').${suggestAction(el)};`,
         explanation: `Uses the element's ID "${el.id}". Acceptable if the ID is hand-written and stable — avoid if IDs are auto-generated (e.g. "btn-47" or "input_1234").`,
@@ -407,6 +479,7 @@
         method: "locator('[name]')",
         matchedAttr: `name="${name_attr}"`,
         stability: 'OK',
+        target: { kind: 'name', value: name_attr },
         code: `page.locator('[name="${escaped}"]')`,
         fullCode: `await page.locator('[name="${escaped}"]').${suggestAction(el)};`,
         explanation: `Uses the name attribute "${name_attr}". Moderately stable — name attributes are usually semantic but multiple elements can share the same name (e.g. radio groups).`,
@@ -435,6 +508,7 @@
           method: 'Chained/Filtered',
           matchedAttr: `Parent: ${uParent.testId || uParent.id || uParent.name}`,
           stability: 'BEST',
+          target: { kind: 'css', value: buildCSSSelector(el) },
           code: `${pCode}.${bestChild}`,
           fullCode: `await (${pCode}).${bestChild}.${action};`,
           explanation: `Uses a unique parent (${uParent.id || uParent.role}) to narrow down the search. This is the pro approach for elements in lists, tables, or complex dashboards where name alone is ambiguous.`,
@@ -454,6 +528,7 @@
         method: 'Frame Switch',
         matchedAttr: 'Inside Iframe',
         stability: 'GOOD',
+        target: { kind: 'css', value: buildCSSSelector(el) },
         code: `page.frameLocator('iframe-selector')`,
         fullCode: `await page.frameLocator('iframe').${frameChildSnippet}.${suggestAction(el)};`,
         explanation: `Element is inside an Iframe. You must use frameLocator() to switch context before interacting. Replace 'iframe-selector' with the actual iframe ID or src.`,
@@ -469,12 +544,19 @@
       method: 'locator() CSS',
       matchedAttr: cssSelector,
       stability: hasUnstable ? 'AVOID' : 'OK',
+      target: { kind: 'css', value: cssSelector },
       code: `page.locator('${cssSelector.replace(/'/g, "\\'")}')`,
       fullCode: `await page.locator('${cssSelector.replace(/'/g, "\\'")}').${suggestAction(el)};`,
       explanation: hasUnstable
         ? `This CSS selector contains auto-generated class names (like styled-components or MUI classes) that regenerate on every build. Using this WILL cause your tests to break regularly. Use a semantic locator instead.`
         : `CSS selector fallback. Use only when semantic locators are not available. Prefer IDs and data attributes over class-based selectors.`,
       why: 'CSS selector (fallback)'
+    });
+
+    // ── Live uniqueness: tag each locator with how many elements it matches ───
+    locators.forEach(l => {
+      const c = countTargetMatches(l.target);
+      if (c != null) { l.matchCount = c; l.unique = (c === 1); }
     });
 
     // ── Stability-First Sorting ──────────────────────────────────────────────
@@ -543,7 +625,18 @@
       classes: typeof el.className === 'string' ? el.className.trim().split(/\s+/).filter(Boolean).slice(0, 6) : [],
       hasUnstableClasses: hasUnstable,
       isInShadow,
-      shadowHost
+      shadowHost,
+      suggestedAction: (function () {
+        var ty = (el.getAttribute('type') || '').toLowerCase();
+        if (tag === 'input') {
+          if (ty === 'checkbox' || ty === 'radio') return 'check';
+          if (ty === 'submit' || ty === 'button' || ty === 'reset') return 'click';
+          return 'fill';
+        }
+        if (tag === 'select') return 'selectOption';
+        if (tag === 'textarea') return 'fill';
+        return 'click';
+      })()
     };
 
     // ── Pro tip based on element ───────────────────────────────────────────

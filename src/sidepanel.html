@@ -5,1244 +5,658 @@
   <meta charset="UTF-8" />
   <title>LocatorLens – Side Panel</title>
   <style>
-    /* 🛸 Lumina Cyber HUD Masterpiece Edition 🛸 */
-    @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@500;700&display=swap');
+    /* ============================================================
+       LocatorLens — design tokens (ported from the conversion branch:
+       warm cream paper + deep teal brand, with a matching dark theme).
+       ============================================================ */
+    :root,
+    [data-theme="light"] {
+      --bg:            #F7F5EE;
+      --canvas:        #FAF9F5;
+      --surface:       #FFFFFF;
+      --surface-2:     #F2EFE6;
+      --surface-3:     #ECE8DC;
+      --hover:         #F0ECDF;
+      --border:        #E3DECF;
+      --border-strong: #D2CCBA;
 
-    :root {
-      --bg: #070d1f;
-      --surf: #11192e;
-      --surf2: #1c253e;
-      --surf-low: #0c1326;
-      --border: rgba(65, 71, 91, 0.4);
-      --primary: #3adffa;
-      --primary-dim: rgba(58, 223, 250, 0.4);
-      --secondary: #dae2fd;
-      --tertiary: #47c4ff;
-      --text: #dfe4fe;
-      --muted: #a5aac2;
-      --error: #ff716c;
-      --warn: #fb923c;
-      --code: #000000;
+      --text:          #1A1915;
+      --text-strong:   #100F0C;
+      --text-muted:    #6B665B;
+      --text-faint:    #948E80;
+
+      --brand:         #1F6A6F;
+      --brand-strong:  #155257;
+      --brand-soft:    #E3EEEE;
+      --brand-soft-2:  #CFE2E3;
+      --on-brand:      #FFFFFF;
+
+      --accent:        #BE5A3A;
+      --accent-soft:   #F5E6DC;
+
+      --success:       #2F7A4E;
+      --success-soft:  #E0EFE5;
+      --warn:          #A66316;
+      --warn-soft:     #F7E9D4;
+      --danger:        #B83A2E;
+      --danger-soft:   #F7E1DD;
+      --info:          #2F5DA6;
+      --info-soft:     #E0E8F4;
+
+      --code-bg:       #F4F1E8;
+      --code-text:     #1A1915;
+      --kw-c:          #7A2E8C;
+      --fn-c:          #1F5DA0;
+      --str-c:         #2F7A4E;
+      --num-c:         #A66316;
+
+      --shadow-sm:     0 1px 2px rgba(40, 33, 20, 0.04);
+      --shadow:        0 1px 3px rgba(40, 33, 20, 0.06), 0 2px 8px rgba(40, 33, 20, 0.04);
+      --ring:          0 0 0 3px rgba(31, 106, 111, 0.18);
+      --focus-ring:    var(--brand-strong);
+
+      --r-sm: 6px;  --r-md: 8px;  --r-lg: 12px;  --r-pill: 999px;
     }
 
-    * {
-      box-sizing: border-box;
-      margin: 0;
-      padding: 0;
+    [data-theme="dark"] {
+      --bg:            #1B1A17;
+      --canvas:        #201F1B;
+      --surface:       #26241F;
+      --surface-2:     #2E2C26;
+      --surface-3:     #36332C;
+      --hover:         #312E27;
+      --border:        #383530;
+      --border-strong: #4A463E;
+
+      --text:          #ECE7DA;
+      --text-strong:   #FAF6EA;
+      --text-muted:    #9C968A;
+      --text-faint:    #6E695F;
+
+      --brand:         #6FB9BE;
+      --brand-strong:  #95D2D6;
+      --brand-soft:    #1F3536;
+      --brand-soft-2:  #28494B;
+      --on-brand:      #0F2425;
+
+      --accent:        #D88460;
+      --accent-soft:   #3A2620;
+
+      --success:       #7FBE9C;
+      --success-soft:  #1F3327;
+      --warn:          #D9A35F;
+      --warn-soft:     #38291A;
+      --danger:        #E08A7E;
+      --danger-soft:   #3A2320;
+      --info:          #8AA8D4;
+      --info-soft:     #1F2A3A;
+
+      --code-bg:       #1A1916;
+      --code-text:     #E3DECF;
+      --kw-c:          #C58DD4;
+      --fn-c:          #8AB6E0;
+      --str-c:         #9ACBA4;
+      --num-c:         #DBA571;
+
+      --shadow-sm:     0 1px 2px rgba(0, 0, 0, 0.3);
+      --shadow:        0 1px 3px rgba(0, 0, 0, 0.4), 0 2px 8px rgba(0, 0, 0, 0.25);
+      --ring:          0 0 0 3px rgba(111, 185, 190, 0.25);
+      --focus-ring:    var(--brand-strong);
     }
 
-    html,
-    body {
+    @media (prefers-color-scheme: dark) {
+      :root:not([data-theme]) {
+        --bg:#1B1A17;--canvas:#201F1B;--surface:#26241F;--surface-2:#2E2C26;--surface-3:#36332C;--hover:#312E27;--border:#383530;--border-strong:#4A463E;
+        --text:#ECE7DA;--text-strong:#FAF6EA;--text-muted:#9C968A;--text-faint:#6E695F;
+        --brand:#6FB9BE;--brand-strong:#95D2D6;--brand-soft:#1F3536;--brand-soft-2:#28494B;--on-brand:#0F2425;
+        --accent:#D88460;--accent-soft:#3A2620;
+        --success:#7FBE9C;--success-soft:#1F3327;--warn:#D9A35F;--warn-soft:#38291A;--danger:#E08A7E;--danger-soft:#3A2320;--info:#8AA8D4;--info-soft:#1F2A3A;
+        --code-bg:#1A1916;--code-text:#E3DECF;--kw-c:#C58DD4;--fn-c:#8AB6E0;--str-c:#9ACBA4;--num-c:#DBA571;
+        --focus-ring:#95D2D6;--ring:0 0 0 3px rgba(149,210,214,0.35);
+      }
+    }
+
+    /* Short-name aliases used throughout the component styles below */
+    :root, [data-theme="light"], [data-theme="dark"] {
+      --primary:     var(--brand);
+      --primary-dim: var(--brand-soft);
+      --secondary:   var(--text-strong);
+      --tertiary:    var(--info);
+      --surf:        var(--surface);
+      --surf2:       var(--surface-2);
+      --surf-low:    var(--surface-3);
+      --error:       var(--danger);
+      --muted:       var(--text-muted);
+      --code:        var(--code-bg);
+      --fg:          var(--text);
+    }
+
+    /* ---------- reset ---------- */
+    *, *::before, *::after { box-sizing: border-box; }
+    * { margin: 0; padding: 0; }
+    html, body {
       height: 100%;
+      width: 100%;
+      min-width: 320px;
+      overflow: hidden;
       background: var(--bg);
       color: var(--text);
-      font-family: 'Inter', system-ui, sans-serif;
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', system-ui, sans-serif;
       font-size: 13px;
-      overflow: hidden;
-      position: relative;
+      line-height: 1.5;
+      -webkit-font-smoothing: antialiased;
+    }
+    button, input, textarea, select { font: inherit; color: inherit; }
+    button { cursor: pointer; border: none; background: none; }
+    svg { flex-shrink: 0; }
+    code, pre, .mono { font-family: 'Cascadia Code', 'Fira Code', ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
+
+    ::-webkit-scrollbar { width: 9px; height: 9px; }
+    ::-webkit-scrollbar-track { background: transparent; }
+    ::-webkit-scrollbar-thumb { background: var(--border-strong); border-radius: var(--r-pill); border: 2px solid var(--bg); }
+    ::-webkit-scrollbar-thumb:hover { background: var(--text-faint); }
+
+    button:focus-visible, input:focus-visible, textarea:focus-visible, [tabindex]:focus-visible {
+      outline: 2px solid var(--focus-ring);
+      outline-offset: 2px;
     }
 
-    /* ── The Scanline Overlay ── */
-    body::before {
-      content: " ";
-      display: block;
-      position: fixed;
-      top: 0;
-      left: 0;
-      bottom: 0;
-      right: 0;
-      background: linear-gradient(rgba(18, 16, 16, 0) 50%, rgba(0, 0, 0, 0.25) 50%), linear-gradient(90deg, rgba(255, 0, 0, 0.04), rgba(0, 255, 0, 0.02), rgba(0, 0, 255, 0.04));
-      z-index: 1000;
-      background-size: 100% 2px, 3px 100%;
-      pointer-events: none;
-      opacity: 0.15;
-    }
+    /* ---------- app shell ---------- */
+    .app { display: flex; flex-direction: column; height: 100%; background: var(--bg); }
 
-    /* ── Custom Scrollbar (Proprietary Look) ── */
-    ::-webkit-scrollbar {
-      width: 4px;
-    }
-
-    ::-webkit-scrollbar-track {
-      background: var(--surf-low);
-    }
-
-    ::-webkit-scrollbar-thumb {
-      background: var(--primary);
-      border-radius: 2px;
-    }
-
-    /* ── App Container ── */
-    .app {
-      display: flex;
-      flex-direction: column;
-      height: 100%;
-      backdrop-filter: blur(20px);
-    }
-
-    /* ── Header (Tactical Observer) ── */
+    /* ---------- header ---------- */
     .header {
-      background: var(--surf);
-      padding: 14px 18px;
+      flex-shrink: 0;
       display: flex;
       align-items: center;
-      gap: 12px;
-      border-bottom: 0.5px solid var(--border);
+      gap: 11px;
+      padding: 12px 14px;
+      background: var(--surface);
+      border-bottom: 1px solid var(--border);
     }
-
-    .fw-select-wrap {
-      margin-left: auto;
-      position: relative;
+    .brand-mark {
+      width: 32px; height: 32px;
+      display: inline-flex; align-items: center; justify-content: center;
+      border-radius: var(--r-md);
+      background: var(--brand-soft);
+      color: var(--brand);
     }
-
+    .brand-mark svg { width: 18px; height: 18px; }
+    .brand { flex: 1; min-width: 0; }
+    .brand-name { font-weight: 700; font-size: 14px; letter-spacing: -0.01em; color: var(--text-strong); }
+    .brand-sub { font-size: 10px; color: var(--text-muted); margin-top: 1px; }
     .fw-playwright-badge {
-      background: var(--surf-low);
+      flex-shrink: 0;
+      font-size: 10px; font-weight: 700;
+      padding: 3px 8px;
+      border-radius: var(--r-pill);
+      background: var(--surface-2);
       border: 1px solid var(--border);
-      color: var(--primary);
-      font-family: 'JetBrains Mono', monospace;
-      font-size: 10px;
-      padding: 4px 8px;
-      border-radius: 4px;
-      text-transform: uppercase;
-      letter-spacing: 0.05em;
+      color: var(--text-muted);
       white-space: nowrap;
     }
+    .status-dot { width: 8px; height: 8px; border-radius: var(--r-pill); background: var(--text-faint); transition: background .2s ease, box-shadow .2s ease; }
+    .status-dot.active { background: var(--success); box-shadow: 0 0 0 3px var(--success-soft); }
 
-    .logo {
-      font-size: 18px;
-      flex-shrink: 0;
-    }
-
-    .brand {
-      flex: 1;
-    }
-
-    .brand-name {
-      font-weight: 700;
-      font-size: 14px;
-      letter-spacing: -0.02em;
-    }
-
-    .brand-sub {
-      font-size: 9px;
-      color: var(--muted);
-      text-transform: uppercase;
-      letter-spacing: 0.1em;
-      margin-top: 1px;
-    }
-
-    .status-dot {
-      width: 6px;
-      height: 6px;
-      border-radius: 50%;
-      background: var(--muted);
-      transition: all .3s;
-    }
-
-    .status-dot.active {
-      background: var(--primary);
-      box-shadow: 0 0 10px var(--primary);
-      animation: pulse 2s infinite linear;
-    }
-
-    @keyframes pulse {
-      0% {
-        opacity: 1;
-        box-shadow: 0 0 6px var(--primary);
-      }
-
-      50% {
-        opacity: 0.7;
-        box-shadow: 0 0 14px var(--primary);
-      }
-
-      100% {
-        opacity: 1;
-        box-shadow: 0 0 6px var(--primary);
-      }
-    }
-
-    .logo {
-      font-size: 20px;
-      animation: glitchGlow 4s infinite linear;
-      text-shadow: 0 0 5px var(--primary);
-    }
-
-    @keyframes glitchGlow {
-
-      0%,
-      100% {
-        opacity: 1;
-        filter: hue-rotate(0deg);
-        text-shadow: 0 0 5px var(--primary);
-      }
-
-      92% {
-        opacity: 1;
-        filter: hue-rotate(0deg);
-      }
-
-      94% {
-        opacity: 0.8;
-        filter: hue-rotate(90deg);
-        text-shadow: 2px 0 red, -2px 0 map;
-      }
-
-      96% {
-        opacity: 1;
-        filter: hue-rotate(0deg);
-      }
-    }
-
-    /* ── Inspect Button (Hardware Backlit) ── */
-    .btn-wrap {
-      padding: 16px 18px 12px;
-    }
-
+    /* ---------- primary action button ---------- */
+    .btn-wrap { flex-shrink: 0; padding: 12px 14px; background: var(--surface); border-bottom: 1px solid var(--border); }
     .inspect-btn {
       width: 100%;
-      background: var(--primary);
-      color: var(--bg);
-      border: none;
-      padding: 12px 16px;
-      border-radius: 4px;
-      font-size: 13px;
-      font-weight: 700;
-      text-transform: uppercase;
-      letter-spacing: 0.05em;
+      min-height: 38px;
+      display: inline-flex; align-items: center; justify-content: center; gap: 8px;
+      border: 1px solid var(--brand);
+      border-radius: var(--r-md);
+      background: var(--brand);
+      color: var(--on-brand);
+      padding: 9px 13px;
+      font-weight: 700; font-size: 12px;
+      box-shadow: var(--shadow-sm);
+      transition: background .16s ease, border-color .16s ease, transform .16s ease;
+    }
+    .inspect-btn:hover { background: var(--brand-strong); border-color: var(--brand-strong); transform: translateY(-1px); }
+    .inspect-btn:active { transform: translateY(0); }
+    .inspect-btn.active { background: var(--danger-soft); color: var(--danger); border-color: var(--danger); box-shadow: none; }
+
+    /* ---------- tab bar ---------- */
+    .tab-bar {
+      flex-shrink: 0;
+      display: flex; align-items: center; gap: 6px;
+      padding: 8px 12px;
+      background: var(--canvas);
+      border-bottom: 1px solid var(--border);
+    }
+    .tab {
+      flex: 1;
+      height: 34px;
+      display: inline-flex; align-items: center; justify-content: center; gap: 7px;
+      border: 1px solid transparent;
+      border-radius: var(--r-md);
+      color: var(--text-muted);
+      font-size: 12px; font-weight: 600;
+      transition: background .16s ease, color .16s ease, border-color .16s ease;
+    }
+    .tab:hover { color: var(--text-strong); background: var(--hover); }
+    .tab.active { color: var(--brand); background: var(--brand-soft); border-color: var(--brand-soft-2); }
+    .tab-icon { width: 15px; height: 15px; display: inline-flex; }
+    .tab-icon svg { width: 15px; height: 15px; }
+
+    /* ---------- output target (framework + language) ---------- */
+    .output-bar {
+      flex-shrink: 0;
+      display: flex; gap: 8px;
+      padding: 8px 12px;
+      background: var(--canvas);
+      border-bottom: 1px solid var(--border);
+    }
+    .output-field { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 3px; }
+    .output-label { font-size: 9px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.06em; color: var(--text-muted); padding-left: 2px; }
+    .output-select {
+      width: 100%; height: 30px;
+      padding: 0 8px;
+      border: 1px solid var(--border);
+      border-radius: var(--r-md);
+      background: var(--surface);
+      color: var(--text);
+      font-size: 11px; font-weight: 600;
       cursor: pointer;
-      display: flex;
-      align-items: center;
-      justify-content: center;
-      gap: 10px;
-      box-shadow: 0 0 15px var(--primary-dim);
-      transition: all .2s cubic-bezier(0.4, 0, 0.2, 1);
-      position: relative;
     }
+    .output-select:hover { border-color: var(--border-strong); }
 
-    .inspect-btn:hover {
-      transform: translateY(-2px);
-      box-shadow: 0 0 25px var(--primary), inset 0 0 8px rgba(255, 255, 255, 0.3);
+    /* ---------- content ---------- */
+    .scroll-content { flex: 1; min-height: 0; overflow-y: auto; padding: 14px 0 24px; }
+    .tab-content { display: none; }
+    .tab-content.active { display: block; }
+
+    .sec-label {
+      padding: 12px 16px 8px;
+      font-size: 10px; font-weight: 700;
+      text-transform: uppercase; letter-spacing: 0.08em;
+      color: var(--text-muted);
+      display: flex; align-items: center; gap: 10px;
     }
+    .sec-label::after { content: ''; flex: 1; height: 1px; background: var(--border); }
 
-    .inspect-btn:active {
-      transform: translateY(0);
-      filter: brightness(0.9);
+    /* ---------- selector lab ---------- */
+    .selector-lab {
+      margin: 0 16px 14px;
+      padding: 12px;
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: var(--r-lg);
+      box-shadow: var(--shadow-sm);
     }
-
-    .inspect-btn.active {
-      background: var(--surf2);
-      color: var(--error);
-      box-shadow: 0 0 15px rgba(255, 113, 108, 0.2);
-      border: 1px solid var(--error);
+    .lab-header {
+      font-size: 10px; font-weight: 700;
+      text-transform: uppercase; letter-spacing: 0.06em;
+      color: var(--text-strong);
+      margin-bottom: 8px;
+      display: flex; justify-content: space-between; align-items: center;
     }
+    .lab-input-container { display: flex; align-items: center; gap: 6px; }
+    .lab-input-container input {
+      flex: 1; min-width: 0;
+      background: var(--canvas);
+      border: 1px solid var(--border);
+      border-radius: var(--r-md);
+      color: var(--text);
+      font-family: 'Cascadia Code', 'Fira Code', ui-monospace, monospace;
+      font-size: 11px;
+      padding: 8px 10px;
+      min-height: 34px;
+    }
+    .lab-input-container input::placeholder { color: var(--text-faint); }
+    .lab-input-container input:focus { outline: none; border-color: var(--brand); box-shadow: var(--ring); }
+    .lab-btn {
+      min-height: 34px;
+      padding: 0 11px;
+      display: inline-flex; align-items: center; justify-content: center;
+      border: 1px solid var(--border);
+      border-radius: var(--r-md);
+      background: var(--surface);
+      color: var(--text-muted);
+      font-size: 14px;
+      transition: background .16s ease, color .16s ease, border-color .16s ease;
+    }
+    .lab-btn:hover { background: var(--brand-soft); color: var(--brand); border-color: var(--brand-soft-2); }
+    .lab-status { margin-top: 6px; font-size: 11px; color: var(--text-muted); line-height: 1.45; min-height: 16px; }
+    .lab-status.success { color: var(--success); }
+    .lab-status.err { color: var(--danger); }
 
+    /* ---------- hint row ---------- */
     .hint-row {
-      padding: 0 18px 12px;
-      font-size: 10px;
-      color: var(--muted);
+      margin: 0 16px 12px;
+      padding: 8px 10px;
+      background: var(--surface-2);
+      border: 1px solid var(--border);
+      border-radius: var(--r-md);
+      color: var(--text-muted);
+      font-size: 11px;
       text-align: center;
       display: none;
-      text-transform: uppercase;
-      letter-spacing: 0.05em;
     }
+    .hint-row span { color: var(--brand); font-weight: 600; }
 
-    .hint-row span {
-      color: var(--primary);
-    }
-
-    /* ── Main Content Area ── */
-    .scroll-content {
-      flex: 1;
-      overflow-y: auto;
-      padding-bottom: 24px;
-    }
-
-    /* ── Idle State ── */
+    /* ---------- idle state ---------- */
     .idle-state {
-      padding: 60px 24px;
+      margin: 0 16px;
+      padding: 40px 20px;
       text-align: center;
-      position: relative;
-      overflow: hidden;
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: var(--r-lg);
+      box-shadow: var(--shadow-sm);
     }
-
-    .idle-state::before {
-      content: '';
-      position: absolute;
-      top: 0;
-      left: 0;
-      right: 0;
-      bottom: 0;
-      background: linear-gradient(180deg, transparent 0%, rgba(58, 223, 250, 0.08) 50%, transparent 100%);
-      background-size: 100% 200%;
-      animation: scan 4s infinite linear;
-      pointer-events: none;
-    }
-
-    @keyframes scan {
-      0% {
-        background-position: 0 150%;
-      }
-
-      100% {
-        background-position: 0 -150%;
-      }
-    }
-
     .idle-icon {
-      font-size: 40px;
-      margin-bottom: 20px;
-      opacity: 0.6;
+      width: 46px; height: 46px;
+      margin: 0 auto 12px;
+      display: flex; align-items: center; justify-content: center;
+      border-radius: var(--r-lg);
+      background: var(--brand-soft);
+      font-size: 22px;
     }
+    .idle-title { font-size: 14px; font-weight: 700; color: var(--text-strong); margin-bottom: 6px; }
+    .idle-sub { font-size: 12px; color: var(--text-muted); line-height: 1.6; }
+    .idle-sub strong { color: var(--brand); }
 
-    .idle-title {
-      font-size: 16px;
-      font-weight: 600;
-      color: var(--text);
-      margin-bottom: 12px;
-    }
-
-    .idle-sub {
-      font-size: 12px;
-      color: var(--muted);
-      line-height: 1.8;
-    }
-
-    .idle-sub strong {
-      color: var(--primary);
-    }
-
-    /* ── Results UI ── */
+    /* ---------- element bar ---------- */
     .el-bar {
-      margin: 0 18px 12px;
+      margin: 0 16px 12px;
       padding: 12px;
-      background: var(--surf-low);
-      border-radius: 6px;
-      display: flex;
-      flex-wrap: wrap;
-      gap: 8px;
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: var(--r-lg);
+      box-shadow: var(--shadow-sm);
+      display: flex; flex-wrap: wrap; gap: 8px;
     }
-
     .el-chip {
       font-size: 10px;
       padding: 4px 8px;
-      background: var(--surf);
-      border-radius: 4px;
+      background: var(--canvas);
       border: 1px solid var(--border);
-      color: var(--muted);
+      border-radius: var(--r-md);
+      color: var(--text-muted);
     }
+    .el-chip .k { color: var(--text-faint); }
+    .el-chip .v { color: var(--brand); font-weight: 600; }
+    .el-chip .v.warn { color: var(--warn); }
+    .el-chip.shadow { border-color: var(--accent); color: var(--accent); background: var(--accent-soft); }
 
-    .el-chip .v {
-      color: var(--primary);
-      font-weight: 600;
-    }
-
-    .el-chip .v.warn {
-      color: var(--warn);
-    }
-
-    .el-chip.shadow {
-      border-color: #ff00ff;
-      color: #ff00ff;
-      box-shadow: 0 0 8px rgba(255, 0, 255, 0.2);
-    }
-
-    .sec-label {
-      padding: 12px 18px 8px;
-      font-size: 10px;
-      text-transform: uppercase;
-      letter-spacing: 0.15em;
-      color: var(--muted);
-      display: flex;
-      align-items: center;
-      gap: 10px;
-    }
-
-    .sec-label::after {
-      content: '';
-      flex: 1;
-      height: 1px;
-      background: var(--border);
-    }
-
-    #codePreview.code-preview-editor {
-      width: calc(100% - 36px);
-      margin: 0 18px 12px;
-      box-sizing: border-box;
-      min-height: 220px;
-      max-height: 420px;
-      background: #0a0f1a;
-      border: 1px solid var(--border);
-      border-radius: 4px;
-      padding: 12px;
-      font-family: 'JetBrains Mono', monospace;
-      font-size: 10px;
-      line-height: 1.45;
-      color: #a8d8ea;
-      resize: vertical;
-      outline: none;
-      white-space: pre;
-      overflow: auto;
-    }
-
-    #codePreview.code-preview-editor:focus {
-      border-color: var(--primary-dim);
-      box-shadow: 0 0 0 1px rgba(58, 223, 250, 0.15);
-    }
-
-    #regenerateScriptBtn {
-      flex-shrink: 0;
-      text-transform: none;
-      letter-spacing: 0.04em;
-      font-size: 9px;
-      padding: 4px 10px;
-    }
-
-    /* Recorder timeline: never use global .card here — its overflow:hidden + ::after clips labels */
-    #recorderTimeline.ll-rec-timeline {
-      display: flex;
-      flex-direction: column;
-      gap: 10px;
-      max-height: min(42vh, 380px);
-      overflow-x: hidden;
-      overflow-y: auto;
-      min-height: 0;
-      padding: 0 18px 12px;
-    }
-
-    #recorderTimeline .ll-rec-step {
-      flex-shrink: 0;
-      background: var(--surf);
-      border: 1px solid var(--border);
-      border-radius: 6px;
-      overflow: visible;
-      position: relative;
-      line-height: 1.45;
-      box-shadow: 0 2px 8px rgba(0, 0, 0, 0.25);
-    }
-
-    #recorderTimeline .ll-rec-step::after {
-      display: none;
-    }
-
-    #recorderTimeline .ll-rec-step-head {
-      display: flex;
-      justify-content: space-between;
-      align-items: center;
-      gap: 8px;
-      padding: 10px 12px 6px;
-      min-height: 2rem;
-    }
-
-    #recorderTimeline .ll-rec-step-label {
-      font-weight: 700;
-      color: var(--primary);
-      font-size: 11px;
-      line-height: 1.35;
-      flex: 1;
-      min-width: 0;
-    }
-
-    #recorderTimeline .ll-rec-step-actions {
-      display: flex;
-      gap: 4px;
-      flex-shrink: 0;
-    }
-
-    #recorderTimeline .ll-rec-step-value {
-      font-size: 9px;
-      color: var(--muted);
-      padding: 0 12px 6px;
-      line-height: 1.35;
-    }
-
-    #recorderTimeline .ll-rec-step-code {
-      font-family: 'JetBrains Mono', monospace;
-      font-size: 10px;
-      color: var(--muted);
-      margin: 0;
-      padding: 8px 12px 10px;
-      background: var(--surf-low);
-      border-top: 1px solid var(--border);
-      border-radius: 0 0 6px 6px;
-      line-height: 1.45;
-      overflow: visible;
-      word-break: break-word;
-    }
-
-    #recorderTimeline .ll-rec-empty {
-      padding: 20px;
-      text-align: center;
-      color: var(--muted);
-      font-size: 12px;
-      line-height: 1.5;
-    }
-
-    #recorderTimeline .remove-step-btn {
-      border-color: var(--error);
-      color: var(--error);
-    }
-
-    /* ── Locator cards (The Module) ── */
-    .cards {
-      padding: 0 18px;
-      display: flex;
-      flex-direction: column;
-      gap: 12px;
-    }
-
+    /* ---------- locator cards ---------- */
+    .cards { padding: 0 16px; display: flex; flex-direction: column; gap: 10px; }
     .card {
-      background: var(--surf);
-      border-radius: 4px;
+      background: var(--surface);
       border: 1px solid var(--border);
-      position: relative;
+      border-radius: var(--r-lg);
+      box-shadow: var(--shadow-sm);
       overflow: hidden;
-      animation: cardIn .5s cubic-bezier(0.16, 1, 0.3, 1) both;
     }
-
-    .card::after {
-      content: '';
-      position: absolute;
-      top: 0;
-      left: -150%;
-      width: 100%;
-      height: 100%;
-      background: linear-gradient(90deg, transparent, rgba(58, 223, 250, 0.08), transparent);
-      animation: sweep 2s 0.5s ease-out both;
-    }
-
-    @keyframes cardIn {
-      from {
-        opacity: 0;
-        transform: translateY(20px) scale(0.98);
-      }
-
-      to {
-        opacity: 1;
-        transform: translateY(0) scale(1);
-      }
-    }
-
-    @keyframes sweep {
-      0% {
-        left: -100%;
-      }
-
-      100% {
-        left: 150%;
-      }
-    }
-
-    .card.r1 {
-      border-left: 3px solid var(--primary);
-      box-shadow: 0 0 20px rgba(58, 223, 250, 0.1), inset 0 0 10px rgba(58, 223, 250, 0.05);
-      border-color: var(--primary);
-    }
-
-    .card.r1 .rank-num {
-      background: var(--primary);
-      color: var(--bg);
-    }
-
-    .card:hover {
-      border-color: var(--primary);
-      background: var(--surf2);
-      box-shadow: 0 8px 24px rgba(0, 0, 0, 0.4), inset 0 0 10px rgba(58, 223, 250, 0.05);
-      transition: all 0.3s;
-    }
-
-    .card-head {
-      display: flex;
-      align-items: center;
-      justify-content: space-between;
-      padding: 12px 14px;
-      gap: 10px;
-    }
-
-    .card-left {
-      display: flex;
-      align-items: center;
-      gap: 12px;
-      min-width: 0;
-    }
-
+    .card.r1 { border-color: var(--brand-soft-2); box-shadow: var(--shadow); }
+    .card.r1 .rank-num { background: var(--brand); color: var(--on-brand); }
+    .card:hover { border-color: var(--brand-soft-2); }
+    .card-head { display: flex; align-items: center; justify-content: space-between; gap: 10px; padding: 12px 14px; }
+    .card-left { display: flex; align-items: center; gap: 12px; min-width: 0; }
     .rank-num {
-      width: 24px;
-      height: 24px;
-      background: var(--surf-low);
-      color: var(--primary);
-      font-size: 11px;
-      font-weight: 700;
-      display: flex;
-      align-items: center;
-      justify-content: center;
-      border-radius: 2px;
+      width: 24px; height: 24px;
+      display: flex; align-items: center; justify-content: center;
+      background: var(--surface-2);
+      color: var(--brand);
+      font-size: 11px; font-weight: 700;
+      border-radius: var(--r-sm);
       flex-shrink: 0;
     }
-
-    .method-name {
-      font-weight: 600;
-      font-size: 12px;
-      color: var(--text);
-    }
-
-    .match-attr {
-      font-size: 10px;
-      color: var(--muted);
-      margin-top: 2px;
-      white-space: nowrap;
-      overflow: hidden;
-      text-overflow: ellipsis;
-      max-width: 140px;
-    }
-
+    .method-name { font-weight: 600; font-size: 12px; color: var(--text-strong); }
+    .match-attr { font-size: 10px; color: var(--text-muted); margin-top: 2px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 150px; }
     .pill {
-      font-size: 9px;
-      font-weight: 700;
-      text-transform: uppercase;
-      letter-spacing: 0.05em;
+      font-size: 9px; font-weight: 700;
+      text-transform: uppercase; letter-spacing: 0.04em;
       padding: 3px 8px;
-      border-radius: 2px;
+      border-radius: var(--r-pill);
+      white-space: nowrap;
     }
-
-    .p-best {
-      background: var(--primary-dim);
-      color: var(--primary);
-      border: 1px solid var(--primary);
-    }
-
-    .p-good {
-      background: rgba(71, 196, 255, 0.1);
-      color: var(--tertiary);
-      border: 1px solid var(--tertiary);
-    }
-
-    .p-ok {
-      background: rgba(251, 146, 60, 0.1);
-      color: var(--warn);
-      border: 1px solid var(--warn);
-    }
-
-    .p-avoid {
-      background: rgba(255, 113, 108, 0.1);
-      color: var(--error);
-      border: 1px solid var(--error);
-    }
+    .card-badges { display: flex; flex-direction: column; align-items: flex-end; gap: 4px; flex-shrink: 0; }
+    .uniq { font-size: 9px; font-weight: 700; padding: 2px 7px; border-radius: var(--r-pill); white-space: nowrap; }
+    .uniq-ok { color: var(--success); background: var(--success-soft); border: 1px solid var(--success-soft); }
+    .uniq-warn { color: var(--warn); background: var(--warn-soft); border: 1px solid var(--warn-soft); }
+    .p-best  { background: var(--brand-soft);   color: var(--brand);   border: 1px solid var(--brand-soft-2); }
+    .p-good  { background: var(--info-soft);    color: var(--info);    border: 1px solid var(--info-soft); }
+    .p-ok    { background: var(--warn-soft);    color: var(--warn);    border: 1px solid var(--warn-soft); }
+    .p-avoid { background: var(--danger-soft);  color: var(--danger);  border: 1px solid var(--danger-soft); }
 
     .card-code {
-      background: var(--code);
+      background: var(--code-bg);
       padding: 10px 14px;
-      display: flex;
-      align-items: center;
-      justify-content: space-between;
-      gap: 10px;
+      display: flex; align-items: center; justify-content: space-between; gap: 10px;
       border-top: 1px solid var(--border);
     }
-
     .code-txt {
-      font-family: 'JetBrains Mono', monospace;
-      font-size: 11px;
-      font-weight: 500;
-      color: #a8d8ea;
-      word-break: break-all;
       flex: 1;
+      font-family: 'Cascadia Code', 'Fira Code', ui-monospace, monospace;
+      font-size: 11px;
+      color: var(--code-text);
+      word-break: break-all;
       padding-right: 8px;
     }
-
-    .kw {
-      color: #c792ea;
-    }
-
-    .fn {
-      color: #82aaff;
-    }
-
-    .str {
-      color: #c3e88d;
-    }
-
-    .num {
-      color: #f78c6c;
-    }
+    .kw { color: var(--kw-c); }
+    .fn { color: var(--fn-c); }
+    .str { color: var(--str-c); }
+    .num { color: var(--num-c); }
 
     .copy-btn {
-      background: var(--surf2);
-      border: 1px solid var(--border);
-      color: var(--text);
-      font-size: 10px;
-      padding: 5px 12px;
-      border-radius: 2px;
-      cursor: pointer;
-      text-transform: uppercase;
-      font-weight: 600;
-      transition: all .2s;
       flex-shrink: 0;
+      min-height: 28px;
+      padding: 5px 11px;
+      border: 1px solid var(--border);
+      border-radius: var(--r-md);
+      background: var(--surface);
+      color: var(--text-muted);
+      font-size: 11px; font-weight: 600;
+      transition: background .16s ease, color .16s ease, border-color .16s ease;
     }
+    .copy-btn:hover { background: var(--brand-soft); color: var(--brand); border-color: var(--brand-soft-2); }
+    .copy-btn.done { color: var(--success); border-color: var(--success); }
 
-    .copy-btn:hover {
-      border-color: var(--primary);
-      color: var(--primary);
-    }
-
+    .why-row { padding: 6px 14px; background: var(--surface); display: flex; justify-content: flex-end; }
+    .toggle-explain { color: var(--text-muted); font-size: 11px; }
+    .toggle-explain:hover { color: var(--brand); }
     .card-explain {
       display: none;
       padding: 12px 14px;
-      font-size: 11px;
-      line-height: 1.6;
-      color: var(--muted);
+      font-size: 11px; line-height: 1.6;
+      color: var(--text-muted);
       border-top: 1px solid var(--border);
-      background: var(--surf-low);
+      background: var(--canvas);
     }
+    .card-explain.open { display: block; }
 
-    .card-explain.open {
-      display: block;
-    }
-
-    .why-row {
-      padding: 6px 14px;
-      background: var(--surf);
-      display: flex;
-      justify-content: flex-end;
-    }
-
-    .toggle-explain {
-      background: none;
-      border: none;
-      color: var(--muted);
-      font-size: 10px;
-      cursor: pointer;
-    }
-
-    .toggle-explain:hover {
-      color: var(--primary);
-    }
-
-    /* ── Accessibility & Semantics Area ── */
+    /* ---------- accessibility & semantics ---------- */
     #a11yContainer {
-      background: rgba(18, 25, 46, 0.4);
-      border: 1px dashed var(--border);
+      margin: 0 16px 12px;
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: var(--r-lg);
+      box-shadow: var(--shadow-sm);
+      overflow: hidden;
+      padding: 0;
     }
-
-    .a11y-row {
-      display: flex;
-      gap: 12px;
-      padding: 10px 14px;
-      border-bottom: 0.5px solid var(--border);
-      align-items: flex-start;
-    }
-
-    .a11y-row:last-child {
-      border-bottom: none;
-    }
-
+    .a11y-row { display: flex; gap: 12px; padding: 10px 14px; border-bottom: 1px solid var(--border); align-items: flex-start; }
+    .a11y-row:last-child { border-bottom: none; }
     .a11y-severity {
       flex-shrink: 0;
-      font-size: 8px;
-      font-weight: 700;
-      padding: 2px 4px;
-      border-radius: 2px;
+      font-size: 8px; font-weight: 700;
       text-transform: uppercase;
-      margin-top: 2px;
+      padding: 2px 5px;
+      border-radius: var(--r-sm);
+      margin-top: 1px;
     }
+    .a11y-severity.high { background: var(--danger-soft); color: var(--danger); }
+    .a11y-severity.low  { background: var(--warn-soft); color: var(--warn); }
+    .a11y-msg { font-size: 11px; color: var(--text); line-height: 1.45; }
 
-    .a11y-severity.high {
-      background: rgba(255, 113, 108, 0.1);
-      color: var(--error);
-      border: 0.5px solid var(--error);
-    }
-
-    .a11y-severity.low {
-      background: rgba(251, 146, 60, 0.1);
-      color: var(--warn);
-      border: 0.5px solid var(--warn);
-    }
-
-    .a11y-msg {
-      font-size: 11px;
-      color: var(--text);
-      line-height: 1.4;
-    }
-
-    /* ── System Warnings Area ── */
+    /* ---------- avoid / warnings ---------- */
     .avoid-sec {
-      margin: 12px 18px;
-      background: rgba(251, 146, 60, 0.05);
-      border: 1px solid rgba(251, 146, 60, 0.2);
-      border-radius: 4px;
-      padding: 16px;
-    }
-
-    .avoid-title {
-      font-size: 11px;
-      font-weight: 700;
-      color: var(--warn);
-      margin-bottom: 12px;
-      text-transform: uppercase;
-      letter-spacing: 0.1em;
-    }
-
-    .avoid-row {
-      display: flex;
-      gap: 10px;
-      font-size: 11px;
-      color: var(--muted);
-      line-height: 1.6;
-      margin-bottom: 10px;
-    }
-
-    .avoid-x {
-      color: var(--error);
-      font-weight: 700;
-    }
-
-    .avoid-code {
-      font-family: monospace;
-      color: var(--error);
-      background: rgba(255, 113, 108, 0.1);
-      padding: 2px 4px;
-      border-radius: 2px;
-    }
-
-    .pro-tip {
-      margin: 0 18px 24px;
+      margin: 12px 16px;
       padding: 14px;
-      background: var(--surf-low);
-      border-radius: 4px;
-      border: 0.5px solid var(--border);
-      font-size: 11px;
-      color: var(--muted);
-      line-height: 1.6;
+      background: var(--warn-soft);
+      border: 1px solid var(--border);
+      border-radius: var(--r-lg);
+    }
+    .avoid-title { font-size: 11px; font-weight: 700; color: var(--warn); margin-bottom: 12px; text-transform: uppercase; letter-spacing: 0.06em; }
+    .avoid-row { display: flex; gap: 10px; font-size: 11px; color: var(--text-muted); line-height: 1.6; margin-bottom: 10px; }
+    .avoid-row:last-child { margin-bottom: 0; }
+    .avoid-x { color: var(--danger); font-weight: 700; }
+    .avoid-code {
+      font-family: 'Cascadia Code', 'Fira Code', ui-monospace, monospace;
+      color: var(--danger);
+      background: var(--danger-soft);
+      padding: 2px 5px;
+      border-radius: var(--r-sm);
     }
 
-    .clear-btn-wrap {
-      padding: 0 18px 24px;
+    /* ---------- pro tip ---------- */
+    .pro-tip {
+      margin: 0 16px 16px;
+      padding: 14px;
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: var(--r-lg);
+      box-shadow: var(--shadow-sm);
+      font-size: 11px; color: var(--text-muted); line-height: 1.6;
     }
 
+    /* ---------- clear / reset buttons ---------- */
+    .clear-btn-wrap { padding: 0 16px 16px; }
     .clear-btn {
       width: 100%;
+      min-height: 32px;
       background: transparent;
       border: 1px solid var(--border);
-      color: var(--muted);
-      padding: 8px;
-      border-radius: 4px;
-      cursor: pointer;
-      font-size: 10px;
-      text-transform: uppercase;
-      letter-spacing: 0.05em;
+      border-radius: var(--r-md);
+      color: var(--text-muted);
+      font-size: 11px; font-weight: 600;
+      padding: 7px;
+      transition: background .16s ease, color .16s ease, border-color .16s ease;
     }
+    .clear-btn:hover { border-color: var(--danger); color: var(--danger); background: var(--danger-soft); }
 
-    .clear-btn:hover {
-      border-color: var(--error);
-      color: var(--error);
+    /* ---------- recorder timeline ---------- */
+    #recorderTimeline.ll-rec-timeline {
+      display: flex; flex-direction: column; gap: 10px;
+      max-height: min(42vh, 380px);
+      overflow-y: auto; overflow-x: hidden;
+      padding: 0 16px 12px;
     }
+    #recorderTimeline .ll-rec-step {
+      flex-shrink: 0;
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: var(--r-md);
+      box-shadow: var(--shadow-sm);
+      line-height: 1.45;
+    }
+    #recorderTimeline .ll-rec-step-head { display: flex; justify-content: space-between; align-items: center; gap: 8px; padding: 10px 12px 6px; }
+    #recorderTimeline .ll-rec-step-label { font-weight: 700; color: var(--brand); font-size: 11px; flex: 1; min-width: 0; }
+    #recorderTimeline .ll-rec-step-actions { display: flex; gap: 4px; flex-shrink: 0; }
+    /* per-step action buttons carry .clear-btn (width:100%) — re-scope them to compact, auto-width */
+    #recorderTimeline .ll-rec-step-actions button { width: auto; min-height: 24px; padding: 2px 9px; font-size: 10px; font-weight: 600; }
+    #recorderTimeline .ll-rec-step-actions .copy-btn:hover { background: var(--brand-soft); color: var(--brand); border-color: var(--brand-soft-2); }
+    #recorderTimeline .ll-rec-step-value { font-size: 9px; color: var(--text-muted); padding: 0 12px 6px; }
+    #recorderTimeline .ll-rec-step-code {
+      font-family: 'Cascadia Code', 'Fira Code', ui-monospace, monospace;
+      font-size: 10px; color: var(--text-muted);
+      margin: 0; padding: 8px 12px 10px;
+      background: var(--code-bg);
+      border-top: 1px solid var(--border);
+      border-radius: 0 0 var(--r-md) var(--r-md);
+      word-break: break-word;
+      white-space: pre-wrap;
+    }
+    #recorderTimeline .ll-rec-empty { padding: 22px; text-align: center; color: var(--text-muted); font-size: 12px; line-height: 1.5; }
+    #recorderTimeline .ll-rec-empty strong { color: var(--brand); }
+    #recorderTimeline .remove-step-btn { width: auto; min-height: 24px; padding: 2px 8px; border-color: var(--border); color: var(--text-muted); }
+    #recorderTimeline .remove-step-btn:hover { border-color: var(--danger); color: var(--danger); background: var(--danger-soft); }
 
-    /* ── Selector Lab (New Module) ── */
-    .selector-lab {
-      margin: 0 18px 16px;
+    /* ---------- recorder code preview ---------- */
+    #codePreview.code-preview-editor {
+      width: calc(100% - 32px);
+      margin: 0 16px 12px;
+      min-height: 200px; max-height: 420px;
+      background: var(--code-bg);
+      color: var(--code-text);
+      border: 1px solid var(--border);
+      border-radius: var(--r-md);
       padding: 12px;
-      background: var(--surf-low);
-      border: 1px solid var(--border);
-      border-radius: 4px;
-      border-left: 3px solid var(--tertiary);
-      /* Distinct from primary cyan */
-    }
-
-    .lab-header {
-      font-size: 10px;
-      font-weight: 700;
-      text-transform: uppercase;
-      letter-spacing: 0.1em;
-      color: var(--tertiary);
-      margin-bottom: 8px;
-      display: flex;
-      justify-content: space-between;
-    }
-
-    .lab-input-container {
-      display: flex;
-      gap: 6px;
-    }
-
-    .lab-input-container input {
-      flex: 1;
-      background: var(--bg);
-      border: 1px solid var(--border);
-      outline: none;
-      color: var(--text);
-      font-family: 'JetBrains Mono', monospace;
-      font-size: 11px;
-      padding: 6px 10px;
-      border-radius: 2px;
-    }
-
-    .lab-input-container input:focus {
-      border-color: var(--tertiary);
-    }
-
-    .lab-btn {
-      background: var(--surf2);
-      border: 1px solid var(--border);
-      color: var(--text);
-      padding: 0 10px;
-      border-radius: 2px;
-      cursor: pointer;
-      font-size: 14px;
-      display: flex;
-      align-items: center;
-      justify-content: center;
-    }
-
-    .lab-btn:hover {
-      background: var(--tertiary);
-      color: var(--bg);
-    }
-
-    .lab-status {
-      margin-top: 6px;
-      font-size: 9px;
-      color: var(--muted);
-      font-style: italic;
-    }
-
-    .lab-status.success {
-      color: #50fa7b;
-    }
-
-    .lab-status.err {
-      color: var(--error);
-    }
-
-    /* ── Tabs ── */
-    .tab-bar {
-      display: flex;
-      border-bottom: 1px solid var(--border);
-      background: var(--surf);
-    }
-
-    .tab {
-      flex: 1;
-      text-align: center;
-      padding: 10px 0;
-      font-size: 10px;
-      font-weight: 700;
-      color: var(--muted);
-      cursor: pointer;
-      text-transform: uppercase;
-      letter-spacing: 0.05em;
-      border-bottom: 2px solid transparent;
-      transition: all 0.2s;
-    }
-
-    .tab:hover {
-      color: var(--text);
-      background: var(--surf-low);
-    }
-
-    .tab.active {
-      color: var(--primary);
-      border-bottom: 2px solid var(--primary);
-      background: var(--surf-low);
-    }
-
-    .tab-content {
-      display: none;
-    }
-
-    .tab-content.active {
-      display: block;
-    }
-
-    /* ── POM Builder ─────────────────────────────────────────────────────── */
-    .pom-fw-bar {
-      display: flex;
-      flex-wrap: wrap;
-      gap: 5px;
-      padding: 10px 14px 0;
-    }
-    .pom-fw-chip {
-      font-size: 9px;
-      font-weight: 700;
-      text-transform: uppercase;
-      letter-spacing: 0.07em;
-      padding: 4px 9px;
-      border-radius: 3px;
-      border: 1px solid var(--border);
-      color: var(--muted);
-      cursor: pointer;
-      transition: all .18s;
-    }
-    .pom-fw-chip:hover { border-color: var(--primary); color: var(--primary); }
-    .pom-fw-chip.active { background: var(--primary); border-color: var(--primary); color: var(--bg); }
-
-    .pom-split {
-      display: flex;
-      gap: 0;
-      height: calc(100vh - 195px);
-      min-height: 300px;
-      margin-top: 10px;
-    }
-    .pom-list-panel {
-      width: 48%;
-      display: flex;
-      flex-direction: column;
-      border-right: 1px solid var(--border);
-      overflow: hidden;
-    }
-    .pom-preview-panel {
-      flex: 1;
-      display: flex;
-      flex-direction: column;
-      overflow: hidden;
-    }
-    .pom-panel-header {
-      display: flex;
-      align-items: center;
-      justify-content: space-between;
-      padding: 6px 10px;
-      background: var(--surf-low);
-      border-bottom: 1px solid var(--border);
-      flex-shrink: 0;
-    }
-    .pom-panel-header span {
-      font-size: 9px;
-      font-weight: 700;
-      text-transform: uppercase;
-      letter-spacing: 0.1em;
-      color: var(--muted);
-    }
-    .pom-entries {
-      flex: 1;
-      overflow-y: auto;
-      padding: 6px;
-    }
-    .pom-empty {
-      padding: 28px 14px;
-      text-align: center;
-      font-size: 11px;
-      color: var(--muted);
-      line-height: 1.7;
-    }
-    .pom-entry {
-      display: flex;
-      align-items: center;
-      gap: 6px;
-      padding: 7px 8px;
-      border-radius: 4px;
-      border: 1px solid var(--border);
-      margin-bottom: 5px;
-      background: var(--surf-low);
-      cursor: default;
-      transition: border-color .15s;
-    }
-    .pom-entry:hover { border-color: var(--primary); }
-    .pom-entry.drag-over { border-color: var(--primary); background: var(--surf2); }
-    .pom-drag-handle {
-      color: var(--muted);
-      font-size: 13px;
-      cursor: grab;
-      flex-shrink: 0;
-      user-select: none;
-      line-height: 1;
-    }
-    .pom-drag-handle:active { cursor: grabbing; }
-    .pom-entry-body { flex: 1; min-width: 0; }
-    .pom-entry-name-input {
-      background: transparent;
-      border: none;
-      border-bottom: 1px dashed var(--border);
-      color: var(--primary);
-      font-size: 11px;
-      font-weight: 700;
-      font-family: 'JetBrains Mono', monospace;
-      width: 100%;
-      padding: 0 2px;
-      outline: none;
+      font-family: 'Cascadia Code', 'Fira Code', ui-monospace, monospace;
+      font-size: 11px; line-height: 1.5;
+      resize: vertical;
+      white-space: pre-wrap;
+      word-break: break-word;
+      overflow: auto;
       cursor: text;
     }
-    .pom-entry-name-input:focus { border-bottom-color: var(--primary); }
-    .pom-entry-locator {
-      font-size: 9px;
-      color: var(--muted);
-      margin-top: 3px;
-      white-space: nowrap;
-      overflow: hidden;
-      text-overflow: ellipsis;
-    }
-    .pom-entry-page {
-      font-size: 8px;
-      color: var(--muted);
-      opacity: 0.6;
-      margin-top: 1px;
-      white-space: nowrap;
-      overflow: hidden;
-      text-overflow: ellipsis;
-    }
-    .pom-health {
-      font-size: 8px;
-      font-weight: 700;
-      padding: 2px 5px;
-      border-radius: 2px;
-      flex-shrink: 0;
-      font-family: 'JetBrains Mono', monospace;
-      min-width: 34px;
-      text-align: center;
-    }
-    .pom-health.live    { color: #50fa7b; background: rgba(80,250,123,.1); border: 1px solid rgba(80,250,123,.3); }
-    .pom-health.gone    { color: var(--error); background: rgba(255,113,108,.1); border: 1px solid rgba(255,113,108,.3); }
-    .pom-health.multi   { color: #ffb86c; background: rgba(255,184,108,.1); border: 1px solid rgba(255,184,108,.3); }
-    .pom-health.pending { color: var(--muted); background: var(--surf-low); border: 1px solid var(--border); }
-    .pom-remove-btn {
-      background: transparent;
-      border: none;
-      color: var(--muted);
-      font-size: 13px;
-      cursor: pointer;
-      padding: 0 2px;
-      flex-shrink: 0;
-      line-height: 1;
-    }
-    .pom-remove-btn:hover { color: var(--error); }
+    #codePreview.code-preview-editor:focus { outline: none; border-color: var(--brand); box-shadow: var(--ring); }
+    /* token colors apply inside the editable script too (.kw/.fn/.str/.num defined above) */
+    #regenerateScriptBtn { width: auto; flex-shrink: 0; font-size: 10px; padding: 4px 10px; min-height: 26px; }
 
-    .pom-code-area {
-      flex: 1;
-      background: var(--surf-low);
-      color: var(--fg);
-      border: none;
-      font-family: 'JetBrains Mono', 'Fira Code', monospace;
-      font-size: 9.5px;
-      line-height: 1.6;
-      padding: 10px 12px;
-      resize: none;
-      outline: none;
-      overflow-y: auto;
+    /* ---------- recorder controls (pause / assert) ---------- */
+    .ll-rec-controls { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; padding: 0 16px 10px; }
+    .ll-rec-ctl {
+      min-height: 28px; padding: 4px 11px;
+      border: 1px solid var(--border); border-radius: var(--r-md);
+      background: var(--surface); color: var(--text-muted);
+      font-size: 11px; font-weight: 600;
     }
-    .pom-action-row {
-      display: flex;
-      gap: 6px;
-      padding: 8px 10px;
-      border-top: 1px solid var(--border);
-      flex-shrink: 0;
-      background: var(--surf-low);
-    }
-    .pom-action-row .inspect-btn {
-      flex: 1;
-      margin: 0;
-      font-size: 10px;
-      padding: 7px 0;
-    }
-    .pom-group-label {
-      font-size: 8px;
-      font-weight: 700;
-      text-transform: uppercase;
-      letter-spacing: 0.1em;
-      color: var(--muted);
-      padding: 8px 4px 4px;
-      border-bottom: 1px solid var(--border);
-      margin-bottom: 5px;
-    }
-    /* v3 — fragile badge */
-    .pom-entry-fragile { border-left: 2px solid #ffb86c; }
+    .ll-rec-ctl:hover { background: var(--hover); border-color: var(--border-strong); color: var(--text-strong); }
+    .ll-rec-ctl-resume { color: var(--brand); border-color: var(--brand-soft-2); background: var(--brand-soft); }
+    .ll-rec-assert { display: inline-flex; align-items: center; gap: 6px; font-size: 11px; font-weight: 600; color: var(--text-muted); cursor: pointer; }
+    .ll-rec-assert input { accent-color: var(--brand); width: 14px; height: 14px; cursor: pointer; }
+    .ll-rec-assert-type { width: auto; height: 28px; flex: 1; min-width: 90px; }
 
-    .pom-stability {
-      font-size: 8px;
-      font-weight: 700;
-      padding: 2px 5px;
-      border-radius: 3px;
-      letter-spacing: 0.04em;
-      text-transform: uppercase;
-      white-space: nowrap;
+    /* ---------- collapsible timeline header + filter ---------- */
+    .ll-timeline-toggle { cursor: pointer; user-select: none; }
+    .ll-timeline-toggle::after { content: none; }
+    .ll-timeline-chevron { margin-left: auto; font-size: 9px; color: var(--text-faint); transition: transform .15s ease; }
+    .ll-rec-filter-wrap { display: flex; align-items: center; gap: 6px; padding: 0 16px 10px; }
+    .ll-rec-filter-input {
+      flex: 1; min-width: 0; height: 30px; padding: 0 9px;
+      border: 1px solid var(--border); border-radius: var(--r-md);
+      background: var(--canvas); color: var(--text); font-size: 11px;
     }
-    .pom-stability.pom-stab-best  { color: #50fa7b; background: rgba(80,250,123,.12); border: 1px solid rgba(80,250,123,.35); }
-    .pom-stability.pom-stab-good  { color: #8be9fd; background: rgba(139,233,253,.1); border: 1px solid rgba(139,233,253,.3); }
-    .pom-stability.pom-stab-ok    { color: var(--muted); background: var(--surf-low); border: 1px solid var(--border); }
-    .pom-stability.pom-stab-avoid { color: var(--error); background: rgba(255,113,108,.1); border: 1px solid rgba(255,113,108,.3); }
-    .pom-fragile-badge {
-      font-size: 7.5px;
-      font-weight: 700;
-      color: #ffb86c;
-      background: rgba(255,184,108,.12);
-      border: 1px solid rgba(255,184,108,.35);
-      border-radius: 2px;
-      padding: 1px 4px;
-      flex-shrink: 0;
-      white-space: nowrap;
+    .ll-rec-filter-input:focus { outline: none; border-color: var(--brand); box-shadow: var(--ring); }
+    .ll-rec-filter-clear {
+      width: 30px; height: 30px; flex-shrink: 0;
+      border: 1px solid var(--border); border-radius: var(--r-md);
+      background: var(--surface); color: var(--text-muted); font-size: 11px;
     }
-    /* v3 — toggle row */
-    .pom-v3-toolbar {
-      display: flex;
-      align-items: center;
-      gap: 8px;
-      padding: 6px 10px;
-      border-bottom: 1px solid var(--border);
-      background: var(--surf-low);
-      flex-wrap: wrap;
-      flex-shrink: 0;
+    .ll-rec-filter-clear:hover { color: var(--danger); border-color: var(--danger); }
+
+    /* ---------- undo / redo row ---------- */
+    .ll-rec-undo-row { display: flex; gap: 8px; }
+    .ll-rec-undo-row .clear-btn { margin: 0; }
+    .clear-btn:disabled { opacity: .45; cursor: not-allowed; }
+    .clear-btn:disabled:hover { border-color: var(--border); color: var(--text-muted); background: transparent; }
+
+    /* ---------- assert step accent in the timeline ---------- */
+    #recorderTimeline .ll-rec-step.is-assert { border-left: 2px solid var(--brand); }
+    #recorderTimeline .ll-rec-step.is-assert .ll-rec-step-label { color: var(--accent); }
+    #recorderTimeline .ll-rec-empty-filter { padding: 16px; text-align: center; color: var(--text-muted); font-size: 11px; }
+
+    @media (max-width: 360px) {
+      .tab .tab-label { display: none; }
     }
-    .pom-toggle-group {
-      display: flex;
-      align-items: center;
-      gap: 5px;
-      font-size: 9px;
-      font-weight: 700;
-      color: var(--muted);
-      text-transform: uppercase;
-      letter-spacing: .05em;
-    }
-    .pom-toggle {
-      position: relative;
-      width: 26px;
-      height: 13px;
-    }
-    .pom-toggle input { opacity: 0; width: 0; height: 0; position: absolute; }
-    .pom-toggle-slider {
-      position: absolute;
-      inset: 0;
-      background: var(--border);
-      border-radius: 13px;
-      cursor: pointer;
-      transition: background .2s;
-    }
-    .pom-toggle-slider::before {
-      content: '';
-      position: absolute;
-      width: 9px; height: 9px;
-      left: 2px; top: 2px;
-      background: #fff;
-      border-radius: 50%;
-      transition: transform .2s;
-    }
-    .pom-toggle input:checked + .pom-toggle-slider { background: var(--primary); }
-    .pom-toggle input:checked + .pom-toggle-slider::before { transform: translateX(13px); }
-    .pom-v3-sep { width: 1px; height: 12px; background: var(--border); flex-shrink: 0; }
-    .pom-v3-btn {
-      font-size: 9px;
-      font-weight: 700;
-      padding: 4px 8px;
-      border-radius: 4px;
-      border: 1px solid var(--border);
-      cursor: pointer;
-      letter-spacing: .02em;
-      white-space: nowrap;
-      transition: opacity .15s;
-    }
-    .pom-v3-btn:hover { opacity: .8; }
-    .pom-v3-btn.accent { background: var(--primary); color: var(--bg); border-color: var(--primary); }
-    .pom-v3-btn.muted  { background: var(--surf2); color: var(--fg); }
   </style>
 </head>
 
 <body>
   <div class="app">
     <div class="header">
-      <div class="logo">🥷</div>
+      <div class="brand-mark" aria-hidden="true">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="7"/><path d="m21 21-4.3-4.3"/></svg>
+      </div>
       <div class="brand">
         <div class="brand-name">LocatorLens</div>
-        <div class="brand-sub">Playwright locators</div>
+        <div class="brand-sub">Locator studio</div>
       </div>
-      <div class="fw-select-wrap">
-        <span class="fw-playwright-badge" title="Locator output is Playwright only">Playwright</span>
-      </div>
-      <div class="status-dot" id="statusDot"></div>
+      <div class="status-dot" id="statusDot" title="Inspector status"></div>
     </div>
 
     <div class="btn-wrap">
@@ -1252,11 +666,26 @@
       </button>
     </div>
 
-    <div class="tab-bar">
-      <div class="tab active" data-target="tab-inspector">🎯 Inspect</div>
-      <div class="tab" data-target="tab-recorder">🎬 Record</div>
-      <div class="tab" data-target="tab-pom">🏗️ POM</div>
-      <div class="tab" data-target="tab-settings">⚙️ Settings</div>
+    <div class="tab-bar" role="tablist" aria-label="Views">
+      <button class="tab active" type="button" role="tab" aria-selected="true" data-target="tab-inspector">
+        <span class="tab-icon" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="8"/><path d="M12 2v3M12 19v3M2 12h3M19 12h3"/><circle cx="12" cy="12" r="2" fill="currentColor"/></svg></span>
+        <span class="tab-label">Inspect</span>
+      </button>
+      <button class="tab" type="button" role="tab" aria-selected="false" data-target="tab-recorder">
+        <span class="tab-icon" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"/><circle cx="12" cy="12" r="3.5" fill="currentColor" stroke="none"/></svg></span>
+        <span class="tab-label">Record</span>
+      </button>
+    </div>
+
+    <div class="output-bar">
+      <label class="output-field">
+        <span class="output-label">Framework</span>
+        <select id="fwSelect" class="output-select" aria-label="Output framework"></select>
+      </label>
+      <label class="output-field">
+        <span class="output-label">Language</span>
+        <select id="langSelect" class="output-select" aria-label="Output language"></select>
+      </label>
     </div>
 
     <div class="scroll-content">
@@ -1264,7 +693,7 @@
         <!-- SELECTOR LAB MODULE -->
         <div class="selector-lab">
           <div class="lab-header">
-            <span>LAB 🔬</span>
+            <span>Selector Lab</span>
             <span id="lab-count" style="text-transform: none; display:none;"></span>
           </div>
           <div class="lab-input-container">
@@ -1276,15 +705,15 @@
         </div>
 
         <div class="hint-row" id="hintRow">
-          SELECT TARGET · <span>▲▼ ARROW TO NAVIGATE</span> · <span>ESC TO ABORT</span>
+          Select a target · <span>▲▼ arrow to navigate</span> · <span>Esc to abort</span>
         </div>
 
         <div id="idleState" class="idle-state">
           <div class="idle-icon">🛰️</div>
-          <div class="idle-title">Standby for Target Selection</div>
+          <div class="idle-title">Ready to inspect</div>
           <div class="idle-sub">
-            Initiate <strong>Start Inspecting</strong> to begin.<br>
-            Ranked locators will appear below once selected.
+            Click <strong>Start Inspecting</strong> to begin.<br>
+            Ranked locators will appear here once you select an element.
           </div>
         </div>
 
@@ -1293,147 +722,94 @@
               style="margin-left: auto;">💥 Stress Test</button></div>
           <div class="el-bar" id="elBar"></div>
 
-          <div class="sec-label" id="a11yLabel" style="display:none">Accessibility & Semantics</div>
-          <div class="avoid-sec" id="a11yContainer" style="display:none"></div>
+          <div class="sec-label" id="a11yLabel" style="display:none">Accessibility &amp; Semantics</div>
+          <div id="a11yContainer" style="display:none"></div>
 
           <div class="sec-label">Ranked Locators</div>
           <div class="cards" id="cardsContainer"></div>
 
-          <div class="sec-label" id="avoidLabel" style="display:none">System Warnings</div>
+          <div class="sec-label" id="avoidLabel" style="display:none">Warnings</div>
           <div class="avoid-sec" id="avoidContainer" style="display:none"></div>
 
           <div class="pro-tip" id="proTip" style="display:none"></div>
 
           <div class="clear-btn-wrap">
-            <button class="clear-btn" id="clearBtn">✕ Reset Utility</button>
+            <button class="clear-btn" id="clearBtn">✕ Reset</button>
           </div>
         </div>
       </div>
 
       <div class="tab-content" id="tab-recorder">
         <!-- Recording Control -->
-        <div class="btn-wrap" style="padding: 12px 18px;">
-          <button class="inspect-btn" id="recordBtn" style="background: var(--error);">
+        <div class="btn-wrap" style="padding: 12px 16px; background: transparent; border: none;">
+          <button class="inspect-btn" id="recordBtn" style="background: var(--error); border-color: var(--error); color: #fff;">
             <span id="recBtnIcon">⏺</span>
             <span id="recBtnText">Start Recording</span>
           </button>
         </div>
-        <div id="recHint"
-          style="padding: 0 18px 8px; font-size: 10px; color: var(--muted); text-align: center; display: none; text-transform: uppercase; letter-spacing: 0.05em;">
-          🔴 <span style="color: var(--error);">REC</span> · Interact with the page normally · All actions are being
-          captured
-        </div>
-        <div id="recPageUrl"
-          style="display: none; padding: 0 18px 8px; font-size: 10px; color: var(--muted); line-height: 1.4; word-break: break-all;">
+
+        <!-- Inline controls shown only while recording -->
+        <div id="recControls" class="ll-rec-controls" style="display: none;">
+          <button type="button" id="pauseRecordingBtn" class="ll-rec-ctl" title="Pause capture">⏸ Pause</button>
+          <button type="button" id="resumeRecordingBtn" class="ll-rec-ctl ll-rec-ctl-resume" title="Resume capture" style="display: none;">▶ Resume</button>
+          <label class="ll-rec-assert" title="When on, clicking an element records an assertion instead of an interaction">
+            <input type="checkbox" id="assertModeToggle" aria-label="Record assertions">
+            <span>Assert</span>
+          </label>
+          <select id="assertTypeSelect" class="output-select ll-rec-assert-type" aria-label="Assertion type" style="display: none;">
+            <option value="toBeVisible">is visible</option>
+            <option value="toHaveText">has text</option>
+            <option value="toHaveValue">has value</option>
+            <option value="toBeEnabled">is enabled</option>
+            <option value="toBeChecked">is checked</option>
+          </select>
         </div>
 
-        <!-- Action Timeline -->
-        <div class="sec-label">Event Timeline <span id="recCount"
-            style="color: var(--primary); margin-left: auto; text-transform: none; display: none;">(0)</span></div>
-        <div class="cards ll-rec-timeline" id="recorderTimeline">
-          <div class="idle-state" style="padding: 20px;">🎬 Hit <strong style="color: var(--primary);">Start
-              Recording</strong> then use the page. Clicks, double-clicks, typing in fields (fills are debounced as you
-              type), and Enter/Tab/Escape are captured.</div>
+        <div id="recHint"
+          style="padding: 0 16px 8px; font-size: 10px; color: var(--muted); text-align: center; display: none;">
+          🔴 <span style="color: var(--error);">REC</span> · interact normally · <span>Alt+click = hover</span> · toggle <span>Assert</span> to capture checks
+        </div>
+        <div id="recPageUrl"
+          style="display: none; padding: 0 16px 8px; font-size: 10px; color: var(--muted); line-height: 1.4; word-break: break-all;">
+        </div>
+
+        <!-- Action Timeline — collapsible -->
+        <div class="sec-label ll-timeline-toggle" id="timelineToggleHeader" role="button" tabindex="0" aria-expanded="false" aria-controls="recorderTimeline">
+          <span>Event Timeline</span>
+          <span id="recCount" style="color: var(--primary); text-transform: none; display: none;">(0)</span>
+          <span class="ll-timeline-chevron" aria-hidden="true">▶</span>
+        </div>
+        <div id="recFilterWrap" class="ll-rec-filter-wrap" style="display: none;">
+          <input type="text" id="recFilterInput" class="ll-rec-filter-input" placeholder="Filter actions…" autocomplete="off" spellcheck="false" aria-label="Filter recorded actions">
+          <button type="button" id="recFilterClear" class="ll-rec-filter-clear" title="Clear filter" aria-label="Clear filter" style="display: none;">✕</button>
+        </div>
+        <div class="cards ll-rec-timeline" id="recorderTimeline" aria-live="polite" style="display: none;">
+          <div class="ll-rec-empty">🎬 Hit <strong>Start Recording</strong> then use the page. Clicks, typing, hovers (Alt+click), and assertions are captured.</div>
         </div>
 
         <!-- Generated test script (editable; copy uses current text) -->
         <div class="sec-label" id="codePreviewLabel" style="display: none;">
-          <span style="flex-shrink: 0;">Generated Test Script <span
-              style="text-transform: none; letter-spacing: 0; opacity: 0.75; font-weight: 500;">· edit below</span></span>
+          <span style="flex-shrink: 0;">Generated Test Script</span>
           <button type="button" class="clear-btn" id="regenerateScriptBtn" title="Replace editor with freshly generated code from the timeline">↻ Sync from timeline</button>
         </div>
-        <textarea id="codePreview" class="code-preview-editor" spellcheck="false" autocomplete="off" autocorrect="off"
-          autocapitalize="off" style="display: none;" aria-label="Generated Playwright test script (editable)"></textarea>
+        <div id="codePreview" class="code-preview-editor" contenteditable="true" spellcheck="false"
+          role="textbox" aria-multiline="true" aria-label="Generated test script (editable)" style="display: none;"></div>
 
         <!-- Actions -->
         <div class="clear-btn-wrap" style="margin-top: 12px;">
-          <button class="inspect-btn" id="exportTestBtn" style="margin-bottom: 10px; background: var(--primary);">📋
-            Copy Test Script</button>
-          <button class="inspect-btn" id="downloadTestBtn" style="margin-bottom: 10px; background: var(--surf2); color: var(--fg); border: 1px solid var(--border);">⬇ Download .spec.ts</button>
-          <button class="clear-btn" id="clearTimelineBtn">✕ Clear Timeline</button>
-        </div>
-      </div>
-
-      <div class="tab-content" id="tab-pom">
-        <!-- POM language (Playwright API) -->
-        <div class="pom-fw-bar">
-          <div class="pom-fw-chip active" data-pomfw="playwright-ts">PW · TypeScript</div>
-          <div class="pom-fw-chip" data-pomfw="playwright-js">PW · JavaScript</div>
-        </div>
-
-        <!-- v3 Toolbar -->
-        <div class="pom-v3-toolbar">
-          <div class="pom-toggle-group" title="Generate action methods alongside property declarations">
-            <span>Actions</span>
-            <label class="pom-toggle">
-              <input type="checkbox" id="pomActionsToggle" checked>
-              <span class="pom-toggle-slider"></span>
-            </label>
+          <button class="inspect-btn" id="exportTestBtn" style="margin-bottom: 10px;">📋 Copy Test Script</button>
+          <button class="clear-btn" id="downloadTestBtn" style="margin-bottom: 10px;">⬇ Download test</button>
+          <div class="ll-rec-undo-row">
+            <button class="clear-btn" id="undoActionBtn" title="Undo last recorded action" disabled>↶ Undo</button>
+            <button class="clear-btn" id="redoActionBtn" title="Redo" disabled>↷ Redo</button>
           </div>
-          <div class="pom-toggle-group" title="Add JSDoc comments to every property and method">
-            <span>JSDoc</span>
-            <label class="pom-toggle">
-              <input type="checkbox" id="pomJsdocToggle" checked>
-              <span class="pom-toggle-slider"></span>
-            </label>
-          </div>
-          <div class="pom-v3-sep"></div>
-          <button class="pom-v3-btn accent" id="generateTestBtn" title="Download a ready-to-run Playwright .spec.ts test scaffold">⚡ Generate Test</button>
-          <button class="pom-v3-btn muted" id="exportSessionBtn" title="Export all POM elements as a shareable JSON session">📤 Export</button>
-          <button class="pom-v3-btn muted" id="importSessionBtn" title="Import a team session JSON file (merges with current)">📥 Import</button>
-        </div>
-
-        <!-- Split Panel -->
-        <div class="pom-split">
-
-          <!-- LEFT: Element List -->
-          <div class="pom-list-panel">
-            <div class="pom-panel-header">
-              <span>🏗 Elements <span id="pomCountBadge" style="color:var(--primary);"></span></span>
-              <button class="pom-remove-btn" id="clearPOMBtn" title="Clear all" style="font-size:11px;">✕ Clear</button>
-            </div>
-            <div class="pom-entries" id="pomList">
-              <div class="pom-empty" id="pomEmptyState">
-                🛒 Inspect any element, then click<br><strong style="color:var(--primary);">+ POM</strong> on a locator card.
-              </div>
-            </div>
-          </div>
-
-          <!-- RIGHT: Code Preview -->
-          <div class="pom-preview-panel">
-            <div class="pom-panel-header">
-              <span id="pomPreviewFilename">PageObject.ts</span>
-              <div style="display:flex;gap:5px;">
-                <button class="copy-btn" id="copyPOMBtn" style="font-size:9px;">📋 Copy</button>
-                <button class="copy-btn" id="downloadPOMBtn" style="font-size:9px;background:var(--primary);color:var(--bg);">⬇ Download</button>
-              </div>
-            </div>
-            <textarea id="pomCodePreview" class="pom-code-area" readonly spellcheck="false" placeholder="// Code preview will appear here as you add elements..."></textarea>
-            <div class="pom-action-row">
-              <button class="inspect-btn" id="checkHealthBtn" style="background:var(--surf2);color:var(--fg);border:1px solid var(--border);">🩺 Check Health</button>
-            </div>
-          </div>
-
-        </div>
-      </div>
-
-
-      <div class="tab-content" id="tab-settings">
-        <div class="sec-label">Custom Attributes</div>
-        <div class="pro-tip" style="margin-bottom: 10px; margin-top: 10px;">
-          Define custom <code>data-*</code> tags your team uses (comma-separated).
-        </div>
-        <div class="selector-lab">
-          <div class="lab-input-container">
-            <input type="text" id="custom-attrs-input" placeholder="e.g. data-qa, data-test-id" autocomplete="off">
-            <button class="lab-btn" id="save-settings-btn" title="Save Settings">✅</button>
-          </div>
-          <div id="settings-status" class="lab-status"></div>
+          <button class="clear-btn" id="clearTimelineBtn" style="margin-top: 8px;">✕ Clear Timeline</button>
         </div>
       </div>
     </div>
   </div>
 
+  <script src="codegen.js"></script>
   <script src="sidepanel.js"></script>
 </body>
 

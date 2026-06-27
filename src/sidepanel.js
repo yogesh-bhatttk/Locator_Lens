@@ -1,13 +1,22 @@
 let isInspecting = false;
 let isRecording = false;
-let currentPOMFramework = 'playwright-ts';
-let savedPOMElements = [];
 let recordedActions = [];
 let recLastPageUrl = '';
 let _recorderSaveTimer = null;
-let _pomHealthQueue = [];
-let _pomHealthActive = false;
 const LL_RECORDER_STATE_KEY = 'llRecorderState';
+
+// ── Output target (framework + language) ─────────────────────────────────────
+// Drives how inspect locators and recorder steps are rendered. Persisted in storage.
+let outFramework = 'playwright';
+let outLanguage = 'typescript';
+const LL_FW_KEY = 'llFramework';
+const LL_LANG_KEY = 'llLanguage';
+
+// Recorder UI state
+let recFilter = '';          // timeline filter text
+let recRedoStack = [];       // actions removed via undo, available to redo
+let timelineExpanded = false; // collapsible timeline (collapsed by default)
+let _recFilterTimer = null;
 
 
 
@@ -25,13 +34,34 @@ function esc(s) {
     .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
 }
 
+// Syntax highlighter shared by the locator cards and the Generated Test Script.
+// String literals are protected first (via a  sentinel) so keyword/number rules
+// never recolor text inside them; escaped quotes (e.g. Selenium's "[id=\"x\"]") are
+// kept intact. Covers Playwright / Selenium / Cypress across JS / TS / Python.
 function hl(code) {
-  return esc(code)
-    .replace(/\b(await|const|let|var|function|return|if|else|for|while|try|catch|By|driver|cy|By\.CSS_SELECTOR|By\.ID|By\.NAME|By\.XPATH)\b/g, '<span class="kw">$1</span>')
-    .replace(/\b(page|browser|context|expect|test|find_element|get|contains|find_elements|shadow|shadowRoot)\b/g, '<span class="kw">$1</span>')
-    .replace(/\b(getByRole|getByLabel|getByPlaceholder|getByText|getByAltText|getByTitle|getByTestId|locator|click|dblclick|fill|check|selectOption|press|type|hover|focus|blur|waitFor|toBeVisible|toHaveText|toBeChecked)\b/g, '<span class="fn">$1</span>')
-    .replace(/(&#39;[^<]*?&#39;|&quot;[^<]*?&quot;)/g, '<span class="str">$1</span>')
-    .replace(/([0-9]+)/g, '<span class="num">$1</span>');
+  const SENT = String.fromCharCode(0); // sentinel — never appears in code
+  let s = esc(code); // escapes & < > "  (single quotes stay literal)
+  const STR_RE = /'(?:\\.|[^'\n])*'|&quot;(?:\\&quot;|(?!&quot;)[^\n])*&quot;/g;
+  const strs = [];
+  s = s.replace(STR_RE, (m) => { strs.push(m); return SENT; });
+  s = s
+    .replace(/\b(await|const|let|var|function|return|if|else|for|while|try|catch|finally|from|import|as|with|def|assert|describe|it|test|async|not|None|True|False)\b/g, '<span class="kw">$1</span>')
+    .replace(/\b(page|browser|context|expect|driver|cy|webdriver|By|Key|Keys|Select|Builder|ActionChains)\b/g, '<span class="kw">$1</span>')
+    .replace(/\b(getBy[A-Za-z]+|get_by_[a-z_]+|locator|click|dblclick|fill|check|uncheck|selectOption|select_option|select_by_visible_text|press|hover|goto|visit|get|contains|should|trigger|find_element|findElement|send_keys|sendKeys|move_to_element|move|perform|set_viewport_size|setViewportSize|set_window_size|isDisplayed|is_displayed|isSelected|is_selected|isEnabled|is_enabled|getText|getAttribute|get_attribute|to[A-Z][A-Za-z]+|to_[a-z_]+|not_to_[a-z_]+|strictEqual|ok)\b/g, '<span class="fn">$1</span>')
+    .replace(/\b([0-9]+)\b/g, '<span class="num">$1</span>');
+  let k = 0;
+  s = s.replace(new RegExp(SENT, 'g'), () => '<span class="str">' + (strs[k++] || '') + '</span>');
+  return s;
+}
+
+// Generated Test Script is an editable, syntax-highlighted contenteditable div.
+function getPreviewText(el) {
+  if (!el) return '';
+  return el.innerText != null ? el.innerText : (el.textContent || '');
+}
+function setPreviewCode(el, code) {
+  if (!el) return;
+  safeRender(el, hl(code));
 }
 
 function pillClass(s) {
@@ -43,341 +73,17 @@ function pillLabel(s) {
   return m[String(s).toUpperCase()] || s;
 }
 
-function pomStabilityClass(s) {
-  const u = String(s || '').toUpperCase();
-  if (u === 'BEST') return 'pom-stab-best';
-  if (u === 'GOOD') return 'pom-stab-good';
-  if (u === 'AVOID') return 'pom-stab-avoid';
-  return 'pom-stab-ok';
-}
 function rankClass(r) {
   return r === 1 ? 'r1' : r === 2 ? 'r2' : r === 3 ? 'r3' : 'rX';
 }
 
-// ── POM v3 Feature Flags ─────────────────────────────────────────────────────
-let pomActionsEnabled = true;
-let pomJsdocEnabled   = true;
-
-// ── POM Helpers ───────────────────────────────────────────────────────────────
-function toPascalCase(str) {
-  return String(str || 'Page').replace(/[^a-zA-Z0-9\s]/g, ' ').trim()
-    .split(/\s+/).filter(Boolean)
-    .map(w => w.charAt(0).toUpperCase() + w.slice(1).toLowerCase()).join('')
-    || 'Page';
-}
-
-function toCamelCase(str) {
-  const words = String(str || '').replace(/[^a-zA-Z0-9\s]/g, ' ').trim().split(/\s+/).filter(Boolean);
-  return words.map((w, i) => i === 0 ? w.toLowerCase() : w.charAt(0).toUpperCase() + w.slice(1).toLowerCase()).join('') || 'element';
-}
-
-function toSnakeCase(str) {
-  return String(str || '').replace(/([A-Z])/g, '_$1').toLowerCase().replace(/^_/, '').replace(/[^a-z0-9_]/g, '_').replace(/_+/g, '_');
-}
-
-/** Valid JS identifier for generated class fields & methods (reserved words, leading digits). */
-const POM_JS_RESERVED = new Set([
-  'arguments', 'await', 'break', 'case', 'catch', 'class', 'const', 'continue', 'debugger', 'default', 'delete', 'do',
-  'else', 'enum', 'eval', 'export', 'extends', 'false', 'finally', 'for', 'function', 'if', 'implements', 'import', 'in',
-  'instanceof', 'interface', 'let', 'new', 'null', 'package', 'private', 'protected', 'public', 'return', 'static', 'super',
-  'switch', 'this', 'throw', 'true', 'try', 'typeof', 'var', 'void', 'while', 'with', 'yield',
-]);
-
-function sanitizePOMIdentifier(raw) {
-  let s = toCamelCase(String(raw || 'element').replace(/^[^a-zA-Z_$]+/, ''));
-  if (!s) s = 'element';
-  if (/^[0-9]/.test(s)) s = 'el' + s;
-  if (POM_JS_RESERVED.has(s)) s += 'El';
-  return s;
-}
-
-function escapeJsDocLine(s) {
-  return String(s || '').replace(/\*\//g, '*\\/');
-}
-
-/** Ensures unique `genName` per field inside one page object class. */
-function resolvePOMFieldNames(elements) {
-  const used = new Set();
-  return elements.map(el => {
-    let base = sanitizePOMIdentifier(el.name);
-    let genName = base;
-    let n = 2;
-    while (used.has(genName)) {
-      genName = `${base}${n++}`;
-    }
-    used.add(genName);
-    return { ...el, genName };
-  });
-}
-
-function autoName(el, index) {
-  const text = (el.visibleText || el.ariaLabel || el.placeholder || el.attr || '').slice(0, 40);
-  const clean = toCamelCase(text);
-  if (clean && clean.length > 1 && !/^[0-9]/.test(clean)) return clean;
-  return (el.tag || 'element') + (index + 1);
-}
-
-function isFragileLocator(item) {
-  const m = String(item.method || '').toLowerCase();
-  const a = String(item.attr  || item.code || '');
-  return m.includes('nth') || m.includes('xpath') ||
-    /\.([\w-]+)/.test(a) && !a.includes('[data-') ||
-    /nth-of-type|nth-child/.test(a) ||
-    (m === 'css' && !a.includes('[data-'));
-}
-
-function hasDuplicate(name, code, skipIdx) {
-  return savedPOMElements.some((el, i) =>
-    i !== skipIdx && (el.name === name || el.code === code || (el.attr && el.attr === code)));
-}
-
-// ── Action method inference (Playwright-native) ───────────────────────────────
-function inferActions(el) {
-  const tag = String(el.tag || '').toLowerCase();
-  const type = String(el.inputType || el.type || '').toLowerCase();
-  const name = sanitizePOMIdentifier(el.name);
-  const Cap = name.charAt(0).toUpperCase() + name.slice(1);
-  const actions = [];
-
-  const fillTypes = new Set(['text', 'email', 'password', 'search', 'tel', 'url', 'number', 'date', 'time', 'datetime-local', 'month', 'week', 'color', '']);
-  const isFillInput = tag === 'input' && (fillTypes.has(type) || !type);
-
-  if (tag === 'button' || tag === 'a' || type === 'submit' || type === 'button' || type === 'reset') {
-    actions.push({ method: `click${Cap}`, body: `await this.${name}.click();`, doc: `Click ${name}` });
-    actions.push({ method: `waitFor${Cap}`, body: `await this.${name}.waitFor({ state: 'visible' });`, doc: `Wait until ${name} is visible` });
-    actions.push({ method: `expect${Cap}Visible`, body: `await expect(this.${name}).toBeVisible();`, doc: `Assert ${name} is visible` });
-  } else if (tag === 'input' && type === 'radio') {
-    actions.push({ method: `check${Cap}`, body: `await this.${name}.check();`, doc: `Select ${name} radio` });
-    actions.push({ method: `is${Cap}Checked`, body: `return await this.${name}.isChecked();`, returnType: 'Promise<boolean>', doc: `Whether ${name} is selected` });
-  } else if (tag === 'input' && type === 'checkbox') {
-    actions.push({ method: `check${Cap}`, body: `await this.${name}.check();`, doc: `Check ${name}` });
-    actions.push({ method: `uncheck${Cap}`, body: `await this.${name}.uncheck();`, doc: `Uncheck ${name}` });
-    actions.push({ method: `is${Cap}Checked`, body: `return await this.${name}.isChecked();`, returnType: 'Promise<boolean>', doc: `Whether ${name} is checked` });
-  } else if (tag === 'input' && type === 'hidden') {
-    actions.push({ method: `expect${Cap}Value`, body: `await expect(this.${name}).toHaveValue(expected);`, param: 'expected: string', doc: `Assert ${name} hidden value` });
-  } else if (tag === 'input' && type === 'file') {
-    actions.push({
-      method: `upload${Cap}`,
-      body: `await this.${name}.setInputFiles(files);`,
-      param: 'files: string | string[] | Buffer | { name: string; mimeType: string; buffer: Buffer }',
-      doc: `Attach file(s) to ${name}`,
-    });
-  } else if (tag === 'input' && type === 'range') {
-    actions.push({ method: `set${Cap}Value`, body: `await this.${name}.fill(String(value));`, param: 'value: number', doc: `Set ${name} slider value` });
-  } else if (isFillInput) {
-    actions.push({ method: `fill${Cap}`, body: `await this.${name}.fill(value);`, param: 'value: string', doc: `Fill ${name}` });
-    actions.push({ method: `clear${Cap}`, body: `await this.${name}.clear();`, doc: `Clear ${name}` });
-    actions.push({ method: `expect${Cap}Value`, body: `await expect(this.${name}).toHaveValue(expected);`, param: 'expected: string', doc: `Assert ${name} value` });
-  } else if (tag === 'select') {
-    actions.push({ method: `select${Cap}Option`, body: `await this.${name}.selectOption(option);`, param: 'option: string | { label?: string; value?: string; index?: number }', doc: `Select option in ${name}` });
-  } else if (tag === 'textarea') {
-    actions.push({ method: `fill${Cap}`, body: `await this.${name}.fill(value);`, param: 'value: string', doc: `Fill ${name}` });
-    actions.push({ method: `expect${Cap}Value`, body: `await expect(this.${name}).toHaveValue(expected);`, param: 'expected: string', doc: `Assert ${name} text` });
-  } else {
-    actions.push({ method: `click${Cap}`, body: `await this.${name}.click();`, doc: `Click ${name}` });
-    actions.push({ method: `get${Cap}Text`, body: `return await this.${name}.textContent();`, returnType: 'Promise<string | null>', doc: `Read text from ${name}` });
-    actions.push({ method: `expect${Cap}Visible`, body: `await expect(this.${name}).toBeVisible();`, doc: `Assert ${name} is visible` });
-  }
-  return actions;
-}
-
-// ── JSDoc builder ─────────────────────────────────────────────────────────────
-function makeJsDoc(el, indentStr) {
-  if (!pomJsdocEnabled) return '';
-  const lines = [];
-  lines.push(`/**`);
-  if (el.loc && el.loc.method) lines.push(` * @locator ${el.loc.method}('${escapeJsDocLine(el.attr || '')}')`);
-  if (el.loc && el.loc.stability) lines.push(` * @stability ${String(el.loc.stability).toLowerCase()}`);
-  if (el.loc && el.loc.rank != null) lines.push(` * @rank ${el.loc.rank} (from LocatorLens ranking)`);
-  if (el.loc && el.loc.fullCode) lines.push(` * @example ${escapeJsDocLine(el.loc.fullCode)}`);
-  if (el.capturedAt) lines.push(` * @capturedAt ${el.capturedAt.slice(0, 10)}`);
-  if (el.pageUrl) lines.push(` * @page ${escapeJsDocLine(el.pageUrl)}`);
-  lines.push(` */`);
-  return lines.map(l => indentStr + l).join('\n') + '\n';
-}
-
-// ── Locator code for POM (Playwright only) ────────────────────────────────────
-function getLocatorCode(item) {
-  if (!item.loc) return item.code || '';
-  return (item.loc.code || item.code || '').replace(/^page\./, '');
-}
-
-// ── Main code generator ───────────────────────────────────────────────────────
-function generatePOMCode(framework) {
-  if (!savedPOMElements.length)
-    return '// No elements yet.\n// Go to the Inspector tab and click + POM on any locator card.';
-
-  const groups = {};
-  savedPOMElements.forEach(el => {
-    const key = el.pageTitle || el.pageUrl || 'PageObject';
-    if (!groups[key]) groups[key] = { url: el.pageUrl || '', elements: [] };
-    groups[key].elements.push(el);
-  });
-
-  const timestamp = new Date().toISOString().slice(0, 10);
-  const banner = `// ─────────────────────────────────────────────────────────────
-// Generated by LocatorLens  •  ${timestamp}
-// ─────────────────────────────────────────────────────────────\n`;
-
-  const headers = {
-    'playwright-ts': `${banner}import { Page, Locator${pomActionsEnabled ? ', expect' : ''} } from '@playwright/test';\n`,
-    'playwright-js': `${banner}${pomActionsEnabled ? "import { expect } from '@playwright/test';\n" : ''}`,
-  };
-
-  const blocks = Object.entries(groups).map(([pageKey, { url, elements: rawEls }]) => {
-    const rawName  = pageKey.replace(/https?:\/\/[^/]+/, '').replace(/[^a-zA-Z0-9]/g, ' ').trim();
-    const className = (toPascalCase(rawName) || 'Page') + 'Page';
-    const elements = resolvePOMFieldNames(rawEls);
-
-    // ── Playwright TypeScript ──
-    if (framework === 'playwright-ts') {
-      const decls   = elements.map(el => {
-        const jsdoc = makeJsDoc(el, '  ');
-        const fragile = isFragileLocator(el) ? '  // ⚠ FRAGILE — consider a more stable locator\n' : '';
-        return `${jsdoc}${fragile}  readonly ${el.genName}: Locator;`;
-      }).join('\n');
-
-      const assigns  = elements.map(el => `    this.${el.genName} = page.${getLocatorCode(el)};`).join('\n');
-
-      let methods = '';
-      if (pomActionsEnabled) {
-        methods = '\n' + elements.flatMap(el => {
-          const elFor = { ...el, name: el.genName };
-          return inferActions(elFor).map(a => {
-            const jsdoc = pomJsdocEnabled ? `  /** ${a.doc} */\n` : '';
-            const param  = a.param ? `${a.param}` : '';
-            const ret    = a.returnType ? `: ${a.returnType}` : ': Promise<void>';
-            return `${jsdoc}  async ${a.method}(${param})${ret} {\n    ${a.body}\n  }`;
-          });
-        }).join('\n\n') + '\n';
-      }
-
-      return `// Page: ${url || pageKey}\nexport class ${className} {\n${decls}\n\n  constructor(readonly page: Page) {\n${assigns}\n  }${methods}}`;
-    }
-
-    // ── Playwright JavaScript ──
-    if (framework === 'playwright-js') {
-      const assigns = elements.map(el => `    this.${el.genName} = page.${getLocatorCode(el)};`).join('\n');
-      let methods = '';
-      if (pomActionsEnabled) {
-        methods = '\n' + elements.flatMap(el => {
-          const elFor = { ...el, name: el.genName };
-          return inferActions(elFor).map(a => {
-            const jsdoc = pomJsdocEnabled ? `  /** ${a.doc} */\n` : '';
-            const paramJs = a.param ? a.param.split(':')[0].trim() : '';
-            return `${jsdoc}  async ${a.method}(${paramJs}) {\n    ${a.body}\n  }`;
-          });
-        }).join('\n\n') + '\n';
-      }
-      return `// Page: ${url || pageKey}\nexport class ${className} {\n  constructor(page) {\n${assigns}\n  }${methods}}`;
-    }
-
-    return '';
-  });
-
-  return (headers[framework] || headers['playwright-ts']) + '\n' + blocks.join('\n\n');
-}
-
-// ── Test Scaffold Generator ───────────────────────────────────────────────────
-function generateTestScaffold() {
-  if (!savedPOMElements.length) return '// No elements yet.';
-  const timestamp = new Date().toISOString().slice(0, 10);
-
-  const groups = {};
-  savedPOMElements.forEach(el => {
-    const key = el.pageTitle || el.pageUrl || 'PageObject';
-    if (!groups[key]) groups[key] = { url: el.pageUrl || '', elements: [] };
-    groups[key].elements.push(el);
-  });
-
-  const classNames = Object.keys(groups).map(pageKey => {
-    const rawName = pageKey.replace(/https?:\/\/[^/]+/, '').replace(/[^a-zA-Z0-9]/g, ' ').trim();
-    return (toPascalCase(rawName) || 'Page') + 'Page';
-  });
-  const uniqueClassNames = [...new Set(classNames)];
-  const imports = uniqueClassNames.length
-    ? `import { ${uniqueClassNames.join(', ')} } from './PageObject';`
-    : '';
-
-  const suites = Object.entries(groups).map(([pageKey, { url, elements: rawEls }]) => {
-    const rawName   = pageKey.replace(/https?:\/\/[^/]+/, '').replace(/[^a-zA-Z0-9]/g, ' ').trim();
-    const className = (toPascalCase(rawName) || 'Page') + 'Page';
-    const varName   = className.charAt(0).toLowerCase() + className.slice(1);
-    const elements  = resolvePOMFieldNames(rawEls);
-
-    const actionTests = elements.flatMap(el => {
-      const elFor = { ...el, name: el.genName };
-      const actions = inferActions(elFor);
-      return actions.slice(0, 2).map(a => {
-        const param = a.param
-          ? (a.param.includes('expected') ? `'TODO'` : a.param.includes('number') ? '42' : a.param.includes('files') ? `'./fixtures/TODO.pdf'` : `'TODO'`)
-          : '';
-        const assertLine = a.body.includes('expect(')
-          ? ''
-          : `    await expect(${varName}.${el.genName}).toBeVisible();\n`;
-        return `\n  test('${a.doc}', async () => {\n${assertLine}    await ${varName}.${a.method}(${param});\n  });`;
-      });
-    }).join('');
-
-    return `test.describe('${className}', () => {\n  let ${varName}: ${className};\n\n  test.beforeEach(async ({ page }) => {\n    ${varName} = new ${className}(page);\n    await page.goto('${(url || 'TODO: enter URL').replace(/'/g, "\\'")}');\n  });${actionTests}\n});`;
-  }).join('\n\n');
-
-  return `// ────────────────────────────────────────────────────────────
-// Test Scaffold — generated by LocatorLens  •  ${timestamp}
-// Run with: npx playwright test
-// POM classes: import from the same file you downloaded (e.g. ./PageObject).
-// ────────────────────────────────────────────────────────────
-import { test, expect } from '@playwright/test';
-${imports}
-
-${suites}`;
-}
-
-
-function updatePOMPreview() {
-  const textarea = document.getElementById('pomCodePreview');
-  const filename = document.getElementById('pomPreviewFilename');
-  const countBadge = document.getElementById('pomCountBadge');
-  if (!textarea) return;
-  const code = generatePOMCode(currentPOMFramework);
-  textarea.value = code;
-  const names = { 'playwright-ts': 'PageObject.ts', 'playwright-js': 'PageObject.js' };
-  if (filename) filename.textContent = names[currentPOMFramework] || 'PageObject.ts';
-  if (countBadge) countBadge.textContent = savedPOMElements.length ? `(${savedPOMElements.length})` : '';
-}
-
-// \u2500\u2500 POM Health Check Queue \u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500
-let _pomHealthCurrentIdx = -1;
-
-function processPomHealthQueue() {
-  if (_pomHealthQueue.length === 0) { _pomHealthActive = false; _pomHealthCurrentIdx = -1; return; }
-  _pomHealthActive = true;
-  const { idx, selector } = _pomHealthQueue.shift();
-  _pomHealthCurrentIdx = idx;
-  chrome.runtime.sendMessage({ type: 'LAB_VALIDATE', selector });
-}
-
-function handlePomHealthResult(count) {
-  if (_pomHealthCurrentIdx < 0 || !savedPOMElements[_pomHealthCurrentIdx]) {
-    _pomHealthCurrentIdx = -1;
-    setTimeout(processPomHealthQueue, 80);
-    return;
-  }
-  const item = savedPOMElements[_pomHealthCurrentIdx];
-  if (count > 1)      { item.health = 'multi'; item.healthCount = count; }
-  else if (count === 1) { item.health = 'live'; }
-  else                 { item.health = 'gone'; }
-  _pomHealthCurrentIdx = -1;
-  chrome.storage.local.set({ savedPOMElements });
-  renderPOMList();
-  setTimeout(processPomHealthQueue, 100);
-}
 
 function copyToClipboard(text, btn) {
+  const originalLabel = btn.textContent;
   const onSuccess = () => {
     btn.textContent = '✓ Copied';
     btn.classList.add('done');
-    setTimeout(() => { btn.textContent = 'Copy'; btn.classList.remove('done'); }, 2000);
+    setTimeout(() => { btn.textContent = originalLabel; btn.classList.remove('done'); }, 2000);
   };
 
   const fallbackCopy = () => {
@@ -394,7 +100,7 @@ function copyToClipboard(text, btn) {
       onSuccess();
     } catch (e) {
       btn.textContent = 'Copy failed';
-      setTimeout(() => { btn.textContent = 'Copy'; }, 2000);
+      setTimeout(() => { btn.textContent = originalLabel; }, 2000);
     }
   };
 
@@ -434,9 +140,202 @@ function updateInspectUI() {
   }
 }
 
-// ── Locator display (Playwright only) ─────────────────────────────────────────
-function formatForPlaywright(loc) {
-  return { code: loc.code || '', fullCode: loc.fullCode };
+// ── Locator display (framework/language aware) ────────────────────────────────
+// Returns { code, fullCode } for the current output target. Playwright JS/TS keeps
+// the engine's native strings (best fidelity incl. chained/frame); everything else
+// is translated from the structured `loc.target` via codegen.
+function formatLocator(loc, suggestedAction) {
+  if (outFramework === 'playwright' && outLanguage !== 'python') {
+    return { code: loc.code || '', fullCode: loc.fullCode || '' };
+  }
+  if (typeof LLCodegen !== 'undefined' && loc.target) {
+    const expr = LLCodegen.locatorExpr(loc.target, outFramework, outLanguage);
+    const act = suggestedAction || 'click';
+    const value = act === 'fill' ? 'your value' : (act === 'selectOption' ? 'option text' : '');
+    const stmt = LLCodegen.actionStatement({ action: act, target: loc.target, value: value }, outFramework, outLanguage);
+    return { code: expr || (loc.code || ''), fullCode: stmt || (loc.fullCode || '') };
+  }
+  return { code: loc.code || '', fullCode: loc.fullCode || '' };
+}
+
+// Card heading: keep Playwright's native API name; use a neutral strategy label
+// for Selenium/Cypress (where "getByRole()" would be misleading).
+function strategyLabel(loc) {
+  if (outFramework === 'playwright') return loc.method;
+  const t = loc.target || {};
+  const map = {
+    testid: 'Test ID', role: t.name ? 'Role + name' : 'Role', label: 'Label',
+    placeholder: 'Placeholder', altText: 'Alt text', title: 'Title', text: 'Text',
+    id: 'ID', name: 'Name', css: 'CSS selector'
+  };
+  return map[t.kind] || loc.method;
+}
+
+// ── Output target (framework + language) wiring ──────────────────────────────
+function recorderFileName() {
+  if (outLanguage === 'python') return 'test_recorded.py';
+  const ext = outLanguage === 'typescript' ? 'ts' : 'js';
+  if (outFramework === 'cypress') return `recorded.cy.${ext}`;
+  if (outFramework === 'playwright') return `locatorlens-recorded.spec.${ext}`;
+  return `locatorlens-recorded.${ext}`;
+}
+
+function populateLangOptions() {
+  const langSel = document.getElementById('langSelect');
+  if (!langSel || typeof LLCodegen === 'undefined') return;
+  // Keep every language visible (so it's obvious Python exists); disable the ones the
+  // framework can't produce — e.g. Cypress is JS/TS only, so Python shows greyed out.
+  if (!LLCodegen.isValidCombo(outFramework, outLanguage)) {
+    const firstValid = LLCodegen.languagesFor(outFramework)[0];
+    if (firstValid) outLanguage = firstValid.id;
+  }
+  langSel.textContent = '';
+  LLCodegen.LANGUAGES.forEach(l => {
+    const ok = LLCodegen.isValidCombo(outFramework, l.id);
+    const o = document.createElement('option');
+    o.value = l.id;
+    o.textContent = ok ? l.label : l.label + ' — n/a in Cypress';
+    o.disabled = !ok;
+    if (l.id === outLanguage) o.selected = true;
+    langSel.appendChild(o);
+  });
+}
+
+function applyOutputChange() {
+  if (chrome.storage && chrome.storage.local) {
+    const patch = {};
+    patch[LL_FW_KEY] = outFramework;
+    patch[LL_LANG_KEY] = outLanguage;
+    chrome.storage.local.set(patch);
+  }
+  if (lastResultData) renderResults(lastResultData);
+  renderTimeline();
+  updateCodePreview();
+}
+
+function initOutputSelectors() {
+  const fwSel = document.getElementById('fwSelect');
+  const langSel = document.getElementById('langSelect');
+  if (!fwSel || !langSel || typeof LLCodegen === 'undefined') return;
+
+  fwSel.textContent = '';
+  LLCodegen.FRAMEWORKS.forEach(f => {
+    const o = document.createElement('option');
+    o.value = f.id;
+    o.textContent = f.label;
+    fwSel.appendChild(o);
+  });
+
+  const finalize = () => {
+    if (!LLCodegen.isValidCombo(outFramework, outLanguage)) {
+      outLanguage = LLCodegen.languagesFor(outFramework)[0].id;
+    }
+    fwSel.value = outFramework;
+    populateLangOptions();
+    langSel.value = outLanguage;
+  };
+
+  if (chrome.storage && chrome.storage.local) {
+    chrome.storage.local.get([LL_FW_KEY, LL_LANG_KEY], (res) => {
+      if (res && res[LL_FW_KEY]) outFramework = res[LL_FW_KEY];
+      if (res && res[LL_LANG_KEY]) outLanguage = res[LL_LANG_KEY];
+      finalize();
+      if (lastResultData) renderResults(lastResultData);
+      renderTimeline();
+      updateCodePreview();
+    });
+  } else {
+    finalize();
+  }
+
+  fwSel.addEventListener('change', () => {
+    outFramework = fwSel.value;
+    populateLangOptions();
+    langSel.value = outLanguage;
+    applyOutputChange();
+  });
+  langSel.addEventListener('change', () => {
+    outLanguage = langSel.value;
+    applyOutputChange();
+  });
+}
+
+// ── Recorder controls (pause / assert / undo-redo / filter / collapse) ───────
+function sendAssertMode() {
+  const toggle = document.getElementById('assertModeToggle');
+  const typeSel = document.getElementById('assertTypeSelect');
+  const on = !!(toggle && toggle.checked);
+  const assertType = (typeSel && typeSel.value) || 'toBeVisible';
+  chrome.runtime.sendMessage({ type: 'SET_ASSERT_MODE', on: on, assertType: assertType });
+}
+
+function initRecorderControls() {
+  const pauseBtn = document.getElementById('pauseRecordingBtn');
+  const resumeBtn = document.getElementById('resumeRecordingBtn');
+  if (pauseBtn) pauseBtn.addEventListener('click', () => {
+    chrome.runtime.sendMessage({ type: 'PAUSE_RECORDING' });
+    pauseBtn.style.display = 'none';
+    if (resumeBtn) resumeBtn.style.display = '';
+  });
+  if (resumeBtn) resumeBtn.addEventListener('click', () => {
+    chrome.runtime.sendMessage({ type: 'RESUME_RECORDING' });
+    resumeBtn.style.display = 'none';
+    if (pauseBtn) pauseBtn.style.display = '';
+  });
+
+  const assertToggle = document.getElementById('assertModeToggle');
+  const assertType = document.getElementById('assertTypeSelect');
+  if (assertToggle) assertToggle.addEventListener('change', () => {
+    if (assertType) assertType.style.display = assertToggle.checked ? '' : 'none';
+    sendAssertMode();
+  });
+  if (assertType) assertType.addEventListener('change', sendAssertMode);
+
+  const undoBtn = document.getElementById('undoActionBtn');
+  const redoBtn = document.getElementById('redoActionBtn');
+  if (undoBtn) undoBtn.addEventListener('click', () => {
+    if (recordedActions.length === 0) return;
+    const act = recordedActions.pop();
+    if (act) { seenActionKeys.delete(dedupeKeyForAction(act)); recRedoStack.push(act); }
+    renderTimeline();
+    updateCodePreview();
+    scheduleRecorderPersist();
+  });
+  if (redoBtn) redoBtn.addEventListener('click', () => {
+    if (recRedoStack.length === 0) return;
+    const act = recRedoStack.pop();
+    if (act) { recordedActions.push(act); seenActionKeys.add(dedupeKeyForAction(act)); }
+    renderTimeline();
+    updateCodePreview();
+    scheduleRecorderPersist();
+  });
+
+  const filterInput = document.getElementById('recFilterInput');
+  const filterClear = document.getElementById('recFilterClear');
+  if (filterInput) filterInput.addEventListener('input', () => {
+    if (_recFilterTimer) clearTimeout(_recFilterTimer);
+    _recFilterTimer = setTimeout(() => {
+      recFilter = filterInput.value.trim();
+      if (filterClear) filterClear.style.display = recFilter ? '' : 'none';
+      renderTimeline();
+    }, 200);
+  });
+  if (filterClear) filterClear.addEventListener('click', () => {
+    if (filterInput) filterInput.value = '';
+    recFilter = '';
+    filterClear.style.display = 'none';
+    renderTimeline();
+    if (filterInput) filterInput.focus();
+  });
+
+  const hdr = document.getElementById('timelineToggleHeader');
+  if (hdr) {
+    hdr.addEventListener('click', () => setTimelineExpanded(!timelineExpanded));
+    hdr.addEventListener('keydown', (e) => {
+      if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); setTimelineExpanded(!timelineExpanded); }
+    });
+  }
+  setTimelineExpanded(false);
 }
 
 // ── Render results ─────────────────────────────────────────────────────────────
@@ -492,34 +391,33 @@ function renderResults(data) {
     const rc = rankClass(loc.rank);
     const delayStyle = `animation-delay:${i * 0.06}s`;
     
-    const { code, fullCode } = formatForPlaywright(loc);
-    
+    const { code, fullCode } = formatLocator(loc, el.suggestedAction);
+
+    const uniqChip = (typeof loc.matchCount === 'number')
+      ? (loc.unique
+          ? '<span class="uniq uniq-ok" title="Matches exactly one element on the page">✓ unique</span>'
+          : `<span class="uniq uniq-warn" title="Matches multiple elements — may be ambiguous">⚠ ${loc.matchCount >= 10 ? '10+' : loc.matchCount} matches</span>`)
+      : '';
+
     return `
       <div class="card ${rc}" style="${delayStyle}">
         <div class="card-head">
           <div class="card-left">
             <div class="rank-num">${loc.rank}</div>
             <div>
-              <div class="method-name">${esc(loc.method)}</div>
+              <div class="method-name">${esc(strategyLabel(loc))}</div>
               <div class="match-attr" title="${esc(loc.matchedAttr)}">${esc(loc.matchedAttr)}</div>
             </div>
           </div>
-          <span class="pill ${pillClass(loc.stability)}">${pillLabel(loc.stability)}</span>
+          <div class="card-badges">
+            <span class="pill ${pillClass(loc.stability)}">${pillLabel(loc.stability)}</span>
+            ${uniqChip}
+          </div>
         </div>
         <div class="card-code">
           <div class="code-txt">${hl(code)}</div>
           <div style="display:flex; flex-direction:column; gap:4px;">
             <button class="copy-btn" data-code="${esc(fullCode)}">Copy</button>
-            <button class="copy-btn add-pom-btn"
-              data-code="${esc(code.replace('page.', ''))}"
-              data-method="${esc(loc.method)}"
-              data-attr="${esc(loc.matchedAttr)}"
-              data-tag="${esc(el.tag || '')}"
-              data-type="${esc(el.type || '')}"
-              data-text="${esc((el.visibleText || '').slice(0,40))}"
-              data-aria="${esc((el.ariaLabel || '').slice(0,40))}"
-              data-ph="${esc((el.placeholder || '').slice(0,40))}"
-              style="background:var(--primary-dim); color:var(--text);">+ POM</button>
           </div>
         </div>
         <div class="why-row">
@@ -586,9 +484,6 @@ function handleRuntimeMessage(msg) {
     updateInspectUI();
   }
   if (msg.type === 'LAB_STATUS_UPDATE') {
-    if (_pomHealthActive && _pomHealthCurrentIdx >= 0) {
-      handlePomHealthResult(msg.count);
-    } else {
       const statusEl = document.getElementById('lab-status');
       const countEl = document.getElementById('lab-count');
       if (msg.count > 0) {
@@ -601,7 +496,6 @@ function handleRuntimeMessage(msg) {
         statusEl.className = 'lab-status err';
         countEl.style.display = 'none';
       }
-    }
   }
   if (msg.type === 'LAB_ERROR') {
     const statusEl = document.getElementById('lab-status');
@@ -639,54 +533,10 @@ document.addEventListener('DOMContentLoaded', () => {
   // Event delegation for card buttons
   const cardsContainer = document.getElementById('cardsContainer');
   cardsContainer.addEventListener('click', (e) => {
-    if (e.target.classList.contains('copy-btn') && !e.target.classList.contains('add-pom-btn')) {
+    if (e.target.classList.contains('copy-btn')) {
       handleCopy(e.target);
     } else if (e.target.classList.contains('toggle-explain')) {
       toggleExplain(e.target);
-    } else if (e.target.classList.contains('add-pom-btn')) {
-      const btn = e.target;
-      const code = btn.getAttribute('data-code').replace(/&amp;/g, '&').replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/&quot;/g, '"');
-      const method      = btn.getAttribute('data-method') || '';
-      const attr        = btn.getAttribute('data-attr') || '';
-      const elTag       = btn.getAttribute('data-tag') || 'element';
-      const elText      = btn.getAttribute('data-text') || '';
-      const elAria      = btn.getAttribute('data-aria') || '';
-      const elPh        = btn.getAttribute('data-ph') || '';
-      const elInputType = btn.getAttribute('data-type') || '';
-      const elNameRaw   = autoName({ tag: elTag, visibleText: elText, ariaLabel: elAria, placeholder: elPh, attr }, savedPOMElements.length);
-      const elName        = sanitizePOMIdentifier(elNameRaw);
-
-      // Duplicate detection
-      const dupCode = savedPOMElements.some(el => el.code === code);
-      const dupName = savedPOMElements.some(el => el.name === elName);
-      if (dupCode) {
-        const existing = savedPOMElements.find(el => el.code === code);
-        showPomWarning(`⚠ Already in POM as "${existing ? existing.name : elName}" — adding anyway.`);
-      } else if (dupName) {
-        showPomWarning(`⚠ Name "${elName}" already exists — adding with suffix.`);
-      }
-      const finalName = dupName && !dupCode
-        ? elName + (savedPOMElements.filter(el => el.name.startsWith(elName)).length + 1)
-        : elName;
-
-      chrome.tabs.query({ active: true, currentWindow: true }, (tabs) => {
-        const pageUrl   = (tabs && tabs[0] && tabs[0].url)   || 'Unknown Page';
-        const pageTitle = (tabs && tabs[0] && tabs[0].title) || pageUrl;
-        const loc = lastResultData && lastResultData.locators
-          ? lastResultData.locators.find(l => l.matchedAttr === attr) || null : null;
-        const inputType = elInputType || (lastResultData && lastResultData.elementData && lastResultData.elementData.type) || '';
-        savedPOMElements.push({
-          name: sanitizePOMIdentifier(finalName), code, method, attr,
-          tag: elTag, inputType,
-          pageUrl, pageTitle, loc, health: 'pending',
-          capturedAt: new Date().toISOString()
-        });
-        chrome.storage.local.set({ savedPOMElements });
-        renderPOMList();
-        updatePOMPreview();
-        btn.textContent = '✓ Added';
-        setTimeout(() => { btn.textContent = '+ POM'; }, 1800);
-      });
     }
   });
 
@@ -756,282 +606,21 @@ document.addEventListener('DOMContentLoaded', () => {
 
   tabs.forEach(tab => {
     tab.addEventListener('click', () => {
-      tabs.forEach(t => t.classList.remove('active'));
+      tabs.forEach(t => { t.classList.remove('active'); t.setAttribute('aria-selected', 'false'); });
       tabContents.forEach(c => c.classList.remove('active'));
 
       tab.classList.add('active');
+      tab.setAttribute('aria-selected', 'true');
       const targetId = tab.getAttribute('data-target');
       document.getElementById(targetId).classList.add('active');
     });
   });
 
-  // ── POM Builder (world-class rewrite) ──
-  let _pomDragIdx = null;
+  // ── Framework + Language selectors ──
+  initOutputSelectors();
 
-  function renderPOMList() {
-    const list = document.getElementById('pomList');
-    const empty = document.getElementById('pomEmptyState');
-    if (!list) return;
-    if (savedPOMElements.length === 0) {
-      list.innerHTML = '';
-      if (empty) { empty.style.display = ''; list.appendChild(empty); }
-      updatePOMPreview();
-      return;
-    }
-    if (empty) empty.style.display = 'none';
-
-    // Group by page
-    const groups = {};
-    savedPOMElements.forEach((el, i) => {
-      const key = el.pageTitle || el.pageUrl || 'Page';
-      if (!groups[key]) groups[key] = [];
-      groups[key].push({ el, i });
-    });
-
-    const multiGroup = Object.keys(groups).length > 1;
-    let html = '';
-    Object.entries(groups).forEach(([pageKey, items]) => {
-      if (multiGroup) html += `<div class="pom-group-label">${esc(pageKey)}</div>`;
-      items.forEach(({ el, i }) => {
-        const fragile   = isFragileLocator(el);
-        const stab      = el.loc && el.loc.stability;
-        const stabHtml  = stab ? `<span class="pom-stability ${pomStabilityClass(stab)}" title="Locator ranking stability">${esc(pillLabel(stab))}</span>` : '';
-        const healthClass = el.health || 'pending';
-        const healthText  = healthClass === 'live' ? '● LIVE' : healthClass === 'gone' ? '✗ GONE' : healthClass === 'multi' ? `~ ${el.healthCount || '?'}` : '...';
-        const capturedLabel = el.capturedAt ? new Date(el.capturedAt).toLocaleDateString() : '';
-        html += `
-          <div class="pom-entry${fragile ? ' pom-entry-fragile' : ''}" draggable="true" data-idx="${i}">
-            <span class="pom-drag-handle" title="Drag to reorder">⠇</span>
-            <div class="pom-entry-body">
-              <div style="display:flex;align-items:center;gap:4px;flex-wrap:wrap;">
-                <input class="pom-entry-name-input" type="text" value="${esc(el.name)}" data-idx="${i}" title="Click to rename" />
-                ${stabHtml}
-                ${fragile ? '<span class="pom-fragile-badge" title="Fragile locator — may break when DOM changes">⚠ FRAGILE</span>' : ''}
-              </div>
-              <div class="pom-entry-locator" title="${esc(el.code)}">${esc(el.code)}</div>
-              ${el.pageUrl ? `<div class="pom-entry-page">${esc(el.pageUrl)}${capturedLabel ? ` · ${capturedLabel}` : ''}</div>` : ''}
-            </div>
-            <span class="pom-health ${healthClass}">${healthText}</span>
-            <button class="pom-remove-btn" data-remove="${i}" title="Remove">×</button>
-          </div>`;
-      });
-    });
-
-    safeRender(list, html);
-
-    // Bind inline rename
-    list.querySelectorAll('.pom-entry-name-input').forEach(input => {
-      input.addEventListener('blur', () => {
-        const idx = parseInt(input.getAttribute('data-idx'), 10);
-        if (!isNaN(idx) && savedPOMElements[idx]) {
-          const raw = input.value.trim() || savedPOMElements[idx].name;
-          savedPOMElements[idx].name = sanitizePOMIdentifier(raw);
-          input.value = savedPOMElements[idx].name;
-          chrome.storage.local.set({ savedPOMElements });
-          updatePOMPreview();
-        }
-      });
-      input.addEventListener('keydown', e => { if (e.key === 'Enter') input.blur(); });
-    });
-
-    // Bind remove buttons
-    list.querySelectorAll('[data-remove]').forEach(btn => {
-      btn.addEventListener('click', () => {
-        const idx = parseInt(btn.getAttribute('data-remove'), 10);
-        savedPOMElements.splice(idx, 1);
-        chrome.storage.local.set({ savedPOMElements });
-        renderPOMList();
-        updatePOMPreview();
-      });
-    });
-
-    // Drag-to-reorder
-    list.querySelectorAll('.pom-entry').forEach(entry => {
-      entry.addEventListener('dragstart', () => {
-        _pomDragIdx = parseInt(entry.getAttribute('data-idx'), 10);
-        entry.style.opacity = '0.5';
-      });
-      entry.addEventListener('dragend', () => { entry.style.opacity = ''; });
-      entry.addEventListener('dragover', e => { e.preventDefault(); entry.classList.add('drag-over'); });
-      entry.addEventListener('dragleave', () => entry.classList.remove('drag-over'));
-      entry.addEventListener('drop', e => {
-        e.preventDefault();
-        entry.classList.remove('drag-over');
-        const targetIdx = parseInt(entry.getAttribute('data-idx'), 10);
-        if (_pomDragIdx !== null && _pomDragIdx !== targetIdx) {
-          const moved = savedPOMElements.splice(_pomDragIdx, 1)[0];
-          savedPOMElements.splice(targetIdx, 0, moved);
-          chrome.storage.local.set({ savedPOMElements });
-          renderPOMList();
-          updatePOMPreview();
-        }
-        _pomDragIdx = null;
-      });
-    });
-
-    updatePOMPreview();
-  }
-
-  // Framework chips
-  document.querySelectorAll('.pom-fw-chip').forEach(chip => {
-    chip.addEventListener('click', () => {
-      document.querySelectorAll('.pom-fw-chip').forEach(c => c.classList.remove('active'));
-      chip.classList.add('active');
-      currentPOMFramework = chip.getAttribute('data-pomfw');
-      updatePOMPreview();
-    });
-  });
-
-  // Copy POM
-  document.getElementById('copyPOMBtn').addEventListener('click', (e) => {
-    if (savedPOMElements.length === 0) return;
-    copyToClipboard(generatePOMCode(currentPOMFramework), e.target);
-  });
-
-  // Download POM
-  document.getElementById('downloadPOMBtn').addEventListener('click', () => {
-    if (savedPOMElements.length === 0) return;
-    const code = generatePOMCode(currentPOMFramework);
-    const names = { 'playwright-ts': 'PageObject.ts', 'playwright-js': 'PageObject.js' };
-    const blob = new Blob([code], { type: 'text/plain' });
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement('a');
-    a.href = url; a.download = names[currentPOMFramework] || 'PageObject.ts';
-    a.click(); URL.revokeObjectURL(url);
-  });
-
-  // ── POM v3 Feature Handlers ─────────────────────────────────────────────────
-
-  // Warning toast
-  function showPomWarning(msg) {
-    let w = document.getElementById('pomWarnToast');
-    if (!w) {
-      w = document.createElement('div');
-      w.id = 'pomWarnToast';
-      w.style.cssText = 'position:fixed;bottom:60px;left:50%;transform:translateX(-50%);background:#ffb86c;color:#1e1e2e;padding:6px 12px;border-radius:4px;font-size:10px;font-weight:700;z-index:9999;max-width:280px;text-align:center;box-shadow:0 2px 8px rgba(0,0,0,.4);';
-      document.body.appendChild(w);
-    }
-    w.textContent = msg; w.style.display = 'block';
-    clearTimeout(w._t);
-    w._t = setTimeout(() => { w.style.display = 'none'; }, 3500);
-  }
-
-  // Actions toggle
-  const actionsToggle = document.getElementById('pomActionsToggle');
-  if (actionsToggle) {
-    actionsToggle.addEventListener('change', () => { pomActionsEnabled = actionsToggle.checked; updatePOMPreview(); });
-  }
-
-  // JSDoc toggle
-  const jsdocToggle = document.getElementById('pomJsdocToggle');
-  if (jsdocToggle) {
-    jsdocToggle.addEventListener('change', () => { pomJsdocEnabled = jsdocToggle.checked; updatePOMPreview(); });
-  }
-
-  // Clear POM
-  document.getElementById('clearPOMBtn').addEventListener('click', () => {
-    savedPOMElements = [];
-    chrome.storage.local.set({ savedPOMElements });
-    renderPOMList();
-  });
-
-  // Generate Test Scaffold
-  document.getElementById('generateTestBtn').addEventListener('click', () => {
-    if (!savedPOMElements.length) return showPomWarning('Add elements first.');
-    const code = generateTestScaffold();
-    const blob = new Blob([code], { type: 'text/plain' });
-    const url  = URL.createObjectURL(blob);
-    const a    = document.createElement('a');
-    a.href = url; a.download = 'locatorlens.spec.ts';
-    a.click(); URL.revokeObjectURL(url);
-  });
-
-  // Export Session
-  document.getElementById('exportSessionBtn').addEventListener('click', () => {
-    if (!savedPOMElements.length) return showPomWarning('Nothing to export yet.');
-    const session = {
-      version: '3.0', exportedAt: new Date().toISOString(), framework: currentPOMFramework,
-      pages: Object.values(savedPOMElements.reduce((acc, el) => {
-        const k = el.pageUrl || 'Unknown';
-        (acc[k] = acc[k] || { url: el.pageUrl || '', title: el.pageTitle || '', elements: [] }).elements.push(el);
-        return acc;
-      }, {}))
-    };
-    const blob = new Blob([JSON.stringify(session, null, 2)], { type: 'application/json' });
-    const url  = URL.createObjectURL(blob);
-    const a    = document.createElement('a');
-    a.href = url; a.download = 'locatorlens-session.json';
-    a.click(); URL.revokeObjectURL(url);
-  });
-
-  // Import Session
-  document.getElementById('importSessionBtn').addEventListener('click', () => {
-    const fi = document.createElement('input');
-    fi.type = 'file'; fi.accept = '.json';
-    fi.addEventListener('change', () => {
-      const file = fi.files[0]; if (!file) return;
-      const reader = new FileReader();
-      reader.onload = (ev) => {
-        try {
-          const session = JSON.parse(ev.target.result);
-          if (!session.pages) throw new Error('Invalid format');
-          const imported = session.pages.flatMap(p =>
-            (p.elements || []).map(el => ({
-              ...el,
-              name: sanitizePOMIdentifier(el.name || 'element'),
-              pageUrl: p.url || el.pageUrl || '',
-              pageTitle: p.title || el.pageTitle || '',
-              health: 'pending',
-            }))
-          );
-          if (!imported.length) return showPomWarning('No elements found.');
-          const existing = new Set(savedPOMElements.map(el => el.code));
-          const toAdd = imported.filter(el => !existing.has(el.code));
-          const skipped = imported.length - toAdd.length;
-          savedPOMElements = [...savedPOMElements, ...toAdd];
-          chrome.storage.local.set({ savedPOMElements });
-          renderPOMList(); updatePOMPreview();
-          showPomWarning(`✓ Imported ${toAdd.length} element${toAdd.length!==1?'s':''}${skipped?` (${skipped} duplicate${skipped>1?'s':''} skipped)`:''}.`);
-        } catch (err) { showPomWarning('⚠ Could not read file: ' + err.message); }
-      };
-      reader.readAsText(file);
-    });
-    fi.click();
-  });
-
-  // Check Health
-  document.getElementById('checkHealthBtn').addEventListener('click', () => {
-    if (!savedPOMElements.length) return;
-    savedPOMElements.forEach(el => { el.health = 'pending'; el.healthCount = null; });
-    renderPOMList(); _pomHealthQueue = [];
-    let i = 0;
-    function checkNext() {
-      if (i >= savedPOMElements.length) { if (!_pomHealthActive) processPomHealthQueue(); return; }
-      const item = savedPOMElements[i];
-      const attr = String(item.attr || item.code || '');
-      let selector = null;
-      if (/^[\[#.]/.test(attr)) selector = attr;
-      else if (/testid/i.test(item.method || '')) selector = `[data-testid="${attr.replace(/^["']/,'').replace(/["']$/,'')}"]`;
-      else if (/\bid\b/i.test(item.method||'') && !/testid/i.test(item.method||'')) selector = `#${attr.replace(/^["']/,'').replace(/["']$/,'')}`;
-      else if (/name/i.test(item.method||'')) selector = `[name="${attr.replace(/^["']/,'').replace(/["']$/,'')}"]`;
-      if (selector) _pomHealthQueue.push({ idx: i, selector });
-      i++; setTimeout(checkNext, 30);
-    }
-    checkNext();
-  });
-
-  if (chrome.storage && chrome.storage.local) {
-    chrome.storage.local.get('savedPOMElements', (res) => {
-      if (res && res.savedPOMElements) {
-        savedPOMElements = res.savedPOMElements.map(el => ({
-          ...el,
-          name: sanitizePOMIdentifier(el.name || 'element'),
-        }));
-        chrome.storage.local.set({ savedPOMElements });
-        renderPOMList();
-      }
-    });
-  }
+  // ── Recorder controls (pause / assert / undo-redo / filter / collapse) ──
+  initRecorderControls();
 
   // Keep background aware the panel is open (single ping expires after ~12s).
   const sendPanelHeartbeat = () => chrome.runtime.sendMessage({ type: 'PANEL_HEARTBEAT' });
@@ -1044,6 +633,7 @@ document.addEventListener('DOMContentLoaded', () => {
 
   document.getElementById('clearTimelineBtn').addEventListener('click', () => {
     recordedActions = [];
+    recRedoStack = [];
     seenActionKeys.clear();
     lastSyncedPreviewScript = '';
     recLastPageUrl = '';
@@ -1066,7 +656,7 @@ document.addEventListener('DOMContentLoaded', () => {
     const ta = document.getElementById('codePreview');
     if (!ta) return;
     const next = generateTestScript();
-    ta.value = next;
+    setPreviewCode(ta, next);
     lastSyncedPreviewScript = next;
     ta.focus();
     scheduleRecorderPersist();
@@ -1075,6 +665,14 @@ document.addEventListener('DOMContentLoaded', () => {
   const codePreviewEl = document.getElementById('codePreview');
   if (codePreviewEl) {
     codePreviewEl.addEventListener('input', () => scheduleRecorderPersist());
+    // contenteditable pastes rich HTML by default — force plain text so the script
+    // editor can't get polluted with markup.
+    codePreviewEl.addEventListener('paste', (e) => {
+      e.preventDefault();
+      const cd = e.clipboardData || window.clipboardData;
+      const text = cd ? cd.getData('text/plain') : '';
+      if (text) document.execCommand('insertText', false, text);
+    });
   }
 
   const downloadTestBtn = document.getElementById('downloadTestBtn');
@@ -1088,7 +686,7 @@ document.addEventListener('DOMContentLoaded', () => {
       const blob = new Blob([script], { type: 'text/plain;charset=utf-8' });
       const a = document.createElement('a');
       a.href = URL.createObjectURL(blob);
-      a.download = 'locatorlens-recorded-test.spec.ts';
+      a.download = recorderFileName();
       a.click();
       setTimeout(() => URL.revokeObjectURL(a.href), 2000);
     });
@@ -1115,31 +713,6 @@ document.addEventListener('DOMContentLoaded', () => {
     }
   });
 
-  // ── Settings (Custom Attributes) ──
-  const customAttrsInput = document.getElementById('custom-attrs-input');
-  const saveSettingsBtn = document.getElementById('save-settings-btn');
-  const settingsStatus = document.getElementById('settings-status');
-
-  if (chrome.storage && chrome.storage.local) {
-    chrome.storage.local.get('customAttributes', (res) => {
-      if (res && res.customAttributes) {
-        customAttrsInput.value = res.customAttributes.join(', ');
-      }
-    });
-  }
-
-  saveSettingsBtn.addEventListener('click', () => {
-    const rawArgs = customAttrsInput.value.split(',').map(s => s.trim()).filter(s => s);
-    chrome.storage.local.set({ customAttributes: rawArgs }, () => {
-      settingsStatus.textContent = "Saved! Reload page to apply.";
-      settingsStatus.className = 'lab-status success';
-      setTimeout(() => {
-        settingsStatus.textContent = "";
-        settingsStatus.className = 'lab-status';
-      }, 3000);
-    });
-  });
-
   loadRecorderState();
 });
 
@@ -1155,6 +728,9 @@ function updateRecordUI() {
   const icon = document.getElementById('recBtnIcon');
   const txt = document.getElementById('recBtnText');
   const hint = document.getElementById('recHint');
+  const ctrls = document.getElementById('recControls');
+  const pauseBtn = document.getElementById('pauseRecordingBtn');
+  const resumeBtn = document.getElementById('resumeRecordingBtn');
 
   if (isRecording) {
     btn.style.background = 'var(--surf2)';
@@ -1164,6 +740,9 @@ function updateRecordUI() {
     icon.textContent = '⏹';
     txt.textContent = 'Stop Recording';
     hint.style.display = 'block';
+    if (ctrls) ctrls.style.display = 'flex';
+    if (pauseBtn) pauseBtn.style.display = '';
+    if (resumeBtn) resumeBtn.style.display = 'none';
   } else {
     btn.style.background = 'var(--error)';
     btn.style.color = 'var(--bg)';
@@ -1172,7 +751,35 @@ function updateRecordUI() {
     icon.textContent = '⏺';
     txt.textContent = 'Start Recording';
     hint.style.display = 'none';
+    if (ctrls) ctrls.style.display = 'none';
+    // Reset assert-mode UI (content script resets its own state on stop/start).
+    const at = document.getElementById('assertModeToggle');
+    const ats = document.getElementById('assertTypeSelect');
+    if (at) at.checked = false;
+    if (ats) ats.style.display = 'none';
     if (recordedActions.length > 0) updateCodePreview();
+  }
+}
+
+// ── Recorder timeline UI helpers ──
+function updateUndoRedoButtons() {
+  const u = document.getElementById('undoActionBtn');
+  const r = document.getElementById('redoActionBtn');
+  if (u) u.disabled = recordedActions.length === 0;
+  if (r) r.disabled = recRedoStack.length === 0;
+}
+
+function setTimelineExpanded(expanded) {
+  timelineExpanded = expanded;
+  const tl = document.getElementById('recorderTimeline');
+  const fw = document.getElementById('recFilterWrap');
+  const hdr = document.getElementById('timelineToggleHeader');
+  if (tl) tl.style.display = expanded ? '' : 'none';
+  if (fw) fw.style.display = expanded ? '' : 'none';
+  if (hdr) {
+    hdr.setAttribute('aria-expanded', expanded ? 'true' : 'false');
+    const chev = hdr.querySelector('.ll-timeline-chevron');
+    if (chev) chev.textContent = expanded ? '▼' : '▶';
   }
 }
 
@@ -1182,9 +789,10 @@ function renderTimeline() {
   if (!timelineList) return;
 
   const countEl = document.getElementById('recCount');
+  updateUndoRedoButtons();
 
   if (recordedActions.length === 0) {
-    timelineList.innerHTML = `<div class="ll-rec-empty">🎬 Hit <strong style="color: var(--primary);">Start Recording</strong> then use the page. Clicks, double-clicks, typing, and Enter/Tab/Escape are captured.</div>`;
+    safeRender(timelineList, `<div class="ll-rec-empty">🎬 Hit <strong style="color: var(--primary);">Start Recording</strong> then use the page. Clicks, typing, hovers (Alt+click), and assertions are captured.</div>`);
     if (countEl) { countEl.style.display = 'none'; }
     return;
   }
@@ -1196,27 +804,37 @@ function renderTimeline() {
 
   const actionIcons = {
     'goto': '🌐', 'viewport': '🖥️', 'click': '👆', 'dblclick': '👆👆', 'fill': '⌨️', 'check': '☑️',
-    'uncheck': '⬜', 'selectOption': '📃', 'press': '⌨️'
+    'uncheck': '⬜', 'selectOption': '📃', 'press': '⌨️', 'hover': '🖱️', 'assert': '✔️'
   };
+  const filter = (recFilter || '').toLowerCase();
+  let rendered = 0;
 
   let html = '';
   try {
     html = recordedActions.map((act, i) => {
-      const icon = actionIcons[act.action] || '🔵';
-      const label = String(act.action || 'step').toUpperCase();
+      const isAssert = act.action === 'assert';
       let codeStr = '';
       try {
         codeStr = buildActionCode(act);
       } catch (err) {
         codeStr = String(act.fullCode || '// (unavailable)').slice(0, 500);
       }
+      if (filter) {
+        const hay = (String(act.action || '') + ' ' + String(act.assertType || '') + ' ' + codeStr + ' ' + String(act.value || '')).toLowerCase();
+        if (hay.indexOf(filter) === -1) return '';
+      }
+      rendered++;
+      const icon = actionIcons[act.action] || '🔵';
+      const label = isAssert
+        ? `ASSERT · ${esc(String(act.assertType || 'toBeVisible'))}`
+        : esc(String(act.action || 'step').toUpperCase());
       const valueStr = String(act.value != null ? act.value : '');
       const valuePreview = valueStr.slice(0, 80);
 
       return `
-      <div class="ll-rec-step">
+      <div class="ll-rec-step${isAssert ? ' is-assert' : ''}">
         <div class="ll-rec-step-head">
-           <span class="ll-rec-step-label">${icon} #${i + 1} ${esc(label)}</span>
+           <span class="ll-rec-step-label">${icon} #${i + 1} ${label}</span>
            <div class="ll-rec-step-actions">
              <button type="button" class="clear-btn copy-btn" data-code="${esc(codeStr)}">Copy</button>
              <button type="button" class="clear-btn remove-step-btn" data-index="${i}">✕</button>
@@ -1234,44 +852,51 @@ function renderTimeline() {
         <div class="ll-rec-step-head"><span class="ll-rec-step-label">#${i + 1} ${esc(String(act.action || ''))}</span></div>
         <pre class="ll-rec-step-code" style="white-space:pre-wrap;">${esc(String(act.fullCode || act.code || ''))}</pre>
       </div>`).join('');
+    rendered = recordedActions.length;
   }
 
-  timelineList.innerHTML = html;
+  if (filter && rendered === 0) {
+    html = `<div class="ll-rec-empty-filter">No actions match "${esc(recFilter)}".</div>`;
+  }
+
+  safeRender(timelineList, html);
 }
 
 function buildActionCode(act) {
+  // Route through codegen for every framework/language. We deliberately do NOT reuse
+  // act.fullCode for Playwright here: the recorder's fullCode carries the engine's
+  // suggestAction placeholder for selectOption ('option text') and says .check() even
+  // for uncheck events — codegen rebuilds from the action + actual value + target,
+  // which is correct for all cases. (locators[0] is always a top semantic locator,
+  // so codegen reproduces the Playwright line identically.)
+  if (typeof LLCodegen !== 'undefined') {
+    const needsLoc = ['click', 'dblclick', 'check', 'uncheck', 'fill', 'selectOption', 'hover', 'assert'].indexOf(act.action) !== -1;
+    if (needsLoc && !act.target) {
+      // Older recording captured before structured targets existed — fall back.
+      return act.fullCode || '';
+    }
+    const line = LLCodegen.actionStatement(act, outFramework, outLanguage);
+    if (line) return line;
+  }
+  // Legacy Playwright fallback (LLCodegen unavailable).
   const locator = act.code || '';
   const valStr = String(act.value != null ? act.value : '');
   switch (act.action) {
-    case 'goto':
-      return `await page.goto(${JSON.stringify(valStr)});`;
-    case 'viewport': {
-      const raw = valStr || '0x0';
-      const parts = raw.split('x');
-      const w = parts[0] || '0';
-      const h = parts[1] != null && parts[1] !== '' ? parts[1] : (parts[0] || '0');
-      return `await page.setViewportSize({ width: ${Number(w) || 0}, height: ${Number(h) || 0} });`;
-    }
-    case 'click':
-      return `await ${locator}.click();`;
-    case 'dblclick':
-      return `await ${locator}.dblclick();`;
-    case 'fill':
-      return `await ${locator}.fill('${valStr.replace(/\\/g, '\\\\').replace(/'/g, "\\'")}');`;
-    case 'check':
-      return `await ${locator}.check();`;
-    case 'uncheck':
-      return `await ${locator}.uncheck();`;
-    case 'selectOption':
-      return `await ${locator}.selectOption('${valStr.replace(/'/g, "\\'")}');`;
-    case 'press':
-      return `await page.keyboard.press(${JSON.stringify(valStr)});`;
-    default:
-      return act.fullCode || `await ${locator}.click();`;
+    case 'goto': return `await page.goto(${JSON.stringify(valStr)});`;
+    case 'fill': return `await ${locator}.fill('${valStr.replace(/\\/g, '\\\\').replace(/'/g, "\\'")}');`;
+    case 'selectOption': return `await ${locator}.selectOption('${valStr.replace(/'/g, "\\'")}');`;
+    case 'uncheck': return `await ${locator}.uncheck();`;
+    case 'press': return `await page.keyboard.press(${JSON.stringify(valStr)});`;
+    default: return act.fullCode || `await ${locator}.click();`;
   }
 }
 
 function generateTestScript() {
+  if (typeof LLCodegen !== 'undefined') {
+    // buildActionCode() controls per-line fidelity; wrapScript() supplies the
+    // framework/language-correct file scaffold (imports, harness, indentation).
+    return LLCodegen.wrapScript(recordedActions.map(buildActionCode), outFramework, outLanguage);
+  }
   const lines = recordedActions.map(act => `  ${buildActionCode(act)}`).join('\n');
   return `import { test, expect } from '@playwright/test';
 
@@ -1287,7 +912,7 @@ function getExportedTestScript() {
   if (!ta || ta.style.display === 'none') {
     return recordedActions.length ? generateTestScript() : '';
   }
-  const v = ta.value.trim();
+  const v = getPreviewText(ta).trim();
   return v || (recordedActions.length ? generateTestScript() : '');
 }
 
@@ -1302,7 +927,7 @@ function updateCodePreview() {
   if (recordedActions.length === 0) {
     previewEl.style.display = 'none';
     labelEl.style.display = 'none';
-    previewEl.value = '';
+    previewEl.textContent = '';
     lastSyncedPreviewScript = '';
     return;
   }
@@ -1312,14 +937,15 @@ function updateCodePreview() {
 
   const next = generateTestScript();
   if (document.activeElement === previewEl) {
-    if (previewEl.value === lastSyncedPreviewScript) {
-      previewEl.value = next;
+    // user is editing — only re-highlight if they haven't changed our last output
+    if (getPreviewText(previewEl) === lastSyncedPreviewScript) {
+      setPreviewCode(previewEl, next);
       lastSyncedPreviewScript = next;
     }
     return;
   }
 
-  previewEl.value = next;
+  setPreviewCode(previewEl, next);
   lastSyncedPreviewScript = next;
 }
 
@@ -1346,7 +972,7 @@ function scheduleRecorderPersist() {
 function persistRecorderState() {
   if (!chrome.storage || !chrome.storage.local) return;
   const ta = document.getElementById('codePreview');
-  const codePreview = ta && ta.style.display !== 'none' ? (ta.value || '') : '';
+  const codePreview = ta && ta.style.display !== 'none' ? getPreviewText(ta) : '';
   chrome.storage.local.set({
     [LL_RECORDER_STATE_KEY]: {
       actions: recordedActions,
@@ -1372,7 +998,7 @@ function loadRecorderState(callback) {
       const label = document.getElementById('codePreviewLabel');
       const savedEdits = s.codePreview != null && String(s.codePreview).trim() !== '';
       if (ta && savedEdits) {
-        ta.value = s.codePreview;
+        setPreviewCode(ta, s.codePreview);
         lastSyncedPreviewScript = s.codePreview;
         ta.style.display = '';
         if (label) label.style.display = '';
@@ -1410,6 +1036,7 @@ function appendToRecorder(actionData) {
   if (seenActionKeys.has(key)) return;
   seenActionKeys.add(key);
 
+  recRedoStack = []; // a newly captured action invalidates the redo history
   recordedActions.push(Object.assign({}, actionData));
   if (actionData.url && typeof actionData.url === 'string') {
     recLastPageUrl = actionData.url;

@@ -2,7 +2,7 @@
 // Handles communication between popup, side panel, and content script
 
 /** Load order matters: engine defines __LocatorLensEngine before content.js runs. */
-const CONTENT_SCRIPT_FILES = ['src/content-locator-engine.js', 'src/content.js'];
+const CONTENT_SCRIPT_FILES = ['src/codegen.js', 'src/content-locator-engine.js', 'src/content.js'];
 
 /** Long-lived channel so the service worker can push UI updates (recording, picks) to the side panel reliably. */
 let llSidePanelPort = null;
@@ -17,12 +17,13 @@ chrome.runtime.onConnect.addListener((port) => {
 // Track inspect mode per tab
 const inspectTabs = new Set();
 const activePanels = new Set(); // Track which tabs have an open side panel
+const recordingTabs = new Set(); // tabs with an active recording (so we can re-arm after navigation)
 
 // ── Register context menu on install ────────────────────────────────────────
 chrome.runtime.onInstalled.addListener(() => {
   chrome.contextMenus.create({
     id: 'll-copy-locator',
-    title: '🎯 Copy Best Playwright Locator',
+    title: '🎯 Copy Best Locator',
     contexts: ['all']
   });
   chrome.contextMenus.create({
@@ -200,6 +201,7 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
     chrome.tabs.query({ active: true, currentWindow: true }, (tabs) => {
       if (!tabs[0]) return;
       const tabId = tabs[0].id;
+      recordingTabs.add(tabId); // so we can re-arm capture after a full-page navigation
       chrome.tabs.sendMessage(tabId, { type: 'START_RECORDING' }, (r) => {
         if (chrome.runtime.lastError) {
           // Inject content script first, then start recording
@@ -218,11 +220,20 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
   }
 
   if (msg.type === 'STOP_RECORDING') {
+    recordingTabs.clear(); // single recording session — stop re-arming on any tab
     chrome.tabs.query({ active: true, currentWindow: true }, (tabs) => {
       if (!tabs[0]) return;
       chrome.tabs.sendMessage(tabs[0].id, { type: 'STOP_RECORDING' }, () => {
         void chrome.runtime.lastError;
       });
+    });
+  }
+
+  // Pause/resume + assert-mode: forward the whole message (carries `on`/`assertType`).
+  if (msg.type === 'PAUSE_RECORDING' || msg.type === 'RESUME_RECORDING' || msg.type === 'SET_ASSERT_MODE') {
+    chrome.tabs.query({ active: true, currentWindow: true }, (tabs) => {
+      if (!tabs[0]) return;
+      chrome.tabs.sendMessage(tabs[0].id, msg, () => { void chrome.runtime.lastError; });
     });
   }
 
@@ -237,6 +248,8 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
         value: d.value,
         code: d.code,
         fullCode: d.fullCode,
+        target: d.target, // structured locator — required for non-Playwright codegen
+        assertType: d.assertType, // for recorded assertions
         sequence: d.sequence,
         timestamp: d.timestamp,
         url: d.url,
@@ -251,6 +264,7 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
 chrome.tabs.onRemoved.addListener((tabId) => {
   inspectTabs.delete(tabId);
   activePanels.delete(tabId);
+  recordingTabs.delete(tabId);
 });
 // Clean up on navigation (and sync UI)
 chrome.tabs.onUpdated.addListener((tabId, info) => {
@@ -261,5 +275,19 @@ chrome.tabs.onUpdated.addListener((tabId, info) => {
       relayToSidePanel({ type: 'STOP_INSPECT' });
     }
     activePanels.delete(tabId);
+  }
+  // Re-arm recording after a full-page navigation so multi-page flows keep capturing.
+  // The content script (re-injected by the manifest on load) records a fresh goto on start.
+  if (info.status === 'complete' && recordingTabs.has(tabId)) {
+    chrome.tabs.sendMessage(tabId, { type: 'START_RECORDING', rearm: true }, () => {
+      if (chrome.runtime.lastError) {
+        chrome.scripting.executeScript({ target: { tabId }, files: CONTENT_SCRIPT_FILES }, () => {
+          void chrome.runtime.lastError;
+          setTimeout(() => {
+            chrome.tabs.sendMessage(tabId, { type: 'START_RECORDING', rearm: true }, () => void chrome.runtime.lastError);
+          }, 80);
+        });
+      }
+    });
   }
 });

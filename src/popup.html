@@ -5,248 +5,127 @@
   <meta charset="UTF-8" />
   <title>LocatorLens</title>
   <style>
-    /* 🛸 Lumina Cyber HUD Masterpiece Edition 🛸 */
-    @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@500;700&display=swap');
-
-    :root {
-      --bg: #070d1f;
-      --surf: #11192e;
-      --surf2: #1c253e;
-      --surf-low: #0c1326;
-      --border: rgba(65, 71, 91, 0.4);
-      --primary: #3adffa;
-      --primary-dim: rgba(58, 223, 250, 0.4);
-      --secondary: #dae2fd;
-      --tertiary: #47c4ff;
-      --text: #dfe4fe;
-      --muted: #a5aac2;
-      --error: #ff716c;
-      --warn: #fb923c;
+    /* LocatorLens — design tokens (matches the side panel: warm cream + deep teal). */
+    :root,
+    [data-theme="light"] {
+      --bg:#F7F5EE;--canvas:#FAF9F5;--surface:#FFFFFF;--surface-2:#F2EFE6;--surface-3:#ECE8DC;--hover:#F0ECDF;--border:#E3DECF;--border-strong:#D2CCBA;
+      --text:#1A1915;--text-strong:#100F0C;--text-muted:#6B665B;--text-faint:#948E80;
+      --brand:#1F6A6F;--brand-strong:#155257;--brand-soft:#E3EEEE;--brand-soft-2:#CFE2E3;--on-brand:#FFFFFF;
+      --success:#2F7A4E;--success-soft:#E0EFE5;--danger:#B83A2E;--danger-soft:#F7E1DD;
+      --shadow-sm:0 1px 2px rgba(40,33,20,0.04);--shadow:0 1px 3px rgba(40,33,20,0.06),0 2px 8px rgba(40,33,20,0.04);--ring:0 0 0 3px rgba(31,106,111,0.18);
+      --r-sm:6px;--r-md:8px;--r-lg:12px;--r-pill:999px;
     }
-
-    * {
-      box-sizing: border-box;
-      margin: 0;
-      padding: 0;
+    [data-theme="dark"] {
+      --bg:#1B1A17;--canvas:#201F1B;--surface:#26241F;--surface-2:#2E2C26;--surface-3:#36332C;--hover:#312E27;--border:#383530;--border-strong:#4A463E;
+      --text:#ECE7DA;--text-strong:#FAF6EA;--text-muted:#9C968A;--text-faint:#6E695F;
+      --brand:#6FB9BE;--brand-strong:#95D2D6;--brand-soft:#1F3536;--brand-soft-2:#28494B;--on-brand:#0F2425;
+      --success:#7FBE9C;--success-soft:#1F3327;--danger:#E08A7E;--danger-soft:#3A2320;
+      --shadow-sm:0 1px 2px rgba(0,0,0,0.3);--shadow:0 1px 3px rgba(0,0,0,0.4),0 2px 8px rgba(0,0,0,0.25);--ring:0 0 0 3px rgba(111,185,190,0.25);
     }
+    @media (prefers-color-scheme: dark) {
+      :root:not([data-theme]) {
+        --bg:#1B1A17;--canvas:#201F1B;--surface:#26241F;--surface-2:#2E2C26;--surface-3:#36332C;--hover:#312E27;--border:#383530;--border-strong:#4A463E;
+        --text:#ECE7DA;--text-strong:#FAF6EA;--text-muted:#9C968A;--text-faint:#6E695F;
+        --brand:#6FB9BE;--brand-strong:#95D2D6;--brand-soft:#1F3536;--brand-soft-2:#28494B;--on-brand:#0F2425;
+        --success:#7FBE9C;--success-soft:#1F3327;--danger:#E08A7E;--danger-soft:#3A2320;
+      }
+    }
+    :root, [data-theme="light"], [data-theme="dark"] { --primary:var(--brand); --muted:var(--text-muted); --error:var(--danger); }
 
+    *, *::before, *::after { box-sizing: border-box; }
+    * { margin: 0; padding: 0; }
     body {
       width: 320px;
       background: var(--bg);
       color: var(--text);
-      font-family: 'Inter', system-ui, sans-serif;
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', system-ui, sans-serif;
       font-size: 13px;
-      overflow: hidden;
-      position: relative;
+      -webkit-font-smoothing: antialiased;
     }
+    button { font: inherit; color: inherit; cursor: pointer; border: none; background: none; }
+    svg { flex-shrink: 0; }
+    button:focus-visible { outline: 2px solid var(--brand-strong); outline-offset: 2px; }
 
-    /* ── The Scanline Overlay ── */
-    body::before {
-      content: " ";
-      display: block;
-      position: fixed;
-      top: 0; left: 0; bottom: 0; right: 0;
-      background: linear-gradient(rgba(18, 16, 16, 0) 50%, rgba(0, 0, 0, 0.25) 50%), linear-gradient(90deg, rgba(255, 0, 0, 0.04), rgba(0, 255, 0, 0.02), rgba(0, 0, 255, 0.04));
-      z-index: 1000;
-      background-size: 100% 2px, 3px 100%;
-      pointer-events: none;
-      opacity: 0.12;
-    }
-
-    /* ── Header ── */
     .header {
-      background: var(--surf);
-      padding: 14px 18px;
-      display: flex;
-      align-items: center;
-      gap: 12px;
-      border-bottom: 0.5px solid var(--border);
+      display: flex; align-items: center; gap: 11px;
+      padding: 12px 14px;
+      background: var(--surface);
+      border-bottom: 1px solid var(--border);
     }
-
-    .logo {
-      font-size: 18px;
-      flex-shrink: 0;
+    .brand-mark {
+      width: 32px; height: 32px;
+      display: inline-flex; align-items: center; justify-content: center;
+      border-radius: var(--r-md);
+      background: var(--brand-soft); color: var(--brand);
     }
+    .brand-mark svg { width: 18px; height: 18px; }
+    .brand { flex: 1; min-width: 0; }
+    .brand-name { font-weight: 700; font-size: 14px; letter-spacing: -0.01em; color: var(--text-strong); }
+    .brand-sub { font-size: 10px; color: var(--text-muted); margin-top: 1px; }
+    .status-dot { width: 8px; height: 8px; border-radius: var(--r-pill); background: var(--text-faint); transition: background .2s ease, box-shadow .2s ease; }
+    .status-dot.active { background: var(--success); box-shadow: 0 0 0 3px var(--success-soft); }
 
-    .brand {
-      flex: 1;
-    }
-
-    .brand-name {
-      font-weight: 700;
-      font-size: 14px;
-      letter-spacing: -0.02em;
-    }
-
-    .brand-sub {
-      font-size: 9px;
-      color: var(--muted);
-      text-transform: uppercase;
-      letter-spacing: 0.1em;
-      margin-top: 1px;
-    }
-
-    .status-dot {
-      width: 6px;
-      height: 6px;
-      border-radius: 50%;
-      background: var(--muted);
-      transition: all .3s;
-    }
-
-    .status-dot.active {
-      background: var(--primary);
-      box-shadow: 0 0 10px var(--primary);
-      animation: pulse 2s infinite linear;
-    }
-
-    @keyframes pulse {
-      0% { opacity: 1; box-shadow: 0 0 6px var(--primary); }
-      50% { opacity: 0.7; box-shadow: 0 0 14px var(--primary); }
-      100% { opacity: 1; box-shadow: 0 0 6px var(--primary); }
-    }
-
-    .logo {
-      font-size: 20px;
-      animation: glitchGlow 4s infinite linear;
-      text-shadow: 0 0 5px var(--primary);
-    }
-
-    @keyframes glitchGlow {
-      0%, 100% { opacity: 1; filter: hue-rotate(0deg); text-shadow: 0 0 5px var(--primary); }
-      92% { opacity: 1; filter: hue-rotate(0deg); }
-      94% { opacity: 0.8; filter: hue-rotate(90deg); text-shadow: 2px 0 red, -2px 0 map; }
-      96% { opacity: 1; filter: hue-rotate(0deg); }
-    }
-
-    /* ── Action Matrix ── */
-    .btn-wrap {
-      padding: 18px 18px 12px;
-      display: flex;
-      flex-direction: column;
-      gap: 10px;
-    }
-
+    .btn-wrap { padding: 14px; display: flex; flex-direction: column; gap: 10px; }
     .inspect-btn {
-      width: 100%;
-      background: var(--primary);
-      color: var(--bg);
-      border: none;
-      padding: 12px 16px;
-      border-radius: 4px;
-      font-size: 12px;
-      font-weight: 700;
-      text-transform: uppercase;
-      letter-spacing: 0.05em;
-      cursor: pointer;
-      display: flex;
-      align-items: center;
-      justify-content: center;
-      gap: 10px;
-      box-shadow: 0 0 15px var(--primary-dim);
-      transition: all .2s cubic-bezier(0.4, 0, 0.2, 1);
+      width: 100%; min-height: 38px;
+      display: inline-flex; align-items: center; justify-content: center; gap: 8px;
+      border: 1px solid var(--brand); border-radius: var(--r-md);
+      background: var(--brand); color: var(--on-brand);
+      padding: 9px 13px; font-weight: 700; font-size: 12px;
+      box-shadow: var(--shadow-sm);
+      transition: background .16s ease, border-color .16s ease, transform .16s ease;
     }
-
-    .inspect-btn:hover {
-      transform: translateY(-2px);
-      box-shadow: 0 0 25px var(--primary), inset 0 0 8px rgba(255,255,255,0.3);
-    }
-
-    .inspect-btn:active {
-      transform: translateY(0);
-      filter: brightness(0.9);
-    }
-
-    .inspect-btn.active {
-      background: var(--surf2);
-      color: var(--error);
-      box-shadow: 0 0 15px rgba(255, 113, 108, 0.2);
-      border: 1px solid var(--error);
-    }
+    .inspect-btn:hover { background: var(--brand-strong); border-color: var(--brand-strong); transform: translateY(-1px); }
+    .inspect-btn:active { transform: translateY(0); }
+    .inspect-btn.active { background: var(--danger-soft); color: var(--danger); border-color: var(--danger); box-shadow: none; }
 
     .panel-btn {
-      width: 100%;
-      background: var(--surf-low);
-      border: 1px solid var(--border);
-      color: var(--text);
-      padding: 10px 16px;
-      border-radius: 4px;
-      font-size: 11px;
-      font-weight: 600;
-      text-transform: uppercase;
-      letter-spacing: 0.05em;
-      cursor: pointer;
-      display: flex;
-      align-items: center;
-      justify-content: center;
-      gap: 8px;
-      transition: all .2s;
+      width: 100%; min-height: 36px;
+      display: inline-flex; align-items: center; justify-content: center; gap: 8px;
+      border: 1px solid var(--border); border-radius: var(--r-md);
+      background: var(--surface); color: var(--text-muted);
+      padding: 8px 13px; font-weight: 600; font-size: 11px;
+      transition: background .16s ease, color .16s ease, border-color .16s ease;
     }
-
-    .panel-btn:hover {
-      border-color: var(--primary);
-      color: var(--primary);
-      background: var(--surf);
-      box-shadow: 0 0 10px rgba(58, 223, 250, 0.1);
-    }
+    .panel-btn:hover { background: var(--brand-soft); color: var(--brand); border-color: var(--brand-soft-2); }
 
     .hint-row {
-      padding: 0 18px 8px;
-      font-size: 10px;
-      color: var(--muted);
-      text-align: center;
+      margin: 0 14px 10px;
+      padding: 8px 10px;
+      background: var(--surface-2); border: 1px solid var(--border); border-radius: var(--r-md);
+      color: var(--text-muted); font-size: 11px; text-align: center;
       display: none;
-      text-transform: uppercase;
-      letter-spacing: 0.05em;
     }
+    .hint-row span { color: var(--brand); font-weight: 600; }
 
-    .hint-row span {
-      color: var(--primary);
-    }
-
-    /* ── Capability Matrix ── */
     .capabilities {
-      margin: 12px 18px 24px;
-      background: var(--surf-low);
-      border: 1px solid var(--border);
-      border-radius: 4px;
-      padding: 14px;
-      display: flex;
-      flex-direction: column;
-      gap: 10px;
+      margin: 0 14px 14px;
+      background: var(--surface); border: 1px solid var(--border); border-radius: var(--r-lg);
+      box-shadow: var(--shadow-sm);
+      padding: 6px;
     }
-
-    .cap-row {
-      display: flex;
-      align-items: center;
-      gap: 12px;
-      font-size: 11px;
-      color: var(--muted);
-      line-height: 1.5;
-    }
-
+    .cap-row { display: flex; align-items: flex-start; gap: 11px; padding: 9px 8px; font-size: 11px; color: var(--text-muted); line-height: 1.45; }
+    .cap-row + .cap-row { border-top: 1px solid var(--border); }
     .cap-icon {
-      font-size: 14px;
-      color: var(--primary);
-      width: 20px;
-      text-align: center;
+      width: 26px; height: 26px; flex-shrink: 0;
+      display: inline-flex; align-items: center; justify-content: center;
+      border-radius: var(--r-md); background: var(--brand-soft); color: var(--brand);
     }
-
-    .cap-label {
-      font-weight: 500;
-      color: var(--text);
-    }
+    .cap-icon svg { width: 14px; height: 14px; }
+    .cap-label { display: block; font-weight: 700; color: var(--text-strong); margin-bottom: 1px; }
   </style>
 </head>
 
 <body>
   <div class="header">
-    <div class="logo">🥷</div>
+    <div class="brand-mark" aria-hidden="true">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="7"/><path d="m21 21-4.3-4.3"/></svg>
+    </div>
     <div class="brand">
       <div class="brand-name">LocatorLens</div>
       <div class="brand-sub">Playwright locators · v1.1.6</div>
     </div>
-    <div class="status-dot" id="statusDot"></div>
+    <div class="status-dot" id="statusDot" title="Inspector status"></div>
   </div>
 
   <div class="btn-wrap">
@@ -255,26 +134,26 @@
       <span id="btnText">Start Inspecting</span>
     </button>
     <button class="panel-btn" id="panelBtn">
-      <span>📋</span>
+      <span aria-hidden="true">▦</span>
       <span id="panelBtnText">Open Results Panel</span>
     </button>
   </div>
   <div class="hint-row" id="hintRow">
-    SELECT TARGET · <span>▲▼ ARROW TO NAVIGATE</span> · <span>ESC TO ABORT</span>
+    Select a target · <span>▲▼ arrow to navigate</span> · <span>Esc to abort</span>
   </div>
 
   <div class="capabilities">
     <div class="cap-row">
-      <span class="cap-icon">🎯</span>
-      <div><span class="cap-label">Targeting Mode</span><br>Precision hover detection</div>
+      <span class="cap-icon" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="8"/><path d="M12 2v3M12 19v3M2 12h3M19 12h3"/><circle cx="12" cy="12" r="2" fill="currentColor"/></svg></span>
+      <div><span class="cap-label">Inspect</span>Hover any element for ranked Playwright locators.</div>
     </div>
     <div class="cap-row">
-      <span class="cap-icon">⚡</span>
-      <div><span class="cap-label">Auto-Copy</span><br>Instant clipboard sync</div>
+      <span class="cap-icon" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"/><circle cx="12" cy="12" r="3.5" fill="currentColor" stroke="none"/></svg></span>
+      <div><span class="cap-label">Record</span>Capture a flow and export a Playwright test script.</div>
     </div>
     <div class="cap-row">
-      <span class="cap-icon">🛰️</span>
-      <div><span class="cap-label">Cross-Browser</span><br>Optimized for store release</div>
+      <span class="cap-icon" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><rect x="4" y="11" width="16" height="10" rx="2"/><path d="M8 11V7a4 4 0 0 1 8 0v4"/></svg></span>
+      <div><span class="cap-label">Local</span>Everything runs in your browser — nothing is sent away.</div>
     </div>
   </div>
 
