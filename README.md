@@ -1,10 +1,10 @@
-# LocatorLens — Playwright locator HUD
+# LocatorLens — locator inspector & test recorder
 
 [![Chrome](https://img.shields.io/badge/Chrome-Ready-green?logo=google-chrome&logoColor=white)]()
 [![Firefox](https://img.shields.io/badge/Firefox-Ready-orange?logo=firefox-browser&logoColor=white)]()
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 
-**LocatorLens** is a browser extension for **Playwright**-oriented test automation: inspect any element, get **ranked locators** with short explanations, validate selectors, record flows, and build **page objects** and **test scaffolds** from the side panel.
+**LocatorLens** is a browser extension for end-to-end test authoring: inspect any element to get **ranked, uniqueness-checked locators**, validate selectors, and **record a flow into a runnable test** — all from the side panel. Output targets **Playwright, Selenium, or Cypress** in **TypeScript, JavaScript, or Python** (Cypress is JS/TS only).
 
 Extension version is defined in `manifest.json` (currently **1.1.6**).
 
@@ -12,10 +12,14 @@ Extension version is defined in `manifest.json` (currently **1.1.6**).
 
 ## Key features
 
+### Frameworks & languages
+- Pick a **framework** (Playwright · Selenium · Cypress) and **language** (TypeScript · JavaScript · Python) from the side-panel bar — inspector cards and recorder output update instantly. Cypress is JS/TS only (Python is shown but disabled).
+- Translation lives in `codegen.js`, a pure module shared by the inspector, the recorder, and the right-click “Copy Best Locator”.
+
 ### Inspector and ranked locators
-- Semantic-first ranking (`getByTestId`, `getByRole`, `getByLabel`, etc.) via `content-locator-engine.js`.
-- Side panel shows stability hints, accessibility notes where available, and “why this locator” copy.
-- **Playwright-only** output: no Selenium or Cypress code paths in the product UI.
+- Semantic-first ranking (`getByTestId`, `getByRole`, `getByLabel`, …) via `content-locator-engine.js`.
+- **Live uniqueness:** every card shows whether the locator matches **exactly one** element (✓ unique) or **several** (⚠ N matches), checked against the real page.
+- Stability hints, accessibility notes, and a “why this locator” explanation per card.
 
 ### Shadow DOM–aware picking
 - Coordinate-based deep hit testing so targets inside **open shadow roots** can be inspected and described.
@@ -27,15 +31,12 @@ Extension version is defined in `manifest.json` (currently **1.1.6**).
 - Type a CSS selector or XPath in the side panel to **highlight matches** on the active page (with counts and errors surfaced in the UI).
 
 ### Recorder (side panel)
-- Capture clicks, typing (debounced fills), and some keys; sync an editable **Playwright test** draft and copy/download.
+- Captures clicks, typing (debounced fills), selects, key presses, **hovers** (Alt+click), and **assertions** (visible / has-text / has-value / enabled / checked).
+- **Pause/resume**, **undo/redo**, a **filterable, collapsible timeline**, and recording that **survives full-page navigation**.
+- Produces an editable, **syntax-highlighted** test script in your chosen framework + language; copy or download.
 
-### POM builder
-- Add locators from cards into a **saved list**, rename inline, drag to reorder, optional **health** checks against the live page.
-- Export **TypeScript or JavaScript** page objects with optional **action methods** and **JSDoc**.
-- **Generate test** downloads a `.spec.ts` scaffold that imports from `./PageObject` (same pattern as the combined POM file you download).
-
-### Lumina-style UI
-- Dark “HUD” styling in the side panel and popup (cosmetic only; behavior is the same on all themes).
+### Clean, theme-aware UI
+- Warm, minimal side panel and popup with automatic **light/dark mode** (follows your OS preference).
 
 ---
 
@@ -63,9 +64,10 @@ From the project root: `setup.bat chrome` or `setup.bat firefox`.
 ```text
 ├── src/
 │   ├── background.js           # Extension service worker / messaging
-│   ├── content-locator-engine.js  # Locator ranking (injected first)
+│   ├── codegen.js              # Framework/language code generation (pure module)
+│   ├── content-locator-engine.js  # Locator ranking + live uniqueness (injected first)
 │   ├── content.js              # Overlay, inspect, recorder, selector lab
-│   ├── sidepanel.js / .html    # Main UI: inspect, record, POM, settings
+│   ├── sidepanel.js / .html    # Main UI: inspect + record
 │   ├── popup.js / .html        # Compact launcher
 ├── manifests/                  # Browser-specific manifest variants
 ├── graphify-out/               # Optional architecture graph (see GRAPH_REPORT.md)

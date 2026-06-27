@@ -1,23 +1,22 @@
 # LocatorLens — build process and architecture
 
-This document describes how the extension is structured and how distribution folders relate to `src/`. Feature descriptions match the **Playwright-only** implementation (side panel badge, POM TS/JS, recorder, selector lab).
+This document describes how the extension is structured and how distribution folders relate to `src/`. The product inspects elements and records flows, generating code for **Playwright / Selenium / Cypress** in **TypeScript / JavaScript / Python** (Cypress is JS/TS only).
 
 ---
 
-## 1. Lumina-style HUD (side panel / popup)
+## 1. UI (side panel / popup)
 
-- Dark theme, monospace accents, and motion used for scanlines and status—not a separate runtime.
-- Side panel is the primary surface: **Inspect**, **Record**, **POM**, **Settings** tabs.
+- Warm, minimal theme with automatic **light/dark** mode (follows the OS preference); no decorative runtime/animations.
+- Side panel is the primary surface with two tabs: **Inspect** and **Record**.
 
 ---
 
-## 2. Playwright locator pipeline
+## 2. Locator pipeline + multi-framework codegen
 
-- **`content-locator-engine.js`** (injected before `content.js`) ranks candidate locators and attaches explanations.
-- **`content.js`** handles overlay, pick, keyboard traversal, stress test messaging, recorder hooks, and selector-lab validation messages to/from the page.
-- **`sidepanel.js`** renders cards via **`formatForPlaywright()`** (pass-through of engine `code` / `fullCode`), copy buttons, POM add-from-card, and all POM/recorder logic.
-
-There is **no** in-product translation to Selenium or Cypress.
+- **`content-locator-engine.js`** (injected first) ranks candidate locators, attaches a structured `target` (kind + values) and live **uniqueness** (`matchCount` / `unique`) per candidate, plus explanations. Runs in the content script (it needs the live DOM).
+- **`codegen.js`** is a pure module (loaded as a content script *and* in the side panel) that translates a `target` + action into **Playwright / Selenium / Cypress** code for **JS / TS / Python**. `LLCodegen.isValidCombo()` blocks the impossible combo (Cypress + Python).
+- **`content.js`** handles overlay, pick, keyboard traversal, stress test, recorder hooks, selector-lab validation, and framework-aware quick-copy (context menu + click).
+- **`sidepanel.js`** renders cards via **`formatLocator()`** (native Playwright JS/TS, else `codegen`), the uniqueness badges, and all recorder logic; the chosen framework/language is persisted in `chrome.storage.local`.
 
 ---
 
@@ -43,11 +42,11 @@ There is **no** in-product translation to Selenium or Cypress.
 
 ---
 
-## 6. POM and test scaffold
+## 6. Recorder and test-script export
 
-- Saved elements live in **`chrome.storage.local`** (`savedPOMElements`).
-- **generatePOMCode** emits Playwright **TypeScript** (with `Locator` types) or **JavaScript** page objects; optional **inferActions** helpers use **`expect`** when action methods are enabled.
-- **generateTestScaffold** emits a **`.spec.ts`** file that imports page classes from **`./PageObject`** (align your download filename with your repo layout).
+- Recorded actions (with their structured `target`) live in **`chrome.storage.local`** (`llRecorderState`) and render in a **filterable, collapsible** timeline.
+- Captures clicks, fills, selects, key presses, **hover** (Alt+click), and **assertions** (visible / has-text / has-value / enabled / checked); supports **pause/resume** and **undo/redo**, and **re-arms after full-page navigation** (background tracks recording tabs).
+- **generateTestScript** runs each step through `codegen` and wraps it in the right scaffold for the chosen framework/language; the editable, syntax-highlighted editor's current text is what **Copy** / **Download** use.
 
 ---
 
