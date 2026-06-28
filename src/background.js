@@ -177,9 +177,9 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
       if (!tabs[0]) return;
       const tabId = tabs[0].id;
       const finish = (res) => {
-        if (res && res.data) {
-          relayToSidePanel({ type: 'STRESS_TEST_RESULT', data: res.data });
-        }
+        // Always relay something so the side-panel button never hangs on "Testing…".
+        const data = (res && res.data) ? res.data : { survived: false, unavailable: true };
+        relayToSidePanel({ type: 'STRESS_TEST_RESULT', data });
       };
       chrome.tabs.sendMessage(tabId, { type: 'RUN_STRESS_TEST' }, (res) => {
         if (chrome.runtime.lastError) {
@@ -192,6 +192,26 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
           return;
         }
         finish(res);
+      });
+    });
+  }
+
+  // 🔬 SELECTOR LAB: relay validate/clear to the active tab's content script.
+  // (Side panel uses runtime.sendMessage, which never reaches content scripts on its own.)
+  if (msg.type === 'LAB_VALIDATE' || msg.type === 'LAB_CLEAR') {
+    chrome.tabs.query({ active: true, currentWindow: true }, (tabs) => {
+      if (!tabs[0]) return;
+      const tabId = tabs[0].id;
+      chrome.tabs.sendMessage(tabId, msg, () => {
+        if (chrome.runtime.lastError) {
+          // Content script not yet present — inject, then retry.
+          chrome.scripting.executeScript({ target: { tabId }, files: CONTENT_SCRIPT_FILES }, () => {
+            void chrome.runtime.lastError;
+            setTimeout(() => {
+              chrome.tabs.sendMessage(tabId, msg, () => void chrome.runtime.lastError);
+            }, 100);
+          });
+        }
       });
     });
   }

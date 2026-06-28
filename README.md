@@ -28,7 +28,16 @@ Extension version is defined in `manifest.json` (currently **1.1.6**).
 - **Arrow Up / Down** to move between parent and child elements; **Escape** to stop.
 
 ### Selector lab
-- Type a CSS selector or XPath in the side panel to **highlight matches** on the active page (with counts and errors surfaced in the UI).
+- Type a **CSS selector**, an **XPath**, or a **full Playwright locator** in the side panel to **highlight matches** on the active page (with counts and errors surfaced in the UI). The first match is scrolled into view, and the status line names the method that resolved it (e.g. *“via getByRole()”*).
+- **Playwright locators are resolved live against the DOM** — paste a generated line verbatim, including `await`, the `page.` handle, and a trailing action, and the Lab strips the boilerplate and highlights the target:
+  ```js
+  await page.getByRole('textbox', { name: 'Username or Email' }).fill('your value');
+  ```
+  Supported: `getByRole` (with `name` / `exact`), `getByLabel`, `getByPlaceholder`, `getByText`, `getByTestId`, `getByTitle`, `getByAltText`, and `locator('css' | '//xpath')` — plus chained scoping (`a.locator(b)`), positional reducers (`.first()` / `.last()` / `.nth(n)`), and `.filter({ hasText })`.
+
+### Stress test
+- Pick an element, then click **💥 Stress Test** to check whether it stays **locatable without its `id`/`class`** — i.e. whether its semantic role + accessible name uniquely identify it on the page. The result names what was tested (tag · role · name) and reports **Yes ✅ / No ❌**.
+- Operates on the **element you picked** (it persists after you stop inspecting), guides you when nothing is selected, and reports clearly when a page can’t be reached (e.g. `chrome://`, the Web Store, PDFs).
 
 ### Recorder (side panel)
 - Captures clicks, typing (debounced fills), selects, key presses, **hovers** (Alt+click), and **assertions** (visible / has-text / has-value / enabled / checked).
@@ -76,6 +85,20 @@ From the project root: `setup.bat chrome` or `setup.bat firefox`.
 ```
 
 ---
+
+## Permissions
+
+LocatorLens requests only what it needs to inspect pages and drive the side panel locally — there is no network/host call to any LocatorLens server.
+
+| Permission | Why it’s needed |
+|---|---|
+| `activeTab` | act on the tab you’re currently viewing |
+| `scripting` + host access (`<all_urls>`) | inject the inspector/recorder content scripts into the page you’re testing |
+| `storage` | remember your last pick, recorder timeline, and framework/language choice |
+| `contextMenus` | the right-click “Copy Best Locator” / “Open Panel” entries |
+| `sidePanel` (Chrome) · `sidebar_action` (Firefox) | the side-panel / sidebar surface |
+
+Cross-browser: the same `src/` runs on both; Chrome loads a service-worker background, Firefox a module background script, and the Firefox manifest declares `gecko.id`, `strict_min_version: 142.0`, and `data_collection_permissions: none`. See `build_process.md` §11 for the full breakdown.
 
 ## Engineering notes
 

@@ -14,6 +14,7 @@
   let tooltip = null;
   let traversalBar = null;
   let lastRightClickedEl = null;
+  let lastPickedEl = null; // last element the user actually picked (survives stop-inspect for Stress Test)
   let customTestAttributes = ['data-testid', 'data-qa', 'data-cy', 'data-test', 'data-automation-id', 'data-e2e'];
 
   // Recorder modes (driven by the side panel via messages)
@@ -886,6 +887,8 @@
     const el = getDeepElementAt(e.clientX, e.clientY);
     if (!el || el === overlay || el === tooltip) return;
 
+    lastPickedEl = el; // remember for Stress Test even after inspect stops
+
     const result = generateLocators(el);
 
     const bestCode = result.locators[0] ? copyLocatorCode(result.locators[0]) : '';
@@ -1038,10 +1041,152 @@
     else if (msg.type === 'LAB_VALIDATE') {
       const { selector } = msg;
       let matches = [];
+      let via = null;
       document.querySelectorAll('.ll-lab-highlight').forEach(el => el.classList.remove('ll-lab-highlight'));
 
+      // Resolve a pasted Playwright locator chain — e.g.
+      //   await page.getByRole('textbox', { name: 'Username or Email' }).fill('x');
+      // — down to the DOM element(s) it targets. Returns null for plain CSS/XPath.
+      const resolvePlaywrightLocator = (raw) => {
+        const E = globalThis.__LocatorLensEngine;
+        let s = String(raw || '').trim();
+        if (!/\b(getBy[A-Z]\w*|locator|frameLocator)\s*\(/.test(s)) return null;
+
+        // Strip the boilerplate around the locator chain.
+        s = s.replace(/;\s*$/, '').trim();
+        s = s.replace(/^await\s+/, '');
+        s = s.replace(/^(?:const|let|var)\s+[\w$]+\s*=\s*/, '');
+        s = s.replace(/^await\s+/, '');
+        s = s.replace(/^(?:this\s*\.\s*)?(?:page|component)\b\s*/, '');
+        s = s.replace(/^\.\s*/, '');
+        s = '.' + s; // so the scanner picks up the first call too
+
+        // Split the chain into .method(args) segments (quote/paren aware).
+        const segs = [];
+        let i = 0;
+        while (i < s.length) {
+          const m = /\.([A-Za-z_$][\w$]*)\s*\(/.exec(s.slice(i));
+          if (!m) break;
+          const open = i + m.index + m[0].length - 1;
+          let depth = 0, j = open, str = null;
+          for (; j < s.length; j++) {
+            const c = s[j];
+            if (str) { if (c === '\\') { j++; } else if (c === str) str = null; continue; }
+            if (c === '"' || c === "'" || c === '`') str = c;
+            else if (c === '(') depth++;
+            else if (c === ')') { if (--depth === 0) { j++; break; } }
+          }
+          segs.push({ method: m[1], args: s.slice(open + 1, j - 1) });
+          i = j;
+        }
+        if (!segs.length) return null;
+
+        const firstStr = (args) => {
+          const m = /(['"`])((?:\\.|(?!\1)[\s\S])*?)\1/.exec(args);
+          return m ? m[2].replace(/\\(['"`])/g, '$1') : null;
+        };
+        const opt = (args, key) => {
+          const m = new RegExp(key + "\\s*:\\s*(?:(['\"`])((?:\\\\.|(?!\\1)[\\s\\S])*?)\\1|(true|false)|(\\d+))").exec(args);
+          if (!m) return undefined;
+          if (m[2] !== undefined) return m[2].replace(/\\(['"`])/g, '$1');
+          if (m[3] !== undefined) return m[3] === 'true';
+          if (m[4] !== undefined) return parseInt(m[4], 10);
+          return undefined;
+        };
+        const norm = (t) => String(t == null ? '' : t).replace(/\s+/g, ' ').trim();
+        const matchText = (actual, expected, exact) => {
+          const a = norm(actual), e = norm(expected);
+          return exact ? a === e : a.toLowerCase().includes(e.toLowerCase());
+        };
+        const isHidden = (el) => {
+          if (!el || el.nodeType !== 1) return true;
+          if (el.closest('[aria-hidden="true"]') || el.hasAttribute('hidden')) return true;
+          const cs = getComputedStyle(el);
+          return cs.display === 'none' || cs.visibility === 'hidden';
+        };
+        const within = (root) => Array.from((root === document ? document : root).querySelectorAll('*'));
+
+        const find = (method, args, root) => {
+          const all = within(root);
+          switch (method) {
+            case 'getByRole': {
+              const role = firstStr(args), name = opt(args, 'name'), exact = opt(args, 'exact') === true;
+              if (!role || !E) return [];
+              return all.filter(el => !isHidden(el) && E.getRole(el) === role &&
+                (name == null || matchText(E.getAccessibleName(el), name, exact)));
+            }
+            case 'getByLabel': {
+              const t = firstStr(args), exact = opt(args, 'exact') === true;
+              if (t == null || !E) return [];
+              return all.filter(el => /^(input|select|textarea)$/i.test(el.tagName) &&
+                matchText(E.getAccessibleName(el), t, exact));
+            }
+            case 'getByPlaceholder': {
+              const t = firstStr(args), exact = opt(args, 'exact') === true;
+              if (t == null) return [];
+              return all.filter(el => el.hasAttribute('placeholder') && matchText(el.getAttribute('placeholder'), t, exact));
+            }
+            case 'getByTestId': {
+              const t = firstStr(args);
+              return t == null ? [] : all.filter(el => el.getAttribute('data-testid') === t);
+            }
+            case 'getByTitle': {
+              const t = firstStr(args), exact = opt(args, 'exact') === true;
+              if (t == null) return [];
+              return all.filter(el => el.hasAttribute('title') && matchText(el.getAttribute('title'), t, exact));
+            }
+            case 'getByAltText': {
+              const t = firstStr(args), exact = opt(args, 'exact') === true;
+              if (t == null) return [];
+              return all.filter(el => el.hasAttribute('alt') && matchText(el.getAttribute('alt'), t, exact));
+            }
+            case 'getByText': {
+              const t = firstStr(args), exact = opt(args, 'exact') === true;
+              if (t == null) return [];
+              const hit = all.filter(el => !isHidden(el) && matchText(el.innerText || el.textContent, t, exact));
+              // keep the innermost matches (Playwright targets the smallest element)
+              return hit.filter(el => !hit.some(o => o !== el && el.contains(o)));
+            }
+            case 'locator': {
+              let sel = firstStr(args);
+              if (sel == null) return [];
+              sel = sel.replace(/^css=/, '');
+              if (/^xpath=/.test(sel) || sel.startsWith('//') || sel.startsWith('(')) {
+                const xp = sel.replace(/^xpath=/, ''), out = [];
+                const r = document.evaluate(xp, root === document ? document : root, null, XPathResult.ORDERED_NODE_SNAPSHOT_TYPE, null);
+                for (let k = 0; k < r.snapshotLength; k++) out.push(r.snapshotItem(k));
+                return out;
+              }
+              try { return Array.from((root === document ? document : root).querySelectorAll(sel)); }
+              catch (e) { return []; }
+            }
+            default: return [];
+          }
+        };
+
+        const LOC = new Set(['getByRole', 'getByText', 'getByLabel', 'getByPlaceholder', 'getByTestId', 'getByTitle', 'getByAltText', 'locator']);
+        let result = [], started = false, lastLoc = null;
+        for (const seg of segs) {
+          if (LOC.has(seg.method)) {
+            const roots = started ? result : [document];
+            const next = [];
+            for (const r of roots) for (const el of find(seg.method, seg.args, r)) if (!next.includes(el)) next.push(el);
+            result = next; started = true; lastLoc = seg.method;
+          } else if (seg.method === 'first') result = result.slice(0, 1);
+          else if (seg.method === 'last') result = result.slice(-1);
+          else if (seg.method === 'nth') { const n = parseInt(firstStr(seg.args) != null ? firstStr(seg.args) : seg.args, 10) || 0; result = result[n] ? [result[n]] : []; }
+          else if (seg.method === 'filter') { const ht = opt(seg.args, 'hasText'); if (ht != null) result = result.filter(el => matchText(el.innerText || el.textContent, ht, false)); }
+          // action methods (fill/click/check/press/...) are ignored
+        }
+        return started ? { matches: result, via: lastLoc } : null;
+      };
+
       try {
-        if (selector.startsWith('//') || selector.startsWith('(')) {
+        const pw = resolvePlaywrightLocator(selector);
+        if (pw) {
+          matches = pw.matches;
+          via = pw.via;
+        } else if (selector.startsWith('//') || selector.startsWith('(')) {
           const result = document.evaluate(selector, document, null, XPathResult.ORDERED_NODE_SNAPSHOT_TYPE, null);
           for (let i = 0; i < result.snapshotLength; i++) {
             matches.push(result.snapshotItem(i));
@@ -1051,10 +1196,14 @@
         }
 
         matches.forEach(el => {
-          if (el.nodeType === Node.ELEMENT_NODE) el.classList.add('ll-lab-highlight');
+          if (el && el.nodeType === Node.ELEMENT_NODE) el.classList.add('ll-lab-highlight');
         });
 
-        chrome.runtime.sendMessage({ type: 'LAB_STATUS_UPDATE', count: matches.length });
+        if (matches[0] && matches[0].scrollIntoView) {
+          matches[0].scrollIntoView({ block: 'center', behavior: 'smooth' });
+        }
+
+        chrome.runtime.sendMessage({ type: 'LAB_STATUS_UPDATE', count: matches.length, via });
         sendResponse({ ok: true, count: matches.length });
       } catch (err) {
         chrome.runtime.sendMessage({ type: 'LAB_ERROR', error: err.message });
@@ -1067,20 +1216,28 @@
       sendResponse({ ok: true });
     }
 
-    // 💥 STRESS TEST: Check if the last picked element survives without id/class
+    // 💥 STRESS TEST: Check if the picked element survives without id/class
     else if (msg.type === 'RUN_STRESS_TEST') {
       const E = globalThis.__LocatorLensEngine;
       if (!E) {
-        sendResponse({ ok: false, data: { survived: false } });
+        sendResponse({ ok: true, data: { survived: false, unavailable: true } });
         return;
       }
-      const target = hoveredEl || lastRightClickedEl || document.body;
+
+      // Prefer the element the user actually picked; fall back to hover / right-click.
+      // Skip stale references (e.g. removed after a navigation) and never silently test <body>.
+      let target = [lastPickedEl, hoveredEl, lastRightClickedEl].find(el => el && el.isConnected);
+      if (!target) {
+        sendResponse({ ok: true, data: { survived: false, noTarget: true } });
+        return;
+      }
+
       const role = E.getRole(target);
       const name = E.getAccessibleName(target);
+      const tag = target.tagName.toLowerCase();
       let survived = false;
 
       if (role && name) {
-        const tag = target.tagName.toLowerCase();
         const candidates = document.querySelectorAll(tag);
         let semanticMatches = 0;
         for (const c of candidates) {
@@ -1089,11 +1246,9 @@
           }
         }
         survived = semanticMatches === 1;
-      } else if (role) {
-        survived = false;
       }
 
-      sendResponse({ ok: true, data: { survived } });
+      sendResponse({ ok: true, data: { survived, role, name, tag } });
     }
   });
 })();

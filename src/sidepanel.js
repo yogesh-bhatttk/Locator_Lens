@@ -487,12 +487,14 @@ function handleRuntimeMessage(msg) {
       const statusEl = document.getElementById('lab-status');
       const countEl = document.getElementById('lab-count');
       if (msg.count > 0) {
-        statusEl.textContent = `Identification successful. Found ${msg.count} match(es).`;
+        statusEl.textContent = `Identification successful. Found ${msg.count} match(es).` + (msg.via ? ` · via ${msg.via}()` : '');
         statusEl.className = 'lab-status success';
         countEl.textContent = `(${msg.count})`;
         countEl.style.display = 'inline';
       } else {
-        statusEl.textContent = 'No matches found in the current DOM.';
+        statusEl.textContent = msg.via
+          ? `Parsed ${msg.via}() but found no matches in the current DOM.`
+          : 'No matches found in the current DOM.';
         statusEl.className = 'lab-status err';
         countEl.style.display = 'none';
       }
@@ -506,7 +508,18 @@ function handleRuntimeMessage(msg) {
   if (msg.type === 'STRESS_TEST_RESULT') {
     const btn = document.getElementById('stressTestBtn');
     btn.textContent = '💥 Stress Test';
-    alert(`Stress Test Complete!\nElement locatable without classes/id? ${msg.data.survived ? 'Yes ✅' : 'No ❌'}`);
+    if (window._llStressTimer) { clearTimeout(window._llStressTimer); window._llStressTimer = null; }
+    const d = msg.data || {};
+    if (d.unavailable) {
+      alert("Stress Test: couldn't reach this page. It may be a restricted page (chrome://, the Web Store, a PDF) or not fully loaded — try a normal http(s) page and reload.");
+      return;
+    }
+    if (d.noTarget) {
+      alert('Stress Test: no element selected. Turn on Inspect and click an element first, then run the Stress Test.');
+      return;
+    }
+    const what = d.role ? `\nTarget: <${d.tag || '?'}> · role="${d.role}"${d.name ? ` · name="${d.name}"` : ''}` : '';
+    alert(`Stress Test Complete!${what}\nElement locatable without classes/id? ${d.survived ? 'Yes ✅' : 'No ❌'}`);
   }
   if (msg.type === 'RECORDED_ACTION' && msg.data) {
     appendToRecorder(msg.data);
@@ -544,6 +557,13 @@ document.addEventListener('DOMContentLoaded', () => {
   document.getElementById('stressTestBtn').addEventListener('click', () => {
     const btn = document.getElementById('stressTestBtn');
     btn.textContent = 'Testing...';
+    // Safety net: reset the button even if no result ever comes back (e.g. tab closed mid-run).
+    if (window._llStressTimer) clearTimeout(window._llStressTimer);
+    window._llStressTimer = setTimeout(() => {
+      btn.textContent = '💥 Stress Test';
+      window._llStressTimer = null;
+      alert('Stress Test timed out — no response from the page. Reload the page and try again.');
+    }, 5000);
     chrome.runtime.sendMessage({ type: 'RUN_STRESS_TEST' });
   });
 
