@@ -20,18 +20,60 @@ let _recFilterTimer = null;
 
 
 
-// ── Safe DOM renderer (avoids innerHTML for AMO compliance) ───────────────────
+// ── Safe DOM renderer ─────────────────────────────────────────────────────────
+// Parses a trusted markup template off-document and adopts the nodes. DOMParser
+// alone is NOT equivalent to sanitisation: <script> stays inert, but event-handler
+// content attributes (onerror, onclick, …) are compiled once the node is adopted
+// into this live document, so a parsed-then-appended string behaves like innerHTML.
+// Every caller here builds markup from esc()'d values, and this scrub is the
+// backstop that keeps that an invariant rather than a convention.
+var ALLOWED_URI_ATTRS = ['href', 'src', 'xlink:href', 'action', 'formaction'];
+
+function scrubNode(node) {
+  if (node.nodeType !== 1) return;
+  // Drop executable and navigational elements outright.
+  var tag = node.tagName.toLowerCase();
+  if (tag === 'script' || tag === 'iframe' || tag === 'object' || tag === 'embed' || tag === 'link') {
+    node.remove();
+    return;
+  }
+  var attrs = Array.prototype.slice.call(node.attributes);
+  for (var i = 0; i < attrs.length; i++) {
+    var name = attrs[i].name.toLowerCase();
+    var value = attrs[i].value;
+    if (name.indexOf('on') === 0) {
+      node.removeAttribute(attrs[i].name); // onerror/onclick/… never survive
+    } else if (ALLOWED_URI_ATTRS.indexOf(name) !== -1 && /^\s*(javascript|data|vbscript):/i.test(value)) {
+      node.removeAttribute(attrs[i].name);
+    }
+  }
+  var children = Array.prototype.slice.call(node.children);
+  for (var j = 0; j < children.length; j++) scrubNode(children[j]);
+}
+
 function safeRender(el, html) {
   el.textContent = '';
-  var doc = new DOMParser().parseFromString(html, 'text/html');
+  var doc = new DOMParser().parseFromString(String(html), 'text/html');
+  var kids = Array.prototype.slice.call(doc.body.childNodes);
+  for (var i = 0; i < kids.length; i++) scrubNode(kids[i]);
   while (doc.body.firstChild) el.appendChild(doc.body.firstChild);
 }
 let lastResultData = null;
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 function esc(s) {
-  return String(s || '')
-    .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+  return String(s == null ? '' : s)
+    .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;').replace(/'/g, '&#39;');
+}
+
+// Escape for *element content* only. Deliberately leaves ' and " alone: hl()'s
+// output is inserted as a node's children, never into an attribute value, and the
+// string-literal regex below needs the real quote characters to find literals.
+// Anything bound for an attribute must use esc() instead.
+function escHighlight(s) {
+  return String(s == null ? '' : s)
+    .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
 }
 
 // Syntax highlighter shared by the locator cards and the Generated Test Script.
@@ -40,8 +82,8 @@ function esc(s) {
 // kept intact. Covers Playwright / Selenium / Cypress across JS / TS / Python.
 function hl(code) {
   const SENT = String.fromCharCode(0); // sentinel — never appears in code
-  let s = esc(code); // escapes & < > "  (single quotes stay literal)
-  const STR_RE = /'(?:\\.|[^'\n])*'|&quot;(?:\\&quot;|(?!&quot;)[^\n])*&quot;/g;
+  let s = escHighlight(code);
+  const STR_RE = /'(?:\\.|[^'\n])*'|"(?:\\.|[^"\n])*"/g;
   const strs = [];
   s = s.replace(STR_RE, (m) => { strs.push(m); return SENT; });
   s = s
@@ -355,7 +397,7 @@ function renderResults(data) {
     a11yContainer.style.display = 'block';
     safeRender(a11yContainer, a11y.map(issue => `
       <div class="a11y-row">
-        <span class="a11y-severity ${issue.severity === 'high' ? 'high' : 'low'}">${issue.severity}</span>
+        <span class="a11y-severity ${issue.severity === 'high' ? 'high' : 'low'}">${esc(issue.severity)}</span>
         <div class="a11y-msg">${esc(issue.message)}</div>
       </div>
     `).join(''));
@@ -458,9 +500,10 @@ function renderResults(data) {
 
 // ── Event handlers ─────────────────────────────────────────────────────────────
 function handleCopy(btn) {
-  const code = btn.getAttribute('data-code')
-    .replace(/&amp;/g, '&').replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/&quot;/g, '"');
-  copyToClipboard(code, btn);
+  // getAttribute() already returns the decoded value — the parser resolved the
+  // entities esc() wrote. Decoding a second time corrupted any literal entity in
+  // the user's own code (e.g. a selector containing "&amp;lt;" collapsed to "<").
+  copyToClipboard(btn.getAttribute('data-code') || '', btn);
 }
 
 function toggleExplain(btn) {
@@ -989,17 +1032,42 @@ function scheduleRecorderPersist() {
   _recorderSaveTimer = setTimeout(persistRecorderState, 200);
 }
 
+// chrome.storage.local is a 10 MB budget shared with everything else the extension
+// stores. A long recording session used to grow the payload without limit and the
+// failing set() reported through lastError that nobody read — so the timeline
+// silently stopped surviving a panel reopen. Trim the oldest entries instead.
+const LL_MAX_PERSISTED_ACTIONS = 500;
+const LL_MAX_SEEN_KEYS = 2000;
+
 function persistRecorderState() {
   if (!chrome.storage || !chrome.storage.local) return;
   const ta = document.getElementById('codePreview');
   const codePreview = ta && ta.style.display !== 'none' ? getPreviewText(ta) : '';
+  const actions = recordedActions.length > LL_MAX_PERSISTED_ACTIONS
+    ? recordedActions.slice(-LL_MAX_PERSISTED_ACTIONS)
+    : recordedActions;
+  const seenKeys = Array.from(seenActionKeys).slice(-LL_MAX_SEEN_KEYS);
+
   chrome.storage.local.set({
     [LL_RECORDER_STATE_KEY]: {
-      actions: recordedActions,
-      seenKeys: Array.from(seenActionKeys),
+      actions: actions,
+      seenKeys: seenKeys,
       codePreview: codePreview,
       lastPageUrl: recLastPageUrl
     }
+  }, () => {
+    const err = chrome.runtime.lastError;
+    if (!err) return;
+    // Out of room: drop the editor text (much the largest field) and keep the
+    // timeline, which is what the user actually can't reproduce.
+    chrome.storage.local.set({
+      [LL_RECORDER_STATE_KEY]: {
+        actions: actions.slice(-100),
+        seenKeys: seenKeys.slice(-500),
+        codePreview: '',
+        lastPageUrl: recLastPageUrl
+      }
+    }, () => { void chrome.runtime.lastError; });
   });
 }
 

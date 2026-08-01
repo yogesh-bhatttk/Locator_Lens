@@ -50,18 +50,37 @@ This document describes how the extension is structured and how distribution fol
 
 ---
 
-## 7. Distribution and local dev
+## 7. Distribution
 
-Some setups use a **dual-dist** layout (`dist-chrome/`, `dist-firefox/`) with junctions or copies of `src/` and manifest variants so each browser loads a clean MV3 manifest. Your **`setup.bat` / `setup.sh`** scripts define the exact flow for this repo.
+`npm run build` (`scripts/build.mjs`) is the only supported way to produce a package.
+It writes `dist/chrome/` and `dist/firefox/` plus a versioned `.zip` for each, and
+prints a SHA-256 per archive. Builds are byte-reproducible: the same commit always
+yields the same hash.
 
-If you load **unpack from repo root**, `manifest.json` is the source of truth for that workflow.
+The shipping file set is an **allowlist** (the `SHIP` array in the script), not an
+ignore list. Adding a file to a package has to be a deliberate edit. This replaced a
+flow that swapped `manifest.json` at the repo root and zipped the whole directory —
+which had no file selection at all, and so shipped a generated report page that
+loaded a library from a CDN. Remote code is an automatic rejection on both stores.
+
+The build refuses to emit a package containing remote `<script>`/`<link>` URLs,
+`eval` / `new Function` / `importScripts`, `fetch` / `XMLHttpRequest`, or a manifest
+reference it cannot resolve. `tests/package.test.mjs` re-checks all of it against the
+built output in CI.
+
+`setup.sh` / `setup.bat` remain for local unpacked loading from the repo root; they
+only copy a manifest variant to `manifest.json` and produce nothing submittable.
+
+Full submission process and permission justifications: **`STORE_SUBMISSION.md`**.
 
 ---
 
-## 8. Optional architecture graph (`graphify-out/`)
+## 8. Versioning
 
-- **`GRAPH_REPORT.md`** — human-readable summary of modules and communities (may lag code until you re-run your graph pipeline).
-- **`graph.html` / `graph.json`** — interactive **vis-network** graph; opening `graph.html` pulls **vis-network** from a CDN (see privacy policy). Regenerate when large refactors land so labels match `src/`.
+`node scripts/version.mjs [patch|minor|major|x.y.z]` sets the version in
+`package.json` and all three manifests at once; with no argument it verifies they
+agree and exits non-zero if they do not. CI runs the check on every push, because
+both stores reject an update that reuses a published version number.
 
 ---
 

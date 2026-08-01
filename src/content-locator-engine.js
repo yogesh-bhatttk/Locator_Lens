@@ -2,6 +2,16 @@
 // Playwright-oriented locator ranking (loaded before content.js).
 (function (global) {
   'use strict';
+
+  // Escape a string for use as a CSS identifier. Every browser we target has
+  // CSS.escape; the fallback exists so the engine can also be exercised in a
+  // headless DOM that doesn't implement it.
+  function cssEscape(value) {
+    const s = String(value == null ? '' : value);
+    if (typeof CSS !== 'undefined' && CSS && typeof CSS.escape === 'function') return CSS.escape(s);
+    return s.replace(/([!"#$%&'()*+,./:;<=>?@[\\\]^`{|}~])/g, '\\$1').replace(/^(\d)/, '\\3$1 ');
+  }
+
   // ── ARIA role lookup ───────────────────────────────────────────────────────
   const IMPLICIT_ROLES = {
     a: (el) => el.href ? 'link' : null,
@@ -72,7 +82,7 @@
     const tag = el.tagName.toLowerCase();
     if (['input', 'select', 'textarea'].includes(tag)) {
       if (el.id) {
-        const label = document.querySelector(`label[for="${CSS.escape(el.id)}"]`);
+        const label = document.querySelector(`label[for="${cssEscape(el.id)}"]`);
         if (label) return label.textContent.trim();
       }
       const parentLabel = el.closest('label');
@@ -178,7 +188,10 @@
     while (current && current !== document.body && parts.length < 5) {
       let part = current.tagName.toLowerCase();
       if (current.id && !isUnstableId(current.id)) {
-        return `#${current.id}`;
+        // CSS.escape: ids legally contain ':' '.' '[' etc. (Tailwind, Rails, Angular
+        // all emit them). Unescaped, the returned string is an invalid selector that
+        // throws in querySelectorAll and produces uncompilable generated code.
+        return `#${cssEscape(current.id)}`;
       }
       const stableClasses = current.className && typeof current.className === 'string'
         ? current.className.trim().split(/\s+/).filter(c => c && !isUnstableClass(c))
@@ -220,33 +233,45 @@
   // ── Live uniqueness: how many elements does a locator actually match? ───────
   // Counts are capped at 10 (we only care about unique vs ambiguous) for speed.
   const UNIQ_CAP = 10;
+  // Hard ceiling on nodes examined per count. generateLocators() runs on every pick
+  // AND on every captured click while recording, and each candidate locator triggers
+  // its own count — so an uncapped walk that reads innerText (which forces a layout
+  // flush per node) turned a click on a large page into a visible freeze.
+  const SCAN_CAP = 4000;
+
   function attrSelectorValue(v) {
     return String(v == null ? '' : v).replace(/\\/g, '\\\\').replace(/"/g, '\\"');
   }
   function countBySelector(sel) {
     try { return Math.min(document.querySelectorAll(sel).length, UNIQ_CAP); } catch (e) { return null; }
   }
+  // textContent, not innerText: innerText is layout-dependent and forces a reflow on
+  // every node touched. For "does this text match exactly one element" the difference
+  // is whitespace normalisation, which we do ourselves.
+  function normText(node) {
+    return (node.textContent || '').trim();
+  }
   function countByText(text) {
     let count = 0;
     const all = document.querySelectorAll('*');
-    for (let i = 0; i < all.length; i++) {
+    const limit = Math.min(all.length, SCAN_CAP);
+    for (let i = 0; i < limit; i++) {
       const node = all[i];
-      const t = (node.innerText || node.textContent || '').trim();
-      if (t !== text) continue;
+      if (normText(node) !== text) continue;
       // innermost only (mirrors Playwright getByText) — skip if a child holds the same text
       let childHas = false;
       for (let c = 0; c < node.children.length; c++) {
-        if ((node.children[c].innerText || node.children[c].textContent || '').trim() === text) { childHas = true; break; }
+        if (normText(node.children[c]) === text) { childHas = true; break; }
       }
       if (!childHas && ++count >= UNIQ_CAP) break;
     }
     return count;
   }
   function countByRole(role, name) {
-    let count = 0, scanned = 0;
+    let count = 0;
     const all = document.querySelectorAll('*');
-    for (let i = 0; i < all.length; i++) {
-      if (++scanned > 5000) break;
+    const limit = Math.min(all.length, SCAN_CAP);
+    for (let i = 0; i < limit; i++) {
       if (getRole(all[i]) !== role) continue;
       if (name && getAccessibleName(all[i]) !== name) continue;
       if (++count >= UNIQ_CAP) break;
@@ -266,7 +291,7 @@
     try {
       switch (t.kind) {
         case 'testid': return countBySelector('[' + t.attr + '="' + attrSelectorValue(t.value) + '"]');
-        case 'id': return countBySelector('#' + CSS.escape(String(t.value)));
+        case 'id': return countBySelector('#' + cssEscape(String(t.value)));
         case 'name': return countBySelector('[name="' + attrSelectorValue(t.value) + '"]');
         case 'placeholder': return countBySelector('[placeholder="' + attrSelectorValue(t.value) + '"]');
         case 'altText': return countBySelector('img[alt="' + attrSelectorValue(t.value) + '"]');
@@ -323,7 +348,7 @@
         rank: locators.length + 1,
         method: 'getByRole()',
         matchedAttr: `role="${role}", name="${name}"${extra}`,
-        stability: locators.length === 0 ? 'BEST' : 'BEST',
+        stability: 'BEST',
         target: { kind: 'role', role: role, name: name, level: (role === 'heading' ? getHeadingLevel(el) : null) },
         code: codeBase,
         fullCode: `await ${codeBase}.${suggestAction(el)};`,
@@ -348,7 +373,7 @@
     if (['input', 'select', 'textarea'].includes(tag)) {
       let labelText = null;
       if (el.id) {
-        const lbl = document.querySelector(`label[for="${CSS.escape(el.id)}"]`);
+        const lbl = document.querySelector(`label[for="${cssEscape(el.id)}"]`);
         if (lbl) labelText = lbl.textContent.trim();
       }
       if (!labelText) {
@@ -433,10 +458,13 @@
     const visibleText = (el.innerText || el.textContent || '').trim();
     if (visibleText && visibleText.length <= 100 && !['input', 'select', 'textarea', 'img'].includes(tag)) {
       const escaped = visibleText.replace(/'/g, "\\'");
+      // Bounded, layout-free ambiguity probe. Reading innerText here walked the whole
+      // document flushing layout per node whenever the text was in fact unique.
       const allMatchingText = document.querySelectorAll('*');
+      const textScanLimit = Math.min(allMatchingText.length, SCAN_CAP);
       let textMatchCount = 0;
-      for (const node of allMatchingText) {
-        if ((node.innerText || node.textContent || '').trim() === visibleText) textMatchCount++;
+      for (let i = 0; i < textScanLimit; i++) {
+        if (normText(allMatchingText[i]) === visibleText) textMatchCount++;
         if (textMatchCount > 3) break;
       }
       const stability = textMatchCount > 2 ? 'OK' : 'GOOD';

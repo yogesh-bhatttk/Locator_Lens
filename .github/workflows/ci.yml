@@ -1,0 +1,44 @@
+name: CI
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+
+      - run: npm ci
+
+      # Version drift across the three manifests is how a store update ends up
+      # rejected for reusing a published version number.
+      - name: Check version consistency
+        run: npm run version:check
+
+      - run: npm run lint
+
+      - run: npm test
+
+      # Builds both packages and fails on any store-policy violation
+      # (remote code, eval, stray files, missing manifest references).
+      - name: Build store packages
+        run: npm run build
+
+      - name: Upload store packages
+        uses: actions/upload-artifact@v4
+        with:
+          name: locatorlens-packages
+          path: dist/*.zip
+          if-no-files-found: error

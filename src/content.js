@@ -6,6 +6,20 @@
   if (window.__LocatorLensInjected) return;
   window.__LocatorLensInjected = true;
 
+  // Diagnostic logging is off in released builds — a content script runs on every
+  // page the user visits, so unconditional console output is other people's noise.
+  // Enable with: chrome.storage.local.set({ llDebug: true })
+  let llDebug = false;
+  function debugLog() {
+    if (!llDebug) return;
+    // eslint-disable-next-line no-console -- this IS the opt-in debug channel
+    console.log.apply(console, ['[LocatorLens]'].concat(Array.prototype.slice.call(arguments)));
+  }
+  function debugWarn() {
+    if (!llDebug) return;
+    console.warn.apply(console, ['[LocatorLens]'].concat(Array.prototype.slice.call(arguments)));
+  }
+
   // ── State ──────────────────────────────────────────────────────────────────
   let isInspecting = false;
   let isRecording = false;
@@ -84,7 +98,7 @@
       const result = generateLocators(el);
       best = result.locators && result.locators[0];
     } catch (err) {
-      console.warn('[LocatorLens] generateLocators failed during recording:', err);
+      debugWarn('generateLocators failed during recording:', err);
     }
     if (!best) {
       const fb = recordFallbackLocator(el, fallbackChain || 'click()');
@@ -176,7 +190,7 @@
         const result = generateLocators(el);
         best = result.locators && result.locators[0];
       } catch (err) {
-        console.warn('[LocatorLens] generateLocators failed during recording:', err);
+        debugWarn('generateLocators failed during recording:', err);
       }
       if (!best) {
         const fb = recordFallbackLocator(el, 'click()');
@@ -200,7 +214,7 @@
       const result = generateLocators(el);
       best = result.locators && result.locators[0];
     } catch (err) {
-      console.warn('[LocatorLens] generateLocators failed during recording:', err);
+      debugWarn('generateLocators failed during recording:', err);
     }
     if (!best) {
       const fb = recordFallbackLocator(el, (type === 'checkbox' || type === 'radio') ? 'check()' : 'click()');
@@ -253,7 +267,7 @@
       const result = generateLocators(el);
       best = result.locators && result.locators[0];
     } catch (err) {
-      console.warn('[LocatorLens] generateLocators failed during recording:', err);
+      debugWarn('generateLocators failed during recording:', err);
     }
 
     const value = getTextLikeValue(el);
@@ -304,7 +318,7 @@
         const result = generateLocators(el);
         best = result.locators && result.locators[0];
       } catch (err) {
-        console.warn('[LocatorLens] generateLocators failed during recording:', err);
+        debugWarn('generateLocators failed during recording:', err);
       }
 
       let actionType = 'fill';
@@ -359,7 +373,7 @@
       const result = generateLocators(el);
       best = result.locators && result.locators[0];
     } catch (err) {
-      console.warn('[LocatorLens] generateLocators (dblclick):', err);
+      debugWarn('generateLocators (dblclick):', err);
     }
     if (!best) {
       const fb = recordFallbackLocator(el, 'dblclick()');
@@ -408,7 +422,7 @@
     document.addEventListener('change', onRecordChange, true);
     document.addEventListener('keydown', onRecordKeydown, true);
     document.addEventListener('dblclick', onRecordDblClick, true);
-    console.log('[LocatorLens] Recording Started.' + (rearm ? ' (resumed after navigation)' : ''));
+    debugLog('Recording started.' + (rearm ? ' (resumed after navigation)' : ''));
 
     if (rearm) return;
 
@@ -441,11 +455,12 @@
     document.removeEventListener('change', onRecordChange, true);
     document.removeEventListener('keydown', onRecordKeydown, true);
     document.removeEventListener('dblclick', onRecordDblClick, true);
-    console.log('[LocatorLens] Recording Stopped.');
+    debugLog('Recording stopped.');
   }
 
   if (chrome.storage && chrome.storage.local) {
-    chrome.storage.local.get(['customAttributes', 'llFramework', 'llLanguage'], (res) => {
+    chrome.storage.local.get(['customAttributes', 'llFramework', 'llLanguage', 'llDebug'], (res) => {
+      if (chrome.runtime.lastError) return;
       if (res && res.customAttributes && res.customAttributes.length > 0) {
         customTestAttributes = [...res.customAttributes, ...customTestAttributes];
         // Remove duplicates
@@ -453,6 +468,7 @@
       }
       if (res && res.llFramework) llFramework = res.llFramework;
       if (res && res.llLanguage) llLanguage = res.llLanguage;
+      llDebug = !!(res && res.llDebug);
     });
 
     chrome.storage.onChanged.addListener((changes, namespace) => {
@@ -464,6 +480,7 @@
       }
       if (changes.llFramework) llFramework = changes.llFramework.newValue || 'playwright';
       if (changes.llLanguage) llLanguage = changes.llLanguage.newValue || 'typescript';
+      if (changes.llDebug) llDebug = !!changes.llDebug.newValue;
     });
   }
 
@@ -484,8 +501,13 @@
   }, true);
 
   // ── Styles injected into the page ─────────────────────────────────────────
+  // Called by BOTH startInspect() and the Selector Lab: the lab marks matches with
+  // .ll-lab-highlight, which is defined here, so it must run even when the user
+  // never turned on Inspect on this page.
   function injectStyles() {
     if (document.getElementById('ll-styles')) return;
+    const mount = document.head || document.documentElement;
+    if (!mount) return;
     const style = document.createElement('style');
     style.id = 'll-styles';
     style.textContent = `
@@ -631,7 +653,19 @@
         to   { opacity: 0; transform: translateX(-50%) translateY(12px); }
       }
     `;
-    document.head.appendChild(style);
+    mount.appendChild(style);
+  }
+
+  // ── Selector Lab highlight bookkeeping ────────────────────────────────────
+  // Track the elements we marked instead of re-querying: the class can be dropped
+  // by the page's own re-render, and querySelectorAll never sees inside shadow roots.
+  let labHighlighted = [];
+  function clearLabHighlights() {
+    labHighlighted.forEach((el) => {
+      try { el.classList.remove('ll-lab-highlight'); } catch (e) { /* detached */ }
+    });
+    labHighlighted = [];
+    document.querySelectorAll('.ll-lab-highlight').forEach((el) => el.classList.remove('ll-lab-highlight'));
   }
 
   // ── Overlay management ─────────────────────────────────────────────────────
@@ -918,8 +952,8 @@
         chrome.runtime.sendMessage({ type: 'ELEMENT_PICKED', data: result });
       }
     } catch (err) {
-      if (err.message.includes('context invalidated')) {
-        console.warn('[LocatorLens] Extension context invalidated. Please refresh the page.');
+      if (String(err && err.message).includes('context invalidated')) {
+        debugWarn('Extension context invalidated. Please refresh the page.');
         stopInspect(); // Cleanly remove UI
       }
     }
@@ -948,6 +982,7 @@
   // ── Start / Stop ───────────────────────────────────────────────────────────
   function startInspect() {
     if (isInspecting) return;
+    if (!document.body) return; // nothing to overlay (e.g. a bare XML document)
     isInspecting = true;
     injectStyles();
     createOverlay();
@@ -959,7 +994,7 @@
 
   function stopInspect() {
     isInspecting = false;
-    document.body.classList.remove('ll-inspecting');
+    if (document.body) document.body.classList.remove('ll-inspecting');
     
     // Total Decommission: Remove all tracking listeners
     document.removeEventListener('mouseover', onMouseOver, true);
@@ -970,7 +1005,7 @@
     hoveredEl = null;
     lastRightClickedEl = null;
     
-    console.log('[LocatorLens] Inspection Deactivated.');
+    debugLog('Inspection deactivated.');
   }
 
   // 🛡️ INITIALIZATION: Force Neutral State
@@ -1042,7 +1077,11 @@
       const { selector } = msg;
       let matches = [];
       let via = null;
-      document.querySelectorAll('.ll-lab-highlight').forEach(el => el.classList.remove('ll-lab-highlight'));
+      // The highlight class is styled by #ll-styles, which previously only got
+      // injected by startInspect() — so lab matches were marked but invisible
+      // unless the user had already inspected on this page.
+      injectStyles();
+      clearLabHighlights();
 
       // Resolve a pasted Playwright locator chain — e.g.
       //   await page.getByRole('textbox', { name: 'Username or Email' }).fill('x');
@@ -1106,14 +1145,22 @@
         };
         const within = (root) => Array.from((root === document ? document : root).querySelectorAll('*'));
 
+        // Upper bound on how many text/role matches we resolve. The innermost-match
+        // filter below is O(n²) in `hit`, and a loose substring like "a" can match
+        // most of a page — without a cap that pins the tab.
+        const LAB_MAX_MATCHES = 300;
+
         const find = (method, args, root) => {
           const all = within(root);
           switch (method) {
             case 'getByRole': {
               const role = firstStr(args), name = opt(args, 'name'), exact = opt(args, 'exact') === true;
               if (!role || !E) return [];
-              return all.filter(el => !isHidden(el) && E.getRole(el) === role &&
-                (name == null || matchText(E.getAccessibleName(el), name, exact)));
+              // Role first: isHidden() forces a style recalc per element, so it must
+              // run on the few survivors rather than on every node in the document.
+              return all.filter(el => E.getRole(el) === role &&
+                (name == null || matchText(E.getAccessibleName(el), name, exact)) &&
+                !isHidden(el));
             }
             case 'getByLabel': {
               const t = firstStr(args), exact = opt(args, 'exact') === true;
@@ -1143,7 +1190,13 @@
             case 'getByText': {
               const t = firstStr(args), exact = opt(args, 'exact') === true;
               if (t == null) return [];
-              const hit = all.filter(el => !isHidden(el) && matchText(el.innerText || el.textContent, t, exact));
+              const hit = [];
+              for (let k = 0; k < all.length && hit.length < LAB_MAX_MATCHES; k++) {
+                const el = all[k];
+                if (!matchText(el.innerText || el.textContent, t, exact)) continue;
+                if (isHidden(el)) continue;
+                hit.push(el);
+              }
               // keep the innermost matches (Playwright targets the smallest element)
               return hit.filter(el => !hit.some(o => o !== el && el.contains(o)));
             }
@@ -1196,7 +1249,10 @@
         }
 
         matches.forEach(el => {
-          if (el && el.nodeType === Node.ELEMENT_NODE) el.classList.add('ll-lab-highlight');
+          if (el && el.nodeType === Node.ELEMENT_NODE) {
+            el.classList.add('ll-lab-highlight');
+            labHighlighted.push(el);
+          }
         });
 
         if (matches[0] && matches[0].scrollIntoView) {
@@ -1212,7 +1268,7 @@
     }
 
     else if (msg.type === 'LAB_CLEAR') {
-      document.querySelectorAll('.ll-lab-highlight').forEach(el => el.classList.remove('ll-lab-highlight'));
+      clearLabHighlights();
       sendResponse({ ok: true });
     }
 

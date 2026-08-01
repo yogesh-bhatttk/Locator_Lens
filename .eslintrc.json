@@ -1,0 +1,54 @@
+{
+  "root": true,
+  "env": {
+    "browser": true,
+    "webextensions": true,
+    "es2022": true
+  },
+  "parserOptions": {
+    "ecmaVersion": 2022,
+    "sourceType": "script"
+  },
+  "extends": "eslint:recommended",
+  "rules": {
+    "no-unused-vars": ["error", { "args": "none", "caughtErrors": "none" }],
+    "no-empty": ["error", { "allowEmptyCatch": true }],
+    "eqeqeq": ["error", "smart"],
+    "no-var": "off",
+    "prefer-const": "off",
+    "no-console": ["error", { "allow": ["warn", "error"] }]
+  },
+  "overrides": [
+    {
+      "files": ["src/*.js"],
+      "globals": {
+        "LLCodegen": "readonly",
+        "module": "readonly"
+      }
+    },
+    {
+      "files": ["scripts/**/*.mjs", "*.config.mjs"],
+      "env": { "browser": false, "node": true, "webextensions": false },
+      "parserOptions": { "sourceType": "module" },
+      "rules": { "no-console": "off" }
+    },
+    {
+      "files": ["tests/**/*.test.mjs"],
+      "env": { "browser": true, "node": true, "webextensions": true },
+      "parserOptions": { "sourceType": "module" },
+      "globals": {
+        "describe": "readonly",
+        "it": "readonly",
+        "expect": "readonly",
+        "beforeAll": "readonly",
+        "beforeEach": "readonly",
+        "afterEach": "readonly",
+        "vi": "readonly",
+        "esc": "readonly",
+        "hl": "readonly",
+        "safeRender": "readonly"
+      },
+      "rules": { "no-console": "off" }
+    }
+  ]
+}

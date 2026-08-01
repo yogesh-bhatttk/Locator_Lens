@@ -16,20 +16,36 @@ chrome.runtime.onConnect.addListener((port) => {
 
 // Track inspect mode per tab
 const inspectTabs = new Set();
-const activePanels = new Set(); // Track which tabs have an open side panel
 const recordingTabs = new Set(); // tabs with an active recording (so we can re-arm after navigation)
 
+// The side panel is a single window-level surface with no sender.tab, so it can't be
+// tracked per tab — it's one boolean kept alive by a heartbeat. (It used to be a Set
+// that heartbeats added 'global' to while tab teardown deleted numeric ids from, so
+// the cleanup never actually matched anything.)
+const PANEL_HEARTBEAT_TTL_MS = 12000;
+let panelLastSeen = 0;
+let panelHeartbeatTimer = null;
+function isPanelActive() {
+  return panelLastSeen > 0 && (Date.now() - panelLastSeen) < PANEL_HEARTBEAT_TTL_MS;
+}
+
 // ── Register context menu on install ────────────────────────────────────────
+// onInstalled also fires with reason "update", and menu items survive updates —
+// re-creating an existing id fails with "Cannot create item with duplicate id"
+// and leaves the menu half-registered. removeAll() first makes this idempotent.
 chrome.runtime.onInstalled.addListener(() => {
-  chrome.contextMenus.create({
-    id: 'll-copy-locator',
-    title: '🎯 Copy Best Locator',
-    contexts: ['all']
-  });
-  chrome.contextMenus.create({
-    id: 'll-toggle-panel',
-    title: '📋 Open/Close Results Panel',
-    contexts: ['all']
+  chrome.contextMenus.removeAll(() => {
+    void chrome.runtime.lastError;
+    chrome.contextMenus.create({
+      id: 'll-copy-locator',
+      title: '🎯 Copy Best Locator',
+      contexts: ['all']
+    }, () => { void chrome.runtime.lastError; });
+    chrome.contextMenus.create({
+      id: 'll-toggle-panel',
+      title: '📋 Open/Close Results Panel',
+      contexts: ['all']
+    }, () => { void chrome.runtime.lastError; });
   });
 });
 
@@ -86,6 +102,7 @@ function relayToSidePanel(msg) {
 
 // ── Popup / SidePanel ↔ Content message relay ─────────────────────────────────
 chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
+  if (!msg || typeof msg.type !== 'string') return;
 
   // START_INSPECT: activate on the current tab + open side panel
   if (msg.type === 'START_INSPECT') {
@@ -158,17 +175,16 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
 
   // Track panel open/close with timeout safety
   if (msg.type === 'PANEL_HEARTBEAT') {
-    // Side panel / extension pages often have no sender.tab; treat as one logical panel.
-    const key = 'global';
-    activePanels.add(key);
-    if (globalThis._llPanelHeartbeatTimer) clearTimeout(globalThis._llPanelHeartbeatTimer);
-    globalThis._llPanelHeartbeatTimer = setTimeout(() => {
-      activePanels.delete(key);
-    }, 12000);
+    panelLastSeen = Date.now();
+    if (panelHeartbeatTimer) clearTimeout(panelHeartbeatTimer);
+    panelHeartbeatTimer = setTimeout(() => {
+      panelLastSeen = 0;
+      panelHeartbeatTimer = null;
+    }, PANEL_HEARTBEAT_TTL_MS);
   }
 
   if (msg.type === 'GET_PANEL_STATE') {
-    sendResponse({ active: activePanels.size > 0 });
+    sendResponse({ active: isPanelActive() });
   }
 
   // RUN_STRESS_TEST: relay from side panel to content script
@@ -283,7 +299,6 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
 // Clean up when tab closes
 chrome.tabs.onRemoved.addListener((tabId) => {
   inspectTabs.delete(tabId);
-  activePanels.delete(tabId);
   recordingTabs.delete(tabId);
 });
 // Clean up on navigation (and sync UI)
@@ -294,7 +309,6 @@ chrome.tabs.onUpdated.addListener((tabId, info) => {
       // Explicitly tell the UI that this tab is no longer inspecting
       relayToSidePanel({ type: 'STOP_INSPECT' });
     }
-    activePanels.delete(tabId);
   }
   // Re-arm recording after a full-page navigation so multi-page flows keep capturing.
   // The content script (re-injected by the manifest on load) records a fresh goto on start.

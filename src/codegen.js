@@ -32,6 +32,40 @@
     return "'" + s.replace(/'/g, "\\'") + "'";
   }
 
+  // Escape a value for use inside a double-quoted CSS attribute selector, e.g.
+  // [name="..."]. Without this, a value containing a double quote (placeholders and
+  // aria-labels routinely do: 'Search "all" items') closed the selector early and
+  // emitted code that throws at runtime. q() then escapes the result again for
+  // whichever host language wraps it.
+  function attrSel(value) {
+    return String(value == null ? '' : value)
+      .replace(/\\/g, '\\\\')
+      .replace(/"/g, '\\"');
+  }
+
+  // Escape a value for use as a CSS identifier (the "foo" in #foo). Uses the platform
+  // CSS.escape where available and falls back to escaping the ASCII specials, so the
+  // module stays usable outside a browser (tests, Node).
+  function cssIdent(value) {
+    var s = String(value == null ? '' : value);
+    if (typeof CSS !== 'undefined' && CSS && typeof CSS.escape === 'function') {
+      return CSS.escape(s);
+    }
+    return s.replace(/([!"#$%&'()*+,./:;<=>?@[\\\]^`{|}~])/g, '\\$1')
+      .replace(/^(\d)/, '\\3$1 ');
+  }
+
+  // Escape a value for an XPath string literal. XPath 1.0 has no escape syntax, so a
+  // literal containing both quote kinds must be assembled with concat().
+  function xpathLiteral(value) {
+    var s = String(value == null ? '' : value);
+    if (s.indexOf('"') === -1) return '"' + s + '"';
+    if (s.indexOf("'") === -1) return "'" + s + "'";
+    return 'concat(' + s.split('"').map(function (part) {
+      return '"' + part + '"';
+    }).join(", '\"', ") + ')';
+  }
+
   // ── framework / language metadata ──────────────────────────────────────────
   var FRAMEWORKS = [
     { id: 'playwright', label: 'Playwright' },
@@ -94,7 +128,7 @@
     switch (t.kind) {
       case 'testid':
         if (t.attr === 'data-testid') return 'page.' + m('getByTestId', 'get_by_test_id') + '(' + q(t.value, lang) + ')';
-        return 'page.locator(' + q('[' + t.attr + '="' + t.value + '"]', lang) + ')';
+        return 'page.locator(' + q('[' + t.attr + '="' + attrSel(t.value) + '"]', lang) + ')';
       case 'role': {
         var opts = [];
         if (t.name) opts.push(py ? 'name=' + q(t.name, lang) : 'name: ' + q(t.name, lang));
@@ -108,27 +142,27 @@
       case 'altText': return 'page.' + m('getByAltText', 'get_by_alt_text') + '(' + q(t.value, lang) + ')';
       case 'title': return 'page.' + m('getByTitle', 'get_by_title') + '(' + q(t.value, lang) + ')';
       case 'text': return 'page.' + m('getByText', 'get_by_text') + '(' + q(t.value, lang) + ')';
-      case 'id': return 'page.locator(' + q('#' + t.value, lang) + ')';
-      case 'name': return 'page.locator(' + q('[name="' + t.value + '"]', lang) + ')';
+      case 'id': return 'page.locator(' + q('#' + cssIdent(t.value), lang) + ')';
+      case 'name': return 'page.locator(' + q('[name="' + attrSel(t.value) + '"]', lang) + ')';
       case 'css': default: return 'page.locator(' + q(t.value || 'body', lang) + ')';
     }
   }
 
   function cyLocator(t, lang) {
     switch (t.kind) {
-      case 'testid': return 'cy.get(' + q('[' + t.attr + '="' + t.value + '"]', lang) + ')';
+      case 'testid': return 'cy.get(' + q('[' + t.attr + '="' + attrSel(t.value) + '"]', lang) + ')';
       case 'role': {
         var sel = roleCss(t.role);
         if (t.name) return 'cy.get(' + q(sel, lang) + ').contains(' + q(t.name, lang) + ')';
         return 'cy.get(' + q(sel, lang) + ')';
       }
-      case 'label': return 'cy.get(' + q('[aria-label="' + t.value + '"]', lang) + ')';
-      case 'placeholder': return 'cy.get(' + q('[placeholder="' + t.value + '"]', lang) + ')';
-      case 'altText': return 'cy.get(' + q('img[alt="' + t.value + '"]', lang) + ')';
-      case 'title': return 'cy.get(' + q('[title="' + t.value + '"]', lang) + ')';
+      case 'label': return 'cy.get(' + q('[aria-label="' + attrSel(t.value) + '"]', lang) + ')';
+      case 'placeholder': return 'cy.get(' + q('[placeholder="' + attrSel(t.value) + '"]', lang) + ')';
+      case 'altText': return 'cy.get(' + q('img[alt="' + attrSel(t.value) + '"]', lang) + ')';
+      case 'title': return 'cy.get(' + q('[title="' + attrSel(t.value) + '"]', lang) + ')';
       case 'text': return 'cy.contains(' + q(t.value, lang) + ')';
-      case 'id': return 'cy.get(' + q('#' + t.value, lang) + ')';
-      case 'name': return 'cy.get(' + q('[name="' + t.value + '"]', lang) + ')';
+      case 'id': return 'cy.get(' + q('#' + cssIdent(t.value), lang) + ')';
+      case 'name': return 'cy.get(' + q('[name="' + attrSel(t.value) + '"]', lang) + ')';
       case 'css': default: return 'cy.get(' + q(t.value || 'body', lang) + ')';
     }
   }
@@ -145,26 +179,28 @@
   }
 
   function roleXpath(role, name) {
-    var node = ROLE_XPATH[role] || ('@role="' + role + '"');
+    var node = ROLE_XPATH[role] || ('@role="' + attrSel(role) + '"');
     var base = '//*[' + node + ']';
     if (name) {
-      // double-quote the name literal inside the xpath; q() will escape as needed.
-      return '//*[(' + node + ') and contains(normalize-space(.), "' + String(name).replace(/"/g, '') + '")]';
+      // xpathLiteral() keeps quotes in the name intact — the previous version deleted
+      // every double quote from the accessible name, so a button labelled Delete "row"
+      // produced an xpath that silently matched the wrong element (or nothing).
+      return '//*[(' + node + ') and contains(normalize-space(.), ' + xpathLiteral(name) + ')]';
     }
     return base;
   }
 
   function selLocator(t, lang) {
     switch (t.kind) {
-      case 'testid': return selFind('css', '[' + t.attr + '="' + t.value + '"]', lang);
+      case 'testid': return selFind('css', '[' + t.attr + '="' + attrSel(t.value) + '"]', lang);
       case 'role':
         if (t.name) return selFind('xpath', roleXpath(t.role, t.name), lang);
         return selFind('css', roleCss(t.role), lang);
-      case 'label': return selFind('css', '[aria-label="' + t.value + '"]', lang);
-      case 'placeholder': return selFind('css', '[placeholder="' + t.value + '"]', lang);
-      case 'altText': return selFind('css', 'img[alt="' + t.value + '"]', lang);
-      case 'title': return selFind('css', '[title="' + t.value + '"]', lang);
-      case 'text': return selFind('xpath', '//*[contains(normalize-space(.), "' + String(t.value).replace(/"/g, '') + '")]', lang);
+      case 'label': return selFind('css', '[aria-label="' + attrSel(t.value) + '"]', lang);
+      case 'placeholder': return selFind('css', '[placeholder="' + attrSel(t.value) + '"]', lang);
+      case 'altText': return selFind('css', 'img[alt="' + attrSel(t.value) + '"]', lang);
+      case 'title': return selFind('css', '[title="' + attrSel(t.value) + '"]', lang);
+      case 'text': return selFind('xpath', '//*[contains(normalize-space(.), ' + xpathLiteral(t.value) + ')]', lang);
       case 'id': return selFind('id', t.value, lang);
       case 'name': return selFind('name', t.value, lang);
       case 'css': default: return selFind('css', t.value || 'body', lang);

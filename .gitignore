@@ -1,8 +1,12 @@
-node_modules
+node_modules/
 .DS_Store
 *.zip
+
+# Build output — regenerate with `npm run build`
+dist/
 dist-chrome/
 dist-firefox/
+
 .env
 .vscode/
 .idea/
@@ -10,15 +14,26 @@ npm-debug.log*
 yarn-debug.log*
 yarn-error.log*
 
+# Test / coverage output
+coverage/
+test-results/
+*.tsbuildinfo
+.tsbuildinfo-*
+
+# Local tooling and scratch space. These are working directories from other
+# workstreams; nothing here belongs in a store package.
+.venv/
+.codex/
+.agent/
+.agents/
+scratch/
+packages/
+mcp-bridge/
+
 # Private QA skill (local only — never publish)
 .cursor/skills/Locator_Lens_QA_Skill/
 
-# Private Workspaces & Config
-.agent/
-.agents/
 MISSION_SELECTOR_LAB.md
-screenshots/
 
-# Graphify
-graphify-out/.graphify_python
-graphify-out/cache/
+# Store listing assets, kept out of the repo
+screenshots/

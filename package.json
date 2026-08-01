@@ -1,0 +1,45 @@
+{
+  "name": "locatorlens",
+  "version": "1.2.0",
+  "private": true,
+  "description": "Browser extension that inspects elements for ranked, uniqueness-checked locators and records flows into runnable Playwright / Selenium / Cypress tests.",
+  "license": "MIT",
+  "author": "Yogesh Bhatt",
+  "homepage": "https://github.com/yogesh-bhatttk/Locator_Lens",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/yogesh-bhatttk/Locator_Lens.git"
+  },
+  "type": "module",
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "lint": "eslint . --max-warnings 0",
+    "lint:fix": "eslint . --fix",
+    "format": "prettier --write \"**/*.{js,mjs,json,md}\"",
+    "format:check": "prettier --check \"**/*.{js,mjs,json,md}\"",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "test:coverage": "vitest run --coverage",
+    "version:check": "node scripts/version.mjs",
+    "build": "node scripts/build.mjs all",
+    "build:chrome": "node scripts/build.mjs chrome",
+    "build:firefox": "node scripts/build.mjs firefox",
+    "verify": "npm run version:check && npm run lint && npm run test && npm run build",
+    "prepare": "husky"
+  },
+  "devDependencies": {
+    "eslint": "^8.57.1",
+    "husky": "^9.1.7",
+    "jsdom": "^29.1.1",
+    "lint-staged": "^15.5.2",
+    "prettier": "^3.6.2",
+    "vitest": "^4.1.5"
+  },
+  "lint-staged": {
+    "*.{js,mjs}": [
+      "eslint --max-warnings 0"
+    ]
+  }
+}

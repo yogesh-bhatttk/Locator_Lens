@@ -1,10 +1,14 @@
 # Privacy Policy – LocatorLens
 
-**Last updated:** April 27, 2026
+**Last updated:** August 2, 2026
 
 ## Overview
 
-LocatorLens is a browser extension that inspects web page elements and surfaces **Playwright**-style locators, a selector lab, optional interaction recording, and a Page Object Model (POM) builder. Your privacy is important to us.
+LocatorLens is a browser extension for test authoring. It inspects web page elements
+and surfaces ranked, uniqueness-checked locators, validates selectors against the live
+page (Selector Lab), and optionally records your interactions into a runnable test
+script for **Playwright**, **Selenium** or **Cypress** in TypeScript, JavaScript or
+Python. Everything runs locally in your browser.
 
 ## Data collection and transmission
 
@@ -28,7 +32,8 @@ Specifically, we do **not**:
 Chrome’s `chrome.storage.local` (or the equivalent in other Chromium-based browsers / Firefox) may persist **only for your convenience**, for example:
 
 - Last inspection result (so the side panel can show it after reopening)
-- Saved POM elements and related settings (actions/JSDoc toggles)
+- Your chosen output framework and language
+- Any custom test-id attributes you configure
 - Recorder timeline / generated script draft (if you use recording)
 - Other UI preferences
 
@@ -51,8 +56,13 @@ Permissions are used **only** to deliver the features below. Exact lists may var
 
 ## Third-party services
 
-- **Vis-Network** (loaded from `unpkg.com`) is used **only** in the optional local `graphify-out/graph.html` architecture viewer, if you open that file. It is not used by the extension runtime against arbitrary pages you visit for inspection.
-- The extension itself does **not** embed remote trackers or ads.
+**None.** LocatorLens bundles no third-party libraries, loads no code or assets from
+any remote origin, and embeds no trackers, analytics or ads. The published package
+contains only the files listed in this repository's `src/` and `icons/` directories.
+
+The extension makes no network requests of any kind — there is no `fetch` or
+`XMLHttpRequest` in the shipped code, and the build refuses to produce a package
+that contains one.
 
 ## Changes to this policy
 

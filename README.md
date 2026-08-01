@@ -6,7 +6,8 @@
 
 **LocatorLens** is a browser extension for end-to-end test authoring: inspect any element to get **ranked, uniqueness-checked locators**, validate selectors, and **record a flow into a runnable test** — all from the side panel. Output targets **Playwright, Selenium, or Cypress** in **TypeScript, JavaScript, or Python** (Cypress is JS/TS only).
 
-Extension version is defined in `manifest.json` (currently **1.1.6**).
+Extension version is defined in `manifest.json` (currently **1.2.0**) and kept in step
+with `package.json` and both browser manifests by `node scripts/version.mjs`.
 
 ---
 
@@ -51,20 +52,40 @@ Extension version is defined in `manifest.json` (currently **1.1.6**).
 
 ## Quick start
 
-### Windows
-From the project root: `setup.bat chrome` or `setup.bat firefox`.
-
-### macOS / Linux
-`./setup.sh chrome` or `./setup.sh firefox`.
+```bash
+npm ci
+npm run build          # writes dist/chrome/, dist/firefox/ and a .zip for each
+```
 
 ### Chrome, Edge, or Brave
 1. Open `chrome://extensions`.
 2. Enable **Developer mode**.
-3. **Load unpacked** and choose the **project root** (or your `dist-chrome` folder if you use the dual-dist layout—see `build_process.md`).
+3. **Load unpacked** → select **`dist/chrome`**.
 
 ### Firefox
 1. Open `about:debugging#/runtime/this-firefox`.
-2. **Load Temporary Add-on…** and select **`manifest.json`** in the project root.
+2. **Load Temporary Add-on…** → select **`dist/firefox/manifest.json`**.
+
+To load straight from the source tree instead, run `./setup.sh chrome`
+(or `setup.bat chrome` on Windows) to put the right manifest at the project root,
+then load the root folder. Use `dist/` for anything you intend to submit — see
+[STORE_SUBMISSION.md](STORE_SUBMISSION.md).
+
+---
+
+## Development
+
+| Command | What it does |
+|---|---|
+| `npm run lint` | ESLint over `src/`, `scripts/`, `tests/` |
+| `npm test` | Vitest — codegen, locator engine, render sanitisation, package contents |
+| `npm run build` | Reproducible Chrome + Firefox packages in `dist/` |
+| `npm run version:check` | Assert `package.json` and all three manifests agree |
+| `npm run verify` | All of the above — run this before submitting |
+
+`npm run build` selects files from an explicit allowlist and **fails** if the result
+would contain remote code, `eval`, a network API, a stray file, or a manifest
+reference it cannot satisfy. Never zip the repository root.
 
 ---
 
@@ -79,9 +100,10 @@ From the project root: `setup.bat chrome` or `setup.bat firefox`.
 │   ├── sidepanel.js / .html    # Main UI: inspect + record
 │   ├── popup.js / .html        # Compact launcher
 ├── manifests/                  # Browser-specific manifest variants
-├── graphify-out/               # Optional architecture graph (see GRAPH_REPORT.md)
+├── scripts/                    # build.mjs (packaging) · version.mjs (version sync)
+├── tests/                      # Vitest suites (codegen, engine, rendering, package)
 ├── icons/
-└── manifest.json               # Primary manifest (see setup scripts for dist copies)
+└── manifest.json               # Primary manifest — a copy of one manifests/ variant
 ```
 
 ---
