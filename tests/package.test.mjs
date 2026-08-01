@@ -114,6 +114,43 @@ describe.each(TARGETS)('%s package', (target) => {
     for (const p of manifest().permissions) expect(documented, `undocumented permission ${p}`).toContain(p);
   });
 
+  // Chrome Web Store rejection "Purple Potassium", 2026: the submitted package
+  // requested `tabs`, which nothing needed. Everything this extension calls on
+  // chrome.tabs works without it.
+  it('does not request the "tabs" permission', () => {
+    expect(manifest().permissions).not.toContain('tabs');
+    expect(manifest().optional_permissions ?? []).not.toContain('tabs');
+  });
+
+  it('never reads a tab property that would require the tabs permission', () => {
+    // url / title / favIconUrl are the only things `tabs` unlocks. Reading one
+    // would mean the permission is genuinely needed and the manifest is wrong.
+    const bg = readFileSync(join(dir, 'src/background.js'), 'utf8');
+    expect(bg).not.toMatch(/\btabs?\[0\]\.(url|title|favIconUrl)\b/);
+    expect(bg).not.toMatch(/\b(?:changeInfo|info)\.(url|title|favIconUrl)\b/);
+  });
+
+  it('backs every declared permission with an API the code actually calls', () => {
+    const code = filesIn(dir)
+      .filter((f) => f.endsWith('.js') || f.endsWith('.html'))
+      .map((f) => read(f))
+      .join('\n');
+
+    // activeTab grants host access rather than an API, so it has no call signature.
+    const evidence = {
+      scripting: /chrome\.scripting\./,
+      storage: /chrome\.storage\./,
+      contextMenus: /chrome\.contextMenus\./,
+      sidePanel: /chrome(?:\.sidePanel\b|\[["']sidePanel["']\])/,
+    };
+
+    for (const p of manifest().permissions) {
+      if (p === 'activeTab') continue;
+      expect(evidence[p], `no evidence rule for permission "${p}"`).toBeDefined();
+      expect(code, `permission "${p}" is declared but unused`).toMatch(evidence[p]);
+    }
+  });
+
   it('declares a side-panel surface appropriate to the browser', () => {
     const m = manifest();
     if (target === 'chrome') {

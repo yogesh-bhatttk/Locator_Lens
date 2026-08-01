@@ -37,9 +37,29 @@ loaded a library from `unpkg.com` — remote code, and an automatic rejection.
 - `eval()`, `new Function()`, `importScripts()` (dynamic code execution)
 - `fetch` / `XMLHttpRequest` (contradicts the "runs locally, no network" claim)
 - a manifest that references a file the package does not contain
+- **a permission nothing in the code uses**, an explicitly banned permission
+  (`tabs`), or a permission with no evidence rule at all — the check fails closed,
+  so adding a permission requires a deliberate edit to `PERMISSION_EVIDENCE`
 
 `tests/package.test.mjs` re-asserts all of it against the built output, so CI
 catches a regression before an upload does.
+
+### Prior rejection on record
+
+> **Chrome Web Store — violation "Purple Potassium"**
+> *The following permission(s) need not be requested for the methods/properties
+> implemented by the item: `tabs`.*
+
+No manifest committed to this repository has ever declared `tabs`. The rejected
+upload was assembled by hand from a stale, untracked `dist-chrome/` directory
+whose manifest matched no source in git — which is precisely why packaging is now
+a script that builds from tracked files and verifies the result.
+
+Everything the extension calls on `chrome.tabs` works without the permission:
+`tabs.query` (reads only `id` and `windowId`), `tabs.sendMessage` (needs host
+access, not `tabs`), `tabs.onUpdated` (reads only `status`) and `tabs.onRemoved`.
+The permission only adds `url` / `title` / `favIconUrl`, which nothing reads —
+`tests/package.test.mjs` asserts that stays true.
 
 ## 3. Version bumps
 

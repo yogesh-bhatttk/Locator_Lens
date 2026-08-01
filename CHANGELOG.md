@@ -8,6 +8,23 @@ Store-readiness release. Fixes the packaging flaw behind the Chrome Web Store
 rejection, plus a set of correctness and performance defects found while auditing
 the extension for submission.
 
+### Chrome Web Store rejection
+
+Violation **"Purple Potassium"** — the submitted package requested the `tabs`
+permission, which nothing in the item needs.
+
+No manifest committed to this repository has ever declared `tabs`; the rejected
+upload was built by hand from a stale, untracked `dist-chrome/` directory whose
+manifest matched no source in git. The root cause was therefore the release
+process, not the source, and the fix is a build script that packages tracked files
+and verifies the result:
+
+- the build now fails if a declared permission is not backed by an API the code
+  actually calls, if `tabs` appears at all, or if a permission has no evidence rule
+  (unknown permissions fail closed)
+- `tests/package.test.mjs` additionally asserts the code never reads `url`,
+  `title` or `favIconUrl` off a tab — the only properties `tabs` would unlock
+
 ### Fixed
 
 - **Selector Lab highlights were invisible.** The `.ll-lab-highlight` style was only

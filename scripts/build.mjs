@@ -63,6 +63,72 @@ function collect() {
 
 const TEXT_EXT = /\.(js|html|json|css)$/;
 
+// ── permission policy ───────────────────────────────────────────────────────────
+//
+// Chrome Web Store rejection "Purple Potassium" (2026): the submitted package
+// requested `tabs`, which nothing in the code needed. The upload had been built by
+// hand from a stale directory whose manifest matched no committed source, so no
+// review of the repository would have caught it.
+//
+// Every declared permission must now be justified by an API the shipped code
+// actually calls, and the check fails closed: an unrecognised permission is an
+// error, not a pass.
+
+/** permission -> evidence that the packaged code genuinely uses it. */
+const PERMISSION_EVIDENCE = {
+  scripting: /chrome\.scripting\./,
+  storage: /chrome\.storage\./,
+  contextMenus: /chrome\.contextMenus\./,
+  sidePanel: /chrome(?:\.sidePanel\b|\[["']sidePanel["']\])/,
+  alarms: /chrome\.alarms\./,
+  debugger: /chrome\.debugger\./,
+  downloads: /chrome\.downloads\./,
+  cookies: /chrome\.cookies\./,
+  notifications: /chrome\.notifications\./,
+  webNavigation: /chrome\.webNavigation\./,
+  webRequest: /chrome\.webRequest\./,
+  clipboardWrite: /navigator\.clipboard|execCommand\(\s*['"]copy/,
+};
+
+/**
+ * Permissions that grant host access rather than an API surface, so there is no
+ * call signature to look for. activeTab is what keeps Inspect/Record working for
+ * users who set the extension's site access to "on click".
+ */
+const HOST_ACCESS_PERMISSIONS = new Set(['activeTab']);
+
+/**
+ * Never request these. Everything this extension does with chrome.tabs — querying
+ * the active tab for its id and windowId, sendMessage, onUpdated.status, onRemoved
+ * — works without the `tabs` permission. It only adds url/title/favIconUrl to the
+ * results, which nothing here reads.
+ */
+const BANNED_PERMISSIONS = new Map([
+  ['tabs', 'tabs.query/sendMessage/onUpdated/onRemoved all work without it; only url/title/favIconUrl need it, and nothing reads those. Rejected by CWS as "Purple Potassium".'],
+]);
+
+function verifyPermissions(manifest, code, problems) {
+  for (const permission of manifest.permissions ?? []) {
+    if (BANNED_PERMISSIONS.has(permission)) {
+      problems.push(`manifest requests banned permission "${permission}" — ${BANNED_PERMISSIONS.get(permission)}`);
+      continue;
+    }
+    if (HOST_ACCESS_PERMISSIONS.has(permission)) continue;
+
+    const evidence = PERMISSION_EVIDENCE[permission];
+    if (!evidence) {
+      problems.push(
+        `manifest requests "${permission}", which has no entry in PERMISSION_EVIDENCE. ` +
+          `Add one proving the code uses it, or remove the permission.`
+      );
+      continue;
+    }
+    if (!evidence.test(code)) {
+      problems.push(`manifest requests "${permission}" but no packaged file calls the matching API — remove it`);
+    }
+  }
+}
+
 /**
  * Reject anything that would fail store review, before it can be uploaded.
  * These are the rules a human reviewer applies; running them here makes a policy
@@ -90,6 +156,12 @@ function verify(entries, target) {
   }
 
   const manifest = JSON.parse(entries.find((e) => e.name === 'manifest.json').data.toString('utf8'));
+
+  const code = entries
+    .filter((e) => e.name.endsWith('.js') || e.name.endsWith('.html'))
+    .map((e) => e.data.toString('utf8'))
+    .join('\n');
+  verifyPermissions(manifest, code, problems);
 
   // Every path the manifest references must actually be in the archive. A manifest
   // pointing at a file the package omits is a load error on the reviewer's machine.
