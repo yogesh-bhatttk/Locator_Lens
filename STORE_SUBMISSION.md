@@ -109,7 +109,40 @@ formally via `browser_specific_settings.gecko.data_collection_permissions.requir
 Chrome additionally requires a hosted privacy-policy URL in the dashboard —
 `PRIVACY_POLICY.md` is the source text; publish it at a stable URL and link it.
 
-## 5. Chrome Web Store checklist
+## 5. Listing screenshots
+
+```bash
+npm run build          # the screenshots are taken of dist/chrome
+npm run screenshots
+```
+
+`scripts/screenshots/capture.mjs` loads the **built** extension into Chromium,
+drives it against `scripts/screenshots/demo-page.html` and captures the result.
+Every image is a real capture — nothing is drawn or mocked up.
+
+| File | Size | Upload? |
+|---|---|---|
+| `store-01-inspect.png` | 1280×800 | ✅ ranked locators for a picked field |
+| `store-02-selector-lab.png` | 1280×800 | ✅ Selector Lab resolving a Playwright locator |
+| `store-03-recorder.png` | 1280×800 | ✅ the recorder timeline |
+| `store-04-codegen.png` | 1280×800 | ✅ the generated test script |
+| `01`–`09-*.png` | native | raw captures — source material, and fine for AMO |
+
+The `store-*` images place the real page capture and the real panel capture at the
+geometry Chrome uses with a side panel docked (820 + 460 = 1280). They are a layout
+of genuine screenshots, which the stores allow; a redrawn approximation is not.
+
+> **Why this matters here.** The previous listing set could not be used. Seven of the
+> images showed a *different product* — a build with AI, Fix Test and Diagnostics
+> tabs that this extension does not contain — and the rest were rendered mock-ups
+> with garbled placeholder text and code the generator never emits. Either is a
+> straightforward rejection: listing images must depict the item's actual
+> functionality.
+
+Regenerate whenever the UI changes, and re-check that every screenshot still shows a
+feature that exists.
+
+## 6. Chrome Web Store checklist
 
 - [ ] `npm run verify` passes
 - [ ] version bumped past the last **submitted** version (not just the published one)
@@ -118,9 +151,9 @@ Chrome additionally requires a hosted privacy-policy URL in the dashboard —
 - [ ] permission justifications from §4 pasted in
 - [ ] privacy policy URL set and reachable
 - [ ] data-collection questions all answered "no"
-- [ ] screenshots (1280×800 or 640×400) show real functionality, no mockups
+- [ ] upload the four `store-*.png` images from §5 (1280×800, real captures)
 
-## 6. AMO checklist
+## 7. AMO checklist
 
 - [ ] `npm run verify` passes
 - [ ] version strictly greater than the currently listed one
@@ -131,7 +164,7 @@ Chrome additionally requires a hosted privacy-policy URL in the dashboard —
       changing it creates a *new* add-on rather than updating the existing listing
 - [ ] `strict_min_version` still correct for the APIs in use
 
-## 7. If a submission is rejected
+## 8. If a submission is rejected
 
 1. Record the exact reviewer text in `CHANGELOG.md` under the version.
 2. Reproduce the finding against `dist/<target>/` — the reviewer read those bytes.

@@ -1,4 +1,7 @@
 node_modules/
-dist/
-icons/
-screenshots/
+/dist/
+/icons/
+
+# Anchored to the repo root on purpose: an unanchored `screenshots/` also matches
+# scripts/screenshots/, which holds the capture script and must be linted.
+/screenshots/

@@ -33,6 +33,13 @@
       "rules": { "no-console": "off" }
     },
     {
+      "files": ["scripts/screenshots/*.mjs"],
+      "globals": {
+        "chrome": "readonly",
+        "document": "readonly"
+      }
+    },
+    {
       "files": ["tests/**/*.test.mjs"],
       "env": { "browser": true, "node": true, "webextensions": true },
       "parserOptions": { "sourceType": "module" },

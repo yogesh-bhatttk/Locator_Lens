@@ -1,0 +1,180 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Northwind Books — Checkout</title>
+    <style>
+      :root {
+        --bg: #f6f7f9;
+        --surface: #ffffff;
+        --line: #e3e6ea;
+        --ink: #17202a;
+        --muted: #667085;
+        --brand: #2f5bea;
+        --brand-ink: #ffffff;
+      }
+      * { box-sizing: border-box; }
+      body {
+        margin: 0;
+        background: var(--bg);
+        color: var(--ink);
+        font: 15px/1.5 -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif;
+      }
+      header {
+        background: var(--surface);
+        border-bottom: 1px solid var(--line);
+        padding: 0 32px;
+        display: flex;
+        align-items: center;
+        gap: 32px;
+        height: 60px;
+      }
+      .brand { font-weight: 700; font-size: 17px; letter-spacing: -0.01em; }
+      nav { display: flex; gap: 24px; }
+      nav a { color: var(--muted); text-decoration: none; font-size: 14px; }
+      nav a[aria-current='page'] { color: var(--ink); font-weight: 600; }
+      .spacer { flex: 1; }
+      main { max-width: 940px; margin: 32px auto; padding: 0 32px; display: grid; grid-template-columns: 1fr 320px; gap: 28px; }
+      h1 { font-size: 24px; margin: 0 0 4px; letter-spacing: -0.02em; }
+      .sub { color: var(--muted); margin: 0 0 24px; font-size: 14px; }
+      .card {
+        background: var(--surface);
+        border: 1px solid var(--line);
+        border-radius: 10px;
+        padding: 24px;
+        margin-bottom: 20px;
+      }
+      .card h2 { font-size: 15px; margin: 0 0 18px; letter-spacing: -0.01em; }
+      .row { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
+      .field { margin-bottom: 16px; }
+      label { display: block; font-size: 13px; font-weight: 600; margin-bottom: 6px; }
+      input[type='text'], input[type='email'], input[type='tel'], select, textarea {
+        width: 100%;
+        padding: 9px 11px;
+        border: 1px solid #cfd4dc;
+        border-radius: 7px;
+        font: inherit;
+        font-size: 14px;
+        background: #fff;
+      }
+      input:focus, select:focus, textarea:focus { outline: 2px solid var(--brand); outline-offset: -1px; border-color: var(--brand); }
+      .check { display: flex; align-items: flex-start; gap: 9px; margin-bottom: 12px; font-size: 14px; }
+      .check label { font-weight: 400; margin: 0; }
+      button {
+        font: inherit;
+        font-weight: 600;
+        font-size: 14px;
+        border-radius: 7px;
+        padding: 10px 18px;
+        cursor: pointer;
+        border: 1px solid transparent;
+      }
+      .primary { background: var(--brand); color: var(--brand-ink); }
+      .ghost { background: #fff; border-color: #cfd4dc; color: var(--ink); }
+      aside .card { position: sticky; top: 24px; }
+      .line { display: flex; justify-content: space-between; font-size: 14px; margin-bottom: 10px; }
+      .line.total { border-top: 1px solid var(--line); padding-top: 12px; margin-top: 14px; font-weight: 700; }
+      .muted { color: var(--muted); }
+      .actions { display: flex; gap: 10px; margin-top: 8px; }
+      table { width: 100%; border-collapse: collapse; font-size: 14px; }
+      th, td { text-align: left; padding: 9px 0; border-bottom: 1px solid var(--line); }
+      th { font-size: 12px; text-transform: uppercase; letter-spacing: 0.04em; color: var(--muted); }
+      tbody tr:last-child td { border-bottom: 0; }
+    </style>
+  </head>
+  <body>
+    <header>
+      <span class="brand">Northwind Books</span>
+      <nav aria-label="Main">
+        <a href="#catalogue">Catalogue</a>
+        <a href="#orders">Orders</a>
+        <a href="#checkout" aria-current="page">Checkout</a>
+      </nav>
+      <span class="spacer"></span>
+      <button type="button" class="ghost" data-testid="account-menu" title="Account settings">Account</button>
+    </header>
+
+    <main>
+      <section>
+        <h1>Checkout</h1>
+        <p class="sub">Step 2 of 3 — delivery and payment details</p>
+
+        <div class="card">
+          <h2>Contact details</h2>
+          <div class="row">
+            <div class="field">
+              <label for="first-name">First name</label>
+              <input type="text" id="first-name" name="firstName" autocomplete="given-name" />
+            </div>
+            <div class="field">
+              <label for="last-name">Last name</label>
+              <input type="text" id="last-name" name="lastName" autocomplete="family-name" />
+            </div>
+          </div>
+          <div class="field">
+            <label for="email">Email address</label>
+            <input type="email" id="email" name="email" placeholder="you@company.com" data-testid="checkout-email" />
+          </div>
+          <div class="field">
+            <label for="phone">Phone number</label>
+            <input type="tel" id="phone" name="phone" placeholder="+44 20 7946 0000" />
+          </div>
+        </div>
+
+        <div class="card">
+          <h2>Delivery</h2>
+          <div class="field">
+            <label for="country">Country</label>
+            <select id="country" name="country">
+              <option>United Kingdom</option>
+              <option>Ireland</option>
+              <option>Germany</option>
+              <option>France</option>
+            </select>
+          </div>
+          <div class="field">
+            <label for="notes">Delivery notes</label>
+            <textarea id="notes" name="notes" rows="3" placeholder="Leave with a neighbour, ring the bell twice…"></textarea>
+          </div>
+          <div class="check">
+            <input type="checkbox" id="gift-wrap" name="giftWrap" />
+            <label for="gift-wrap">Gift wrap this order (+ £3.50)</label>
+          </div>
+          <div class="check">
+            <input type="checkbox" id="save-details" name="saveDetails" checked />
+            <label for="save-details">Save these details for next time</label>
+          </div>
+        </div>
+
+        <div class="card">
+          <h2>Your basket</h2>
+          <table>
+            <thead>
+              <tr><th scope="col">Title</th><th scope="col">Qty</th><th scope="col">Price</th></tr>
+            </thead>
+            <tbody>
+              <tr><td>The Pragmatic Programmer</td><td>1</td><td>£38.00</td></tr>
+              <tr><td>Designing Data-Intensive Applications</td><td>1</td><td>£42.50</td></tr>
+              <tr><td>Refactoring</td><td>2</td><td>£64.00</td></tr>
+            </tbody>
+          </table>
+        </div>
+      </section>
+
+      <aside>
+        <div class="card">
+          <h2>Order summary</h2>
+          <div class="line"><span class="muted">Subtotal</span><span>£144.50</span></div>
+          <div class="line"><span class="muted">Delivery</span><span>£4.99</span></div>
+          <div class="line"><span class="muted">VAT</span><span>£29.90</span></div>
+          <div class="line total"><span>Total</span><span>£179.39</span></div>
+          <div class="actions">
+            <button type="submit" class="primary" data-testid="place-order">Place order</button>
+            <button type="button" class="ghost">Back</button>
+          </div>
+        </div>
+      </aside>
+    </main>
+  </body>
+</html>

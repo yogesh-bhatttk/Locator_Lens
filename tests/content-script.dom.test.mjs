@@ -19,8 +19,25 @@ const CONTENT_SCRIPTS = ['src/codegen.js', 'src/content-locator-engine.js', 'src
 let messageHandlers;
 let storageValues;
 
+/**
+ * Every handler registered across all loads in this file. jsdom keeps one document
+ * for the whole file, so a re-loaded content script adds a second set of listeners
+ * to it. Without telling the previous instance to stand down, an earlier one stays
+ * in recording mode and keeps emitting steps into the next test.
+ */
+const allHandlers = [];
+
 /** Fresh page + fresh copy of the content scripts, as if the tab had just loaded. */
 function loadContentScripts() {
+  for (const handler of allHandlers) {
+    try {
+      handler({ type: 'STOP_RECORDING' }, {}, () => {});
+      handler({ type: 'STOP_INSPECT' }, {}, () => {});
+    } catch {
+      /* an instance whose globals have already been torn down */
+    }
+  }
+
   messageHandlers = [];
   storageValues = {};
 
@@ -29,7 +46,12 @@ function loadContentScripts() {
       id: 'test-extension-id',
       lastError: null,
       sendMessage: () => {},
-      onMessage: { addListener: (fn) => messageHandlers.push(fn) },
+      onMessage: {
+        addListener: (fn) => {
+          messageHandlers.push(fn);
+          allHandlers.push(fn);
+        },
+      },
     },
     storage: {
       local: {
@@ -210,6 +232,76 @@ describe('stress test', () => {
     target.dispatchEvent(new window.MouseEvent('contextmenu', { bubbles: true }));
 
     expect(send({ type: 'RUN_STRESS_TEST' }).data).toMatchObject({ survived: false, name: 'Duplicate' });
+  });
+});
+
+describe('recorder capture', () => {
+  /** Collect the actions the content script forwards to the background. */
+  function captureActions() {
+    const sent = [];
+    chrome.runtime.sendMessage = (msg) => {
+      if (msg && msg.type === 'RECORDED_ACTION') sent.push(msg.data);
+    };
+    return sent;
+  }
+
+  // A checkbox fires pointerdown *and* change. Recording in both places produced
+  // the step twice, and the pointerdown copy always said `check` because the
+  // element had not toggled yet — so unchecking a box also generated `.check()`.
+  it('records a checkbox exactly once', () => {
+    document.body.innerHTML = '<label for="tos">Accept terms</label><input type="checkbox" id="tos">';
+    const box = document.getElementById('tos');
+    const sent = captureActions();
+
+    send({ type: 'START_RECORDING' });
+    box.dispatchEvent(new window.PointerEvent('pointerdown', { bubbles: true, button: 0, isPrimary: true }));
+    box.checked = true;
+    box.dispatchEvent(new window.Event('change', { bubbles: true }));
+
+    const steps = sent.filter((a) => a.action === 'check' || a.action === 'uncheck' || a.action === 'click');
+    expect(steps).toHaveLength(1);
+    expect(steps[0].action).toBe('check');
+  });
+
+  it('records unchecking as uncheck, not check', () => {
+    document.body.innerHTML = '<label for="tos">Accept terms</label><input type="checkbox" id="tos" checked>';
+    const box = document.getElementById('tos');
+    const sent = captureActions();
+
+    send({ type: 'START_RECORDING' });
+    box.dispatchEvent(new window.PointerEvent('pointerdown', { bubbles: true, button: 0, isPrimary: true }));
+    box.checked = false;
+    box.dispatchEvent(new window.Event('change', { bubbles: true }));
+
+    const steps = sent.filter((a) => ['check', 'uncheck', 'click'].includes(a.action));
+    expect(steps).toHaveLength(1);
+    expect(steps[0].action).toBe('uncheck');
+  });
+
+  it('still records an ordinary button click', () => {
+    document.body.innerHTML = '<button id="go">Go</button>';
+    const sent = captureActions();
+
+    send({ type: 'START_RECORDING' });
+    document
+      .getElementById('go')
+      .dispatchEvent(new window.PointerEvent('pointerdown', { bubbles: true, button: 0, isPrimary: true }));
+
+    expect(sent.filter((a) => a.action === 'click')).toHaveLength(1);
+  });
+
+  it('records nothing while paused', () => {
+    document.body.innerHTML = '<button id="go">Go</button>';
+    const sent = captureActions();
+
+    send({ type: 'START_RECORDING' });
+    send({ type: 'PAUSE_RECORDING' });
+    const before = sent.length;
+    document
+      .getElementById('go')
+      .dispatchEvent(new window.PointerEvent('pointerdown', { bubbles: true, button: 0, isPrimary: true }));
+
+    expect(sent).toHaveLength(before);
   });
 });
 

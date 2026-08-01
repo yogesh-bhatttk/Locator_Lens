@@ -35,5 +35,7 @@ mcp-bridge/
 
 MISSION_SELECTOR_LAB.md
 
-# Store listing assets, kept out of the repo
-screenshots/
+# Store listing images are tracked: they are release artefacts, and having the
+# exact bytes that were uploaded in git makes a rejection reviewable. Regenerate
+# with `npm run screenshots`.
+.tmp-screenshot-profile/

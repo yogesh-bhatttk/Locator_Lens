@@ -131,24 +131,96 @@ The **💥 Stress Test** button (next to the target metadata) checks whether the
 
 ## 11. Permissions and cross-browser manifests
 
-`src/` is shared by both browsers; only the manifest differs. `setup.sh` / `setup.bat` copy `manifests/manifest.chrome.json` or `manifests/manifest.firefox.json` over the root `manifest.json` for the load-from-root workflow.
+`src/` is shared by both browsers; only the manifest differs. There are exactly
+three manifests — the root one plus the two in `manifests/` — and `scripts/version.mjs`
+keeps their versions in step. `setup.sh` / `setup.bat` copy one of the variants over
+the root `manifest.json` for the load-from-root workflow.
 
 **Declared permissions and why they are needed**
 
 | Permission / key | Used by |
 |---|---|
-| `activeTab` | targeting the current tab in `chrome.tabs.query` |
+| `activeTab` | Host access to the tab the user is on at the moment they invoke a feature. Keeps Inspect / Record / Lab / Stress Test working for users who restrict the extension's site access to "on click". It gates no API, so there is no call signature to point at. |
 | `scripting` + `host_permissions: <all_urls>` | `chrome.scripting.executeScript` (inject content scripts on demand for the Lab relay, Stress Test, context-menu copy) and content-script messaging on any page |
-| `storage` | `chrome.storage.local` (last picked element, recorder state, framework/language) |
+| `storage` | `chrome.storage.local` (last picked element, recorder state, framework/language, custom test attributes) |
 | `contextMenus` | the “Copy Best Locator” / “Open/Close Panel” entries |
 | `sidePanel` + `side_panel` (Chrome) | the side-panel surface |
 | `sidebar_action` (Firefox) | the sidebar surface — Firefox has **no** `sidePanel` permission; `background.js` detects this and falls back from `chrome.sidePanel` to `browser.sidebarAction` |
 
-No additional permission is required by the Selector Lab or Stress Test paths — both reuse `scripting`/`tabs` that are already declared.
+### The `tabs` permission is deliberately **not** requested
+
+A Chrome Web Store submission was rejected under violation **"Purple Potassium"**
+for requesting `tabs` when nothing needed it. Everything this extension does with
+`chrome.tabs` works without the permission:
+
+| Call | Why it needs no permission |
+|---|---|
+| `chrome.tabs.query({ active: true, currentWindow: true })` | Returns tabs either way. `tabs` only adds `url`, `title` and `favIconUrl` to the result; the code reads `id` and `windowId`, which are always present. |
+| `chrome.tabs.sendMessage(tabId, …)` | Gated by **host** access, not by `tabs`. |
+| `chrome.tabs.onUpdated` | Fires either way. `tabs` only adds `url` to `changeInfo`; the code reads `status`. |
+| `chrome.tabs.onRemoved` | Never required a permission. |
+
+This is enforced, not just documented: `scripts/build.mjs` fails the build if any
+manifest declares `tabs`, if a declared permission is not backed by an API the
+packaged code calls, or if a permission has no evidence rule at all (unknown
+permissions fail closed). `tests/package.test.mjs` additionally asserts the code
+never reads `url` / `title` / `favIconUrl` off a tab, so the justification above
+cannot quietly stop being true.
 
 **Cross-browser notes**
 
 - **Background:** Chrome uses `background.service_worker`; Firefox uses `background.scripts` + `"type": "module"`. `src/background.js` is plain (no top-level imports) and uses only APIs available in both, so the single file works in either context.
-- **Firefox requirements:** `browser_specific_settings.gecko.id`, `strict_min_version: "142.0"`, and `data_collection_permissions: { required: ["none"] }` are present so AMO/`about:debugging` accept the add-on without data-collection prompts.
+- **Firefox requirements:** `browser_specific_settings.gecko.id`, `strict_min_version: "142.0"`, and `data_collection_permissions: { required: ["none"] }` are present so AMO/`about:debugging` accept the add-on without data-collection prompts. Changing `gecko.id` would create a *new* add-on rather than update the existing listing.
 - **Namespaces:** code uses the `chrome.*` namespace, which Firefox aliases; Firefox-only calls (`browser.sidebarAction`) are guarded with `typeof browser !== 'undefined'`.
-- All five manifests (root, both `manifests/` variants, and the two `dist-*` copies) are valid MV3 JSON.
+- All three manifests are valid MV3 JSON, and the build verifies that every path a manifest references is actually present in its package.
+
+---
+
+## 12. Tests and CI
+
+`npm test` runs five Vitest suites (152 tests). They drive the real shipping files —
+nothing is duplicated or re-implemented for testability.
+
+| Suite | Environment | Covers |
+|---|---|---|
+| `tests/codegen.test.mjs` | node | Every framework × language combination, action and assertion statements, script scaffolding, and escaping of values containing quotes, backslashes and newlines |
+| `tests/locator-engine.dom.test.mjs` | jsdom | Role resolution, accessible-name computation, ranking and stability, live uniqueness counts, the a11y audit, and CSS-special identifiers |
+| `tests/content-script.dom.test.mjs` | jsdom | Loads all three content scripts in manifest order behind a `chrome` stub and drives them through the background's message API — inspect lifecycle, Selector Lab, Stress Test, recorder controls |
+| `tests/sidepanel-render.dom.test.mjs` | jsdom | `esc` / `hl` / `safeRender`, including that inline event handlers, `<script>` and `javascript:` URLs never survive rendering |
+| `tests/package.test.mjs` | node | Builds both packages and asserts the store contract against the built bytes |
+
+`.github/workflows/ci.yml` runs version check → lint → tests → build on every push
+and pull request, and uploads both `.zip` files as artifacts. A pre-commit hook runs
+ESLint over staged files.
+
+Two notes on what the tests do **not** cover:
+
+- jsdom has no layout, so `document.elementFromPoint` (the picker's hit test) and
+  `innerText` semantics are not exercised. Smoke-test inspect → record → export in a
+  real browser before submitting.
+- The side panel's HTML and CSS are not tested; only its rendering helpers are.
+
+---
+
+## 13. Store screenshots
+
+`npm run screenshots` (`scripts/screenshots/capture.mjs`) loads **`dist/chrome`** into
+Chromium, drives it against `scripts/screenshots/demo-page.html`, and writes real
+captures to `screenshots/store/`. Run `npm run build` first — it photographs the built
+package, not the source tree.
+
+Two implementation details worth knowing before editing it:
+
+- **It uses Playwright's bundled Chromium, not the installed Google Chrome.** Chrome
+  137 removed the `--load-extension` switch, so a stock Chrome starts with no
+  extension loaded and silently produces screenshots of an empty browser.
+- **Messages are addressed to the demo tab explicitly, from the service worker.** The
+  side panel has to be opened as a tab to be captured, which makes it the active tab —
+  so anything routed through the background's `tabs.query({ active: true })` would act
+  on the panel instead of the page under test.
+
+The `store-*.png` files are 1280×800 (the size the Chrome Web Store requires) and place
+the real page capture beside the real panel capture at the geometry Chrome uses when a
+panel is docked. Both halves are genuine screenshots; nothing is redrawn. Listing
+images must show functionality the extension actually has — the previous set did not,
+which is covered in `STORE_SUBMISSION.md` §5.

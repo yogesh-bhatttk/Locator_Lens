@@ -45,6 +45,11 @@ and verifies the result:
   the code generator.
 - **Recording state could exceed the storage quota and vanish.** The timeline is
   now capped and the failing write is handled instead of being discarded silently.
+- **Checkboxes and radios were recorded twice.** Both the pointer handler and the
+  change handler emitted a step, so every tick produced a duplicate line. The
+  pointer copy was also always `.check()` — it ran before the control toggled, so
+  *unchecking* a box generated `.check()` too. Only the change handler records
+  these now, and it sees the settled state.
 - Inspecting a document without a `<body>` no longer throws.
 
 ### Performance
@@ -82,8 +87,14 @@ and verifies the result:
   Firefox that fails the build on remote code, dynamic evaluation, network APIs,
   stray files, or a manifest referencing a file the package omits.
 - `scripts/version.mjs` — keeps `package.json` and all three manifests in step.
-- 124 tests (Vitest) covering the code generator, locator engine, render
-  sanitisation and the contents of the built packages.
+- `npm run screenshots` — captures listing images from the built extension driven
+  against a demo page, replacing a set that could not legitimately be submitted:
+  seven images showed a different product (AI / Fix Test / Diagnostics tabs this
+  extension does not have) and the rest were rendered mock-ups with garbled
+  placeholder text.
+- 156 tests (Vitest) covering the code generator, locator engine, the content
+  scripts driven end to end through their message API, render sanitisation, and
+  the contents of the built packages.
 - ESLint, Prettier, a pre-commit hook and GitHub Actions CI.
 - `STORE_SUBMISSION.md` with permission justifications and per-store checklists.
 - `LICENSE` (MIT — the README already declared it).

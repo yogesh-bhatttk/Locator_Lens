@@ -27,7 +27,8 @@
     "build:chrome": "node scripts/build.mjs chrome",
     "build:firefox": "node scripts/build.mjs firefox",
     "verify": "npm run version:check && npm run lint && npm run test && npm run build",
-    "prepare": "husky"
+    "prepare": "husky",
+    "screenshots": "node scripts/screenshots/capture.mjs"
   },
   "devDependencies": {
     "eslint": "^8.57.1",
@@ -35,7 +36,8 @@
     "jsdom": "^29.1.1",
     "lint-staged": "^15.5.2",
     "prettier": "^3.6.2",
-    "vitest": "^4.1.5"
+    "vitest": "^4.1.5",
+    "playwright": "^1.59.1"
   },
   "lint-staged": {
     "*.{js,mjs}": [

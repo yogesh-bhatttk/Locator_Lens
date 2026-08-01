@@ -209,6 +209,12 @@
       return;
     }
 
+    // Checkboxes and radios are recorded by onRecordChange, not here. Recording on
+    // pointerdown as well emitted the step twice, and this early it could only
+    // guess `check` — the element has not toggled yet, so unchecking a box also
+    // produced `.check()`. The change handler sees the settled state and is right.
+    if (type === 'checkbox' || type === 'radio') return;
+
     let best;
     try {
       const result = generateLocators(el);
@@ -217,14 +223,12 @@
       debugWarn('generateLocators failed during recording:', err);
     }
     if (!best) {
-      const fb = recordFallbackLocator(el, (type === 'checkbox' || type === 'radio') ? 'check()' : 'click()');
+      const fb = recordFallbackLocator(el, 'click()');
       best = { code: fb.code, fullCode: fb.fullCode, target: fb.target };
     }
 
-    const actionType = (type === 'checkbox' || type === 'radio') ? 'check' : 'click';
-
     sendRecordedAction({
-      action: actionType,
+      action: 'click',
       value: '',
       code: best.code,
       fullCode: best.fullCode,
