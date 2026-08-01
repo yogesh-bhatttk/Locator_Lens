@@ -193,12 +193,33 @@ nothing is duplicated or re-implemented for testability.
 and pull request, and uploads both `.zip` files as artifacts. A pre-commit hook runs
 ESLint over staged files.
 
-Two notes on what the tests do **not** cover:
+jsdom has no layout, so `document.elementFromPoint` (the picker's hit test),
+`innerText` semantics and the real message plumbing between content script, service
+worker and side panel are outside its reach. `npm run smoke` covers that gap.
 
-- jsdom has no layout, so `document.elementFromPoint` (the picker's hit test) and
-  `innerText` semantics are not exercised. Smoke-test inspect → record → export in a
-  real browser before submitting.
-- The side panel's HTML and CSS are not tested; only its rendering helpers are.
+The side panel's HTML and CSS are still not tested; only its rendering helpers are.
+
+### `npm run smoke`
+
+Loads the **built** extension into Chromium and drives the whole product against
+the demo page — inspect and pick by real mouse hit test, keyboard traversal, Escape
+teardown, Selector Lab, and a recording that exercises fill / select / check /
+uncheck. 27 assertions.
+
+The last group is the useful one: it extracts the locators the extension just wrote
+into the generated script and **runs them back through Playwright against the same
+page**, asserting each matches exactly one element. A locator that reads plausibly
+but does not resolve fails the run.
+
+It also asserts the content script writes nothing to the page console, and that a
+recording survives reopening the panel.
+
+Requires a display, so it is not part of `npm run verify` or CI. Run it before
+submitting:
+
+```bash
+npm run build && npm run smoke
+```
 
 ---
 

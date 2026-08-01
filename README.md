@@ -82,6 +82,7 @@ then load the root folder. Use `dist/` for anything you intend to submit — see
 | `npm run build` | Reproducible Chrome + Firefox packages in `dist/` |
 | `npm run version:check` | Assert `package.json` and all three manifests agree |
 | `npm run screenshots` | Capture store listing images from the built extension |
+| `npm run smoke` | Drive the built extension in a real browser (27 end-to-end checks) |
 | `npm run verify` | Version check + lint + tests + build — run this before submitting |
 
 `npm run build` selects files from an explicit allowlist and **fails** if the result

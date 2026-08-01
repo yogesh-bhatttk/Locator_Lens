@@ -33,11 +33,12 @@
       "rules": { "no-console": "off" }
     },
     {
-      "files": ["scripts/screenshots/*.mjs"],
+      "files": ["scripts/screenshots/*.mjs", "scripts/smoke.mjs"],
       "globals": {
         "chrome": "readonly",
         "document": "readonly"
-      }
+      },
+      "rules": { "no-eval": "off" }
     },
     {
       "files": ["tests/**/*.test.mjs"],

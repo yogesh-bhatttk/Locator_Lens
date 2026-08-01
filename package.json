@@ -28,7 +28,8 @@
     "build:firefox": "node scripts/build.mjs firefox",
     "verify": "npm run version:check && npm run lint && npm run test && npm run build",
     "prepare": "husky",
-    "screenshots": "node scripts/screenshots/capture.mjs"
+    "screenshots": "node scripts/screenshots/capture.mjs",
+    "smoke": "node scripts/smoke.mjs"
   },
   "devDependencies": {
     "eslint": "^8.57.1",

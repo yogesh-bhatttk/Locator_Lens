@@ -95,6 +95,11 @@ and verifies the result:
 - 156 tests (Vitest) covering the code generator, locator engine, the content
   scripts driven end to end through their message API, render sanitisation, and
   the contents of the built packages.
+- `npm run smoke` — 27 end-to-end checks against the built extension in a real
+  browser, covering what jsdom cannot: the pointer hit test, keyboard traversal,
+  the content-script/worker/panel message path, and console hygiene. It also feeds
+  the locators the extension generates back through Playwright to confirm each one
+  resolves to exactly one element on the page.
 - ESLint, Prettier, a pre-commit hook and GitHub Actions CI.
 - `STORE_SUBMISSION.md` with permission justifications and per-store checklists.
 - `LICENSE` (MIT — the README already declared it).

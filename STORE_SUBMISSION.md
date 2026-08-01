@@ -145,6 +145,8 @@ feature that exists.
 ## 6. Chrome Web Store checklist
 
 - [ ] `npm run verify` passes
+- [ ] `npm run smoke` passes — drives the built extension in a real browser and
+      re-runs the locators it generates against the page (jsdom cannot cover this)
 - [ ] version bumped past the last **submitted** version (not just the published one)
 - [ ] upload `dist/locatorlens-chrome-<version>.zip`
 - [ ] single purpose: "generate and validate test locators for the current page"
@@ -155,7 +157,7 @@ feature that exists.
 
 ## 7. AMO checklist
 
-- [ ] `npm run verify` passes
+- [ ] `npm run verify` and `npm run smoke` pass
 - [ ] version strictly greater than the currently listed one
 - [ ] upload `dist/locatorlens-firefox-<version>.zip`
 - [ ] source code is unminified and unbundled — the package ships the same files as
