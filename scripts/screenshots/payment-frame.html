@@ -1,0 +1,48 @@
+<!doctype html>
+<!-- The payment fields of the demo checkout, served as a separate document so the
+     demo page embeds a real cross-document iframe — the shape every payment
+     provider actually ships. A srcdoc frame would not do: Chrome does not inject
+     content scripts into about:srcdoc, so it would exercise a case that never
+     occurs in the wild while skipping the one that always does. -->
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>Payment details</title>
+    <style>
+      body {
+        font: 14px/1.5 system-ui, sans-serif;
+        margin: 12px;
+        color: #0d1220;
+        background: #fff;
+      }
+      label {
+        display: block;
+        font-weight: 600;
+        margin-bottom: 4px;
+      }
+      input {
+        width: 92%;
+        padding: 7px 8px;
+        border: 1px solid #c3cad9;
+        border-radius: 4px;
+        font: inherit;
+      }
+      button {
+        margin-top: 10px;
+        padding: 7px 16px;
+        border: 0;
+        border-radius: 4px;
+        background: #2f6df6;
+        color: #fff;
+        font: inherit;
+        font-weight: 600;
+        cursor: pointer;
+      }
+    </style>
+  </head>
+  <body>
+    <label for="card">Card number</label>
+    <input id="card" name="card" inputmode="numeric" placeholder="4242 4242 4242 4242" />
+    <button type="button" data-testid="pay-now">Pay now</button>
+  </body>
+</html>

@@ -24,6 +24,7 @@ import { chromium } from 'playwright';
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const EXTENSION = join(ROOT, 'dist/chrome');
 const DEMO_HTML = join(ROOT, 'scripts/screenshots/demo-page.html');
+const FRAME_HTML = join(ROOT, 'scripts/screenshots/payment-frame.html');
 const PORT = 4174;
 const DEMO = `http://localhost:${PORT}/checkout`;
 const profile = join(ROOT, '.tmp-smoke-profile');
@@ -43,9 +44,11 @@ async function main() {
   if (!existsSync(EXTENSION)) throw new Error('dist/chrome missing — run `npm run build` first.');
 
   const html = readFileSync(DEMO_HTML);
-  const server = createServer((_req, res) => {
+  const frameHtml = readFileSync(FRAME_HTML);
+  const server = createServer((req, res) => {
+    const body = (req.url || '').startsWith('/payment-frame') ? frameHtml : html;
     res.writeHead(200, { 'content-type': 'text/html; charset=utf-8' });
-    res.end(html);
+    res.end(body);
   });
   await new Promise((ok) => server.listen(PORT, '127.0.0.1', ok));
 
@@ -258,6 +261,62 @@ async function main() {
     const multiPage = await panel.evaluate(() => document.getElementById('codePreview')?.innerText ?? '');
     check('the step before the navigation is kept', /account-menu/.test(multiPage), multiPage.slice(0, 400));
     check('capture resumes on the page navigated to', /Lovelace/.test(multiPage), multiPage.slice(0, 400));
+
+    // Payment fields live in an iframe on essentially every real checkout. The
+    // content script is not there until a feature is switched on, and a locator
+    // generated inside a frame is wrong unless it says which frame to enter — so
+    // this drives the whole path: worker injects all frames, the pick comes back
+    // frame-qualified, and Playwright is handed the result to resolve for real.
+    console.log('\niframes');
+    await page.bringToFront();
+    await panel.evaluate(() => chrome.runtime.sendMessage({ type: 'START_INSPECT' }));
+    await page.waitForTimeout(600);
+
+    const cardField = page.frameLocator('#payment-frame').locator('#card');
+    await cardField.click();
+    await page.waitForTimeout(700);
+
+    const framePick = await worker.evaluate(
+      async () => (await chrome.storage.local.get('lastElement')).lastElement
+    );
+    check(
+      'an element inside an iframe can be picked at all',
+      framePick?.elementData?.id === 'card',
+      `picked ${JSON.stringify(framePick?.elementData?.id)}`
+    );
+    check(
+      'the pick records the frame it came from',
+      (framePick?.elementData?.framePath ?? []).some((f) => String(f).includes('payment-frame')),
+      JSON.stringify(framePick?.elementData?.framePath)
+    );
+
+    const frameTop = framePick?.locators?.[0];
+    check(
+      'the top locator enters the frame',
+      /frameLocator\(/.test(frameTop?.code ?? ''),
+      `got ${frameTop?.code}`
+    );
+    check(
+      'the structured target is frame-wrapped',
+      frameTop?.target?.kind === 'frame',
+      `got ${frameTop?.target?.kind}`
+    );
+
+    // The real proof: hand the generated Playwright locator back to Playwright.
+    const frameExpr = frameTop?.code ?? '';
+    let frameCount = -1;
+    try {
+      // eslint-disable-next-line no-eval -- resolving our own generated locator is the point
+      frameCount = await eval(frameExpr).count();
+    } catch (err) {
+      check(`${frameExpr.slice(0, 70)} resolves`, false, err.message.split('\n')[0]);
+    }
+    if (frameCount !== -1) {
+      check(`${frameExpr.slice(0, 60)} matches exactly 1 element`, frameCount === 1, `matched ${frameCount}`);
+    }
+
+    await page.keyboard.press('Escape');
+    await page.waitForTimeout(300);
 
     console.log('\nhygiene');
     check(

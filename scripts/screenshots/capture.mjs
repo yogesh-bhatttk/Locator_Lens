@@ -50,9 +50,11 @@ async function main() {
   if (!existsSync(EXTENSION)) throw new Error(`${EXTENSION} is missing — run \`npm run build\` first.`);
 
   const html = readFileSync(join(HERE, 'demo-page.html'));
-  const server = createServer((_req, res) => {
+  const frameHtml = readFileSync(join(HERE, 'payment-frame.html'));
+  const server = createServer((req, res) => {
+    const body = (req.url || '').startsWith('/payment-frame') ? frameHtml : html;
     res.writeHead(200, { 'content-type': 'text/html; charset=utf-8' });
-    res.end(html);
+    res.end(body);
   });
   await new Promise((ok) => server.listen(PORT, '127.0.0.1', ok));
 
@@ -172,14 +174,40 @@ async function main() {
     await panel.waitForTimeout(400);
     await shot(panel, '08-generated-test.png', 'the generated, editable test script');
 
-    // ── 6. Popup ────────────────────────────────────────────────────────────
+    // ── 6. An element inside an iframe ───────────────────────────────────────
+    // The payment fields are in a real cross-document iframe, as they are on every
+    // checkout. Worth its own capture: the locator has to enter the frame, and that
+    // is the difference between generated code that works and code that silently
+    // finds nothing.
+    await panel.bringToFront();
+    await panel.click('[data-target="tab-inspector"]').catch(() => {});
+    await page.bringToFront();
+    // Routed through the worker, which is what injects into sub-frames.
+    await panel.evaluate(() => chrome.runtime.sendMessage({ type: 'START_INSPECT' }));
+    await page.waitForTimeout(700);
+
+    const cardField = page.frameLocator('#payment-frame').locator('#card');
+    await cardField.hover();
+    await page.waitForTimeout(500);
+    await shot(page, '10-iframe-overlay.png', 'inspecting a field inside a payment iframe');
+
+    await cardField.click();
+    await page.waitForTimeout(900);
+    await toDemo({ type: 'STOP_INSPECT' });
+
+    await panel.bringToFront();
+    await panel.reload();
+    await panel.waitForTimeout(900);
+    await shot(panel, '11-iframe-locators.png', 'the locator enters the frame with frameLocator()');
+
+    // ── 7. Popup ────────────────────────────────────────────────────────────
     const popup = await context.newPage();
     await popup.setViewportSize({ width: 420, height: 460 });
     await popup.goto(`chrome-extension://${extensionId}/src/popup.html`);
     await popup.waitForTimeout(600);
     await shot(popup, '09-popup.png', 'the launcher popup');
 
-    // ── 7. Store-sized composites ───────────────────────────────────────────
+    // ── 8. Store-sized composites ───────────────────────────────────────────
     // The Chrome Web Store only accepts 1280x800 or 640x400, and a side panel is
     // 460px wide. These place the real page capture and the real panel capture at
     // the exact geometry Chrome uses when the panel is open (820 + 460 = 1280) —
@@ -191,6 +219,7 @@ async function main() {
     await compose(composer, 'store-02-selector-lab.png', '06-lab-highlight.png', '05-selector-lab.png');
     await compose(composer, 'store-03-recorder.png', '01-inspect-overlay.png', '07-recorder-timeline.png');
     await compose(composer, 'store-04-codegen.png', '06-lab-highlight.png', '08-generated-test.png');
+    await compose(composer, 'store-05-iframes.png', '10-iframe-overlay.png', '11-iframe-locators.png');
 
     console.log(`\n✓ written to ${OUT.replace(ROOT + '/', '')}/`);
     console.log('  store-*.png are the 1280x800 images to upload; the rest are the raw captures.');

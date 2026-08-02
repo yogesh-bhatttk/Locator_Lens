@@ -148,6 +148,20 @@
         </div>
 
         <div class="card">
+          <h2>Payment</h2>
+          <!-- Payment fields in an iframe, as every real payment provider ships
+               them. A separate document, not srcdoc: Chrome does not inject content
+               scripts into about:srcdoc, so srcdoc would test a case that never
+               happens instead of the one that always does. -->
+          <iframe
+            id="payment-frame"
+            title="Payment details"
+            src="/payment-frame"
+            style="width: 100%; height: 150px; border: 1px solid #2a3352; border-radius: 6px; background: #fff"
+          ></iframe>
+        </div>
+
+        <div class="card">
           <h2>Your basket</h2>
           <table>
             <thead>
