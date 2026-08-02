@@ -8,6 +8,7 @@
 //   { kind: 'testid', attr, value }
 //   { kind: 'role', role, name?, level? }
 //   { kind: 'label'|'placeholder'|'altText'|'title'|'text'|'id'|'name'|'css', value }
+//   { kind: 'chain', parent, child }   — child scoped inside parent (both targets)
 //
 // An `action` step is: { action, target?, value?, key?, url?, width?, height? }
 //   action ∈ click | dblclick | check | uncheck | fill | selectOption | press | goto | viewport
@@ -178,38 +179,68 @@
     return 'driver.findElement(' + fn + '(' + q(selector, lang) + '))';
   }
 
-  function roleXpath(role, name) {
+  // `rel` renders the expression for use inside a parent element's search scope.
+  // An absolute "//*[…]" handed to element.find_element still searches the whole
+  // document — the leading dot is what actually scopes it to the parent.
+  function roleXpath(role, name, rel) {
     var node = ROLE_XPATH[role] || ('@role="' + attrSel(role) + '"');
-    var base = '//*[' + node + ']';
+    var axis = rel ? './/*' : '//*';
     if (name) {
       // xpathLiteral() keeps quotes in the name intact — the previous version deleted
       // every double quote from the accessible name, so a button labelled Delete "row"
       // produced an xpath that silently matched the wrong element (or nothing).
-      return '//*[(' + node + ') and contains(normalize-space(.), ' + xpathLiteral(name) + ')]';
+      return axis + '[(' + node + ') and contains(normalize-space(.), ' + xpathLiteral(name) + ')]';
     }
-    return base;
+    return axis + '[' + node + ']';
   }
 
-  function selLocator(t, lang) {
+  function selLocator(t, lang, rel) {
     switch (t.kind) {
       case 'testid': return selFind('css', '[' + t.attr + '="' + attrSel(t.value) + '"]', lang);
       case 'role':
-        if (t.name) return selFind('xpath', roleXpath(t.role, t.name), lang);
+        if (t.name) return selFind('xpath', roleXpath(t.role, t.name, rel), lang);
         return selFind('css', roleCss(t.role), lang);
       case 'label': return selFind('css', '[aria-label="' + attrSel(t.value) + '"]', lang);
       case 'placeholder': return selFind('css', '[placeholder="' + attrSel(t.value) + '"]', lang);
       case 'altText': return selFind('css', 'img[alt="' + attrSel(t.value) + '"]', lang);
       case 'title': return selFind('css', '[title="' + attrSel(t.value) + '"]', lang);
-      case 'text': return selFind('xpath', '//*[contains(normalize-space(.), ' + xpathLiteral(t.value) + ')]', lang);
+      case 'text': return selFind('xpath', (rel ? './/*' : '//*') + '[contains(normalize-space(.), ' + xpathLiteral(t.value) + ')]', lang);
       case 'id': return selFind('id', t.value, lang);
       case 'name': return selFind('name', t.value, lang);
       case 'css': default: return selFind('css', t.value || 'body', lang);
     }
   }
 
-  function locatorExpr(target, fw, lang) {
+  // ── chained locators ────────────────────────────────────────────────────────
+  // A chain narrows an ambiguous child to one unique parent — the only reliable way
+  // to address "the Delete button in *this* table row". Every framework expresses it
+  // by continuing the parent's expression, so the child is rendered normally and its
+  // root receiver (`page.` / `cy.get(` / `driver.`) is re-pointed at the parent.
+  var CHAIN_ROOT = {
+    playwright: [[/^page\./, '.']],
+    cypress: [[/^cy\.get\(/, '.find('], [/^cy\.contains\(/, '.contains(']],
+    selenium: [[/^driver\./, '.']]
+  };
+
+  function chainExpr(t, fw, lang) {
+    var parent = locatorExpr(t.parent, fw, lang);
+    if (!t.child) return parent;
+    var child = locatorExpr(t.child, fw, lang, true);
+    if (!parent) return child;
+    var rules = CHAIN_ROOT[fw] || CHAIN_ROOT.playwright;
+    for (var i = 0; i < rules.length; i++) {
+      if (rules[i][0].test(child)) return parent + child.replace(rules[i][0], rules[i][1]);
+    }
+    // Unrecognised child shape: the parent scope cannot be applied without silently
+    // changing what the code selects, so return the child on its own rather than
+    // emitting a syntactically broken chain.
+    return child;
+  }
+
+  function locatorExpr(target, fw, lang, rel) {
     if (!target) return '';
-    if (fw === 'selenium') return selLocator(target, lang);
+    if (target.kind === 'chain') return chainExpr(target, fw, lang);
+    if (fw === 'selenium') return selLocator(target, lang, rel);
     if (fw === 'cypress') return cyLocator(target, lang);
     return pwLocator(target, lang);
   }

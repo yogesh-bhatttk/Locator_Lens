@@ -208,7 +208,7 @@ function strategyLabel(loc) {
   const map = {
     testid: 'Test ID', role: t.name ? 'Role + name' : 'Role', label: 'Label',
     placeholder: 'Placeholder', altText: 'Alt text', title: 'Title', text: 'Text',
-    id: 'ID', name: 'Name', css: 'CSS selector'
+    id: 'ID', name: 'Name', css: 'CSS selector', chain: 'Scoped to parent'
   };
   return map[t.kind] || loc.method;
 }
@@ -384,7 +384,21 @@ function initRecorderControls() {
 function renderResults(data) {
   if (!data) return;
   lastResultData = data;
-  const { elementData: el, locators, avoidList, proTip, a11y } = data;
+  // The port bridge is wired at script load, so a pick relayed by the background the
+  // instant the panel opens can arrive before the markup exists. Render it once the
+  // document is ready rather than throwing on a null container and dropping it.
+  if (!document.getElementById('cardsContainer')) {
+    document.addEventListener('DOMContentLoaded', () => renderResults(data), { once: true });
+    return;
+  }
+  // A payload restored from storage can predate the current result shape, and one
+  // missing array used to throw out of the render and leave the panel stuck on a
+  // half-drawn result with no way back short of reopening it.
+  const el = data.elementData || {};
+  const locators = Array.isArray(data.locators) ? data.locators.filter(Boolean) : [];
+  const avoidList = Array.isArray(data.avoidList) ? data.avoidList : [];
+  const proTip = data.proTip;
+  const a11y = Array.isArray(data.a11y) ? data.a11y : [];
 
   document.getElementById('idleState').style.display = 'none';
   document.getElementById('resultsState').style.display = '';
@@ -625,9 +639,21 @@ document.addEventListener('DOMContentLoaded', () => {
   updateInspectUI();
 
   chrome.runtime.sendMessage({ type: 'GET_INSPECT_STATE' }, (res) => {
+    if (chrome.runtime.lastError) return;
     if (res && res.active) {
       isInspecting = true;
       updateInspectUI();
+    }
+  });
+
+  // Reopening the panel mid-recording used to show "Start Recording" while the page
+  // was still capturing, so the obvious next click armed an already-recording tab
+  // instead of stopping it.
+  chrome.runtime.sendMessage({ type: 'GET_RECORDING_STATE' }, (res) => {
+    if (chrome.runtime.lastError) return;
+    if (res && res.active) {
+      isRecording = true;
+      updateRecordUI();
     }
   });
 

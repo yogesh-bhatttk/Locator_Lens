@@ -14,19 +14,65 @@ chrome.runtime.onConnect.addListener((port) => {
   });
 });
 
-// Track inspect mode per tab
+// ── Durable service-worker state ─────────────────────────────────────────────
+// MV3 tears down an idle service worker after ~30 seconds and every module-scope
+// variable goes with it. That is not a theoretical concern here: `recordingTabs`
+// is what re-arms capture after a full-page navigation, so once the worker had
+// been evicted a multi-page recording silently stopped collecting steps partway
+// through, and `inspectTabs` made GET_INSPECT_STATE report "not inspecting" to a
+// popup whose page was still in inspect mode.
+//
+// chrome.storage.session holds these for the life of the browser session and is
+// never written to disk. Where it is unavailable we degrade to the old in-memory
+// behaviour rather than fall back to storage.local, which would resurrect stale
+// tab ids after a browser restart.
+const SESSION_STATE_KEY = 'llWorkerState';
+const sessionArea = (chrome.storage && chrome.storage.session) || null;
+
 const inspectTabs = new Set();
 const recordingTabs = new Set(); // tabs with an active recording (so we can re-arm after navigation)
 
 // The side panel is a single window-level surface with no sender.tab, so it can't be
-// tracked per tab — it's one boolean kept alive by a heartbeat. (It used to be a Set
+// tracked per tab — it's one timestamp kept alive by a heartbeat. (It used to be a Set
 // that heartbeats added 'global' to while tab teardown deleted numeric ids from, so
 // the cleanup never actually matched anything.)
 const PANEL_HEARTBEAT_TTL_MS = 12000;
 let panelLastSeen = 0;
-let panelHeartbeatTimer = null;
 function isPanelActive() {
   return panelLastSeen > 0 && (Date.now() - panelLastSeen) < PANEL_HEARTBEAT_TTL_MS;
+}
+
+let hydrated = !sessionArea;
+let hydrating = null;
+
+/** Resolve once this worker instance has its state back. Cheap after the first call. */
+function ready() {
+  if (hydrated) return Promise.resolve();
+  if (hydrating) return hydrating;
+  hydrating = new Promise((resolve) => {
+    sessionArea.get(SESSION_STATE_KEY, (res) => {
+      void chrome.runtime.lastError;
+      const saved = (res && res[SESSION_STATE_KEY]) || {};
+      if (Array.isArray(saved.inspect)) saved.inspect.forEach((id) => inspectTabs.add(id));
+      if (Array.isArray(saved.recording)) saved.recording.forEach((id) => recordingTabs.add(id));
+      if (typeof saved.panelLastSeen === 'number') panelLastSeen = saved.panelLastSeen;
+      hydrated = true;
+      hydrating = null;
+      resolve();
+    });
+  });
+  return hydrating;
+}
+
+function persistState() {
+  if (!sessionArea) return;
+  sessionArea.set({
+    [SESSION_STATE_KEY]: {
+      inspect: Array.from(inspectTabs),
+      recording: Array.from(recordingTabs),
+      panelLastSeen
+    }
+  }, () => { void chrome.runtime.lastError; });
 }
 
 // ── Register context menu on install ────────────────────────────────────────
@@ -106,11 +152,12 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
 
   // START_INSPECT: activate on the current tab + open side panel
   if (msg.type === 'START_INSPECT') {
+    // openSidePanel() must stay on the synchronous path from the user's click:
+    // Chrome rejects sidePanel.open() once the gesture has been awaited away.
     chrome.tabs.query({ active: true, currentWindow: true }, (tabs) => {
       if (!tabs[0]) return;
       const tabId = tabs[0].id;
       const winId = tabs[0].windowId;
-      inspectTabs.add(tabId);
 
       // Open side panel first so user can see results
       openSidePanel(winId);
@@ -118,13 +165,19 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
       // Tell side panel inspect is active
       relayToSidePanel({ type: 'START_INSPECT' });
 
+      ready().then(() => {
+        inspectTabs.add(tabId);
+        persistState();
+      });
+
       chrome.tabs.sendMessage(tabId, { type: 'START_INSPECT' }, (r) => {
         if (chrome.runtime.lastError) {
           chrome.scripting.executeScript({
             target: { tabId },
             files: CONTENT_SCRIPT_FILES
           }, () => {
-            chrome.tabs.sendMessage(tabId, { type: 'START_INSPECT' });
+            void chrome.runtime.lastError;
+            chrome.tabs.sendMessage(tabId, { type: 'START_INSPECT' }, () => void chrome.runtime.lastError);
           });
         }
       });
@@ -135,7 +188,10 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
     chrome.tabs.query({ active: true, currentWindow: true }, (tabs) => {
       if (!tabs[0]) return;
       const tabId = tabs[0].id;
-      inspectTabs.delete(tabId);
+      ready().then(() => {
+        inspectTabs.delete(tabId);
+        persistState();
+      });
       chrome.tabs.sendMessage(tabId, { type: 'STOP_INSPECT' }, () => {
         void chrome.runtime.lastError;
       });
@@ -153,8 +209,23 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
 
   // Popup / SidePanel checking inspect state
   if (msg.type === 'GET_INSPECT_STATE') {
-    chrome.tabs.query({ active: true, currentWindow: true }, (tabs) => {
-      sendResponse({ active: tabs[0] ? inspectTabs.has(tabs[0].id) : false });
+    ready().then(() => {
+      chrome.tabs.query({ active: true, currentWindow: true }, (tabs) => {
+        sendResponse({ active: tabs[0] ? inspectTabs.has(tabs[0].id) : false });
+      });
+    });
+    return true;
+  }
+
+  // Side panel reopened mid-session: without this it renders "Start Recording"
+  // while the page is still capturing, and the next click sends START on an
+  // already-recording tab instead of stopping it.
+  if (msg.type === 'GET_RECORDING_STATE') {
+    ready().then(() => {
+      chrome.tabs.query({ active: true, currentWindow: true }, (tabs) => {
+        const active = tabs[0] ? recordingTabs.has(tabs[0].id) : false;
+        sendResponse({ active, anyTab: recordingTabs.size > 0 });
+      });
     });
     return true;
   }
@@ -173,18 +244,22 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
     }
   }
 
-  // Track panel open/close with timeout safety
+  // Track panel open/close. The TTL comparison in isPanelActive() is what expires a
+  // stale heartbeat — a setTimeout would not survive worker eviction anyway.
   if (msg.type === 'PANEL_HEARTBEAT') {
-    panelLastSeen = Date.now();
-    if (panelHeartbeatTimer) clearTimeout(panelHeartbeatTimer);
-    panelHeartbeatTimer = setTimeout(() => {
-      panelLastSeen = 0;
-      panelHeartbeatTimer = null;
-    }, PANEL_HEARTBEAT_TTL_MS);
+    ready().then(() => {
+      // The panel pings every 4s. Only write when the stored stamp is drifting far
+      // enough to matter against the TTL, rather than on every ping.
+      const now = Date.now();
+      const worthWriting = now - panelLastSeen > PANEL_HEARTBEAT_TTL_MS / 3;
+      panelLastSeen = now;
+      if (worthWriting) persistState();
+    });
   }
 
   if (msg.type === 'GET_PANEL_STATE') {
-    sendResponse({ active: isPanelActive() });
+    ready().then(() => sendResponse({ active: isPanelActive() }));
+    return true;
   }
 
   // RUN_STRESS_TEST: relay from side panel to content script
@@ -237,7 +312,8 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
     chrome.tabs.query({ active: true, currentWindow: true }, (tabs) => {
       if (!tabs[0]) return;
       const tabId = tabs[0].id;
-      recordingTabs.add(tabId); // so we can re-arm capture after a full-page navigation
+      // so we can re-arm capture after a full-page navigation
+      ready().then(() => { recordingTabs.add(tabId); persistState(); });
       chrome.tabs.sendMessage(tabId, { type: 'START_RECORDING' }, (r) => {
         if (chrome.runtime.lastError) {
           // Inject content script first, then start recording
@@ -256,7 +332,8 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
   }
 
   if (msg.type === 'STOP_RECORDING') {
-    recordingTabs.clear(); // single recording session — stop re-arming on any tab
+    // single recording session — stop re-arming on any tab
+    ready().then(() => { recordingTabs.clear(); persistState(); });
     chrome.tabs.query({ active: true, currentWindow: true }, (tabs) => {
       if (!tabs[0]) return;
       chrome.tabs.sendMessage(tabs[0].id, { type: 'STOP_RECORDING' }, () => {
@@ -298,21 +375,26 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
 
 // Clean up when tab closes
 chrome.tabs.onRemoved.addListener((tabId) => {
-  inspectTabs.delete(tabId);
-  recordingTabs.delete(tabId);
+  ready().then(() => {
+    const changed = inspectTabs.delete(tabId) || recordingTabs.delete(tabId);
+    if (changed) persistState();
+  });
 });
 // Clean up on navigation (and sync UI)
 chrome.tabs.onUpdated.addListener((tabId, info) => {
-  if (info.status === 'loading') {
-    if (inspectTabs.has(tabId)) {
-      inspectTabs.delete(tabId);
-      // Explicitly tell the UI that this tab is no longer inspecting
-      relayToSidePanel({ type: 'STOP_INSPECT' });
+  if (info.status !== 'loading' && info.status !== 'complete') return;
+  ready().then(() => {
+    if (info.status === 'loading') {
+      if (inspectTabs.delete(tabId)) {
+        persistState();
+        // Explicitly tell the UI that this tab is no longer inspecting
+        relayToSidePanel({ type: 'STOP_INSPECT' });
+      }
+      return;
     }
-  }
-  // Re-arm recording after a full-page navigation so multi-page flows keep capturing.
-  // The content script (re-injected by the manifest on load) records a fresh goto on start.
-  if (info.status === 'complete' && recordingTabs.has(tabId)) {
+    // Re-arm recording after a full-page navigation so multi-page flows keep capturing.
+    // The content script (re-injected by the manifest on load) records a fresh goto on start.
+    if (!recordingTabs.has(tabId)) return;
     chrome.tabs.sendMessage(tabId, { type: 'START_RECORDING', rearm: true }, () => {
       if (chrome.runtime.lastError) {
         chrome.scripting.executeScript({ target: { tabId }, files: CONTENT_SCRIPT_FILES }, () => {
@@ -323,5 +405,5 @@ chrome.tabs.onUpdated.addListener((tabId, info) => {
         });
       }
     });
-  }
+  });
 });

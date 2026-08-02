@@ -52,6 +52,22 @@
     return Date.now().toString(36) + '-' + Math.random().toString(36).slice(2, 12);
   }
 
+  // Every message out of a content script can outlive its extension: reloading or
+  // updating LocatorLens invalidates the context of every page already open, and an
+  // unguarded sendMessage then throws into *the visited site's* console. Reading
+  // lastError in the callback is what suppresses the "Unchecked runtime.lastError"
+  // noise when nothing is listening.
+  /** @returns false when the extension context is gone, so callers can stand down. */
+  function safeSend(msg) {
+    try {
+      if (!chrome.runtime || !chrome.runtime.id) return false;
+      chrome.runtime.sendMessage(msg, () => { void chrome.runtime.lastError; });
+      return true;
+    } catch (err) {
+      return false;
+    }
+  }
+
   function sendRecordedAction(data) {
     const payload = {
       eventId: nextRecordEventId(),
@@ -65,13 +81,7 @@
       target: data.target != null ? data.target : null,
       assertType: data.assertType != null ? data.assertType : null
     };
-    try {
-      if (chrome.runtime && chrome.runtime.id) {
-        chrome.runtime.sendMessage({ type: 'RECORDED_ACTION', data: payload }, () => {
-          void chrome.runtime.lastError;
-        });
-      }
-    } catch (err) { /* context invalidated */ }
+    safeSend({ type: 'RECORDED_ACTION', data: payload });
   }
 
   function recordFallbackLocator(el, methodChain) {
@@ -242,6 +252,8 @@
 
   /** Per-element debounce timers for the `input` event (React/controlled fields often skip native `change` until blur). */
   const _inputDebounceTimers = new WeakMap();
+  /** The same timers, iterable, so stopRecording can cancel the ones still in flight. */
+  const _pendingInputTimers = new Set();
   /** After a debounced input emit, suppress the redundant native `change` for the same value. */
   const _suppressChangeAfterInput = new WeakMap();
 
@@ -301,12 +313,14 @@
     const el = e.target;
     if (!isTextLikeField(el)) return;
     const prev = _inputDebounceTimers.get(el);
-    if (prev) clearTimeout(prev);
+    if (prev) { clearTimeout(prev); _pendingInputTimers.delete(prev); }
     const t = setTimeout(() => {
       _inputDebounceTimers.delete(el);
+      _pendingInputTimers.delete(t);
       sendFillForTextLike(el, true);
     }, 450);
     _inputDebounceTimers.set(el, t);
+    _pendingInputTimers.add(t);
   }
 
   function onRecordChange(e) {
@@ -453,6 +467,9 @@
     isRecording = false;
     isPaused = false;
     assertMode = false;
+    // A keystroke within 450ms of Stop would otherwise land in the *next* session.
+    _pendingInputTimers.forEach(clearTimeout);
+    _pendingInputTimers.clear();
     document.removeEventListener('pointerdown', onRecordPrimaryPointer, _recordPointerOptions);
     document.removeEventListener('mousedown', onRecordPrimaryPointer, true);
     document.removeEventListener('input', onRecordInputForDebounce, true);
@@ -847,24 +864,65 @@
     }
   }
 
+  // ── Clipboard ──────────────────────────────────────────────────────────────
+  // navigator.clipboard only exists in a secure context, and a content script
+  // inherits the *page's* context — so on any http:// site it is undefined and
+  // calling it threw straight out of the message listener, taking the context-menu
+  // copy (and its sendResponse) with it. The textarea fallback is what actually
+  // carries the copy on those pages.
+  function copyTextFallback(text) {
+    try {
+      const host = document.body || document.documentElement;
+      if (!host) return false;
+      const ta = document.createElement('textarea');
+      ta.value = text;
+      ta.setAttribute('readonly', '');
+      ta.style.cssText = 'position:fixed;top:0;left:-9999px;opacity:0;';
+      host.appendChild(ta);
+      const selection = document.getSelection();
+      const previous = selection && selection.rangeCount > 0 ? selection.getRangeAt(0) : null;
+      ta.select();
+      const ok = document.execCommand('copy');
+      ta.remove();
+      if (previous && selection) { selection.removeAllRanges(); selection.addRange(previous); }
+      return ok;
+    } catch (err) {
+      return false;
+    }
+  }
+
+  /** Resolves true only when the text really reached the clipboard. */
+  function copyText(text) {
+    if (!text) return Promise.resolve(false);
+    if (navigator.clipboard && typeof navigator.clipboard.writeText === 'function') {
+      return navigator.clipboard.writeText(text)
+        .then(() => true)
+        .catch(() => copyTextFallback(text));
+    }
+    return Promise.resolve(copyTextFallback(text));
+  }
+
   // ── Toast notification ─────────────────────────────────────────────────────
   let toastTimer = null;
-  function showToast(locatorCode) {
+  function showToast(locatorCode, ok) {
     // Remove any existing toast immediately
     const existing = document.getElementById('ll-toast');
     if (existing) existing.remove();
     if (toastTimer) { clearTimeout(toastTimer); toastTimer = null; }
 
+    const copied = ok !== false;
     const toast = document.createElement('div');
     toast.id = 'll-toast';
     const toastIcon = document.createElement('span');
     toastIcon.className = 'll-toast-icon';
-    toastIcon.textContent = '✅';
+    toastIcon.textContent = copied ? '✅' : '⚠️';
     toast.appendChild(toastIcon);
     const toastWrap = document.createElement('span');
     const toastLabel = document.createElement('span');
     toastLabel.className = 'll-toast-label';
-    toastLabel.textContent = 'Copied: ';
+    // Saying "Copied" when the clipboard write failed sent people off to paste
+    // nothing. The locator is still shown so it can be read off the screen.
+    toastLabel.textContent = copied ? 'Copied: ' : 'Copy blocked — ';
     toastWrap.appendChild(toastLabel);
     const toastCode = document.createElement('span');
     toastCode.className = 'll-toast-code';
@@ -931,15 +989,7 @@
 
     const bestCode = result.locators[0] ? copyLocatorCode(result.locators[0]) : '';
     if (bestCode) {
-      if (navigator.clipboard && navigator.clipboard.writeText) {
-        navigator.clipboard.writeText(bestCode).then(() => {
-          showToast(bestCode);
-        }).catch(() => {
-          showToast(bestCode);
-        });
-      } else {
-        showToast(bestCode);
-      }
+      copyText(bestCode).then((ok) => showToast(bestCode, ok));
     }
 
     // Flash the overlay green
@@ -950,16 +1000,12 @@
       }, 300);
     }
 
-    // Send to extension with context-invalidation safety
-    try {
-      if (chrome.runtime && chrome.runtime.id) {
-        chrome.runtime.sendMessage({ type: 'ELEMENT_PICKED', data: result });
-      }
-    } catch (err) {
-      if (String(err && err.message).includes('context invalidated')) {
-        debugWarn('Extension context invalidated. Please refresh the page.');
-        stopInspect(); // Cleanly remove UI
-      }
+    // A failed send here means LocatorLens was reloaded or updated while this page
+    // stayed open. Nothing will ever answer again, so tear the overlay down instead
+    // of leaving a dead crosshair cursor on someone's site.
+    if (!safeSend({ type: 'ELEMENT_PICKED', data: result })) {
+      debugWarn('Extension context invalidated. Please refresh the page.');
+      stopInspect();
     }
   }
 
@@ -968,7 +1014,7 @@
 
     if (e.key === 'Escape') {
       stopInspect();
-      chrome.runtime.sendMessage({ type: 'STOP_INSPECT' });
+      safeSend({ type: 'STOP_INSPECT' });
       return;
     }
 
@@ -1054,7 +1100,17 @@
 
       const bestCode = result.locators[0] ? copyLocatorCode(result.locators[0]) : '';
       if (bestCode) {
-        navigator.clipboard.writeText(bestCode).then(() => {
+        copyText(bestCode).then((ok) => {
+          // No user gesture reaches the page for a context-menu click, so the
+          // execCommand fallback cannot run here either: on a non-secure page this
+          // genuinely cannot copy. Say so and show the locator, instead of leaving
+          // the menu item looking like it silently did nothing.
+          if (!ok) {
+            injectStyles();
+            showToast(bestCode, false);
+            return;
+          }
+          if (!target.style) return;
           const origOutline = target.style.outline;
           const origTransition = target.style.transition;
           target.style.transition = 'outline 0.1s';
@@ -1063,16 +1119,10 @@
             target.style.outline = origOutline;
             target.style.transition = origTransition;
           }, 800);
-        }).catch(() => { });
+        });
       }
 
-      if (isInspecting) {
-        try {
-          if (chrome.runtime && chrome.runtime.id) {
-            chrome.runtime.sendMessage({ type: 'ELEMENT_PICKED', data: result });
-          }
-        } catch (e) { }
-      }
+      if (isInspecting) safeSend({ type: 'ELEMENT_PICKED', data: result });
       sendResponse({ ok: true });
     }
 
@@ -1263,10 +1313,10 @@
           matches[0].scrollIntoView({ block: 'center', behavior: 'smooth' });
         }
 
-        chrome.runtime.sendMessage({ type: 'LAB_STATUS_UPDATE', count: matches.length, via });
+        safeSend({ type: 'LAB_STATUS_UPDATE', count: matches.length, via });
         sendResponse({ ok: true, count: matches.length });
       } catch (err) {
-        chrome.runtime.sendMessage({ type: 'LAB_ERROR', error: err.message });
+        safeSend({ type: 'LAB_ERROR', error: err.message });
         sendResponse({ ok: false, error: err.message });
       }
     }

@@ -65,14 +65,23 @@
   }
 
   // ── Accessible name computation ────────────────────────────────────────────
+  // IDREF attributes (aria-labelledby, label[for]) are scoped to the element's own
+  // root, not the document: inside a shadow root, document.getElementById can never
+  // see the label, so a properly-labelled web component looked unnamed.
+  function scopeOf(el) {
+    const root = el.getRootNode ? el.getRootNode() : document;
+    return root && typeof root.getElementById === 'function' ? root : document;
+  }
+
   function getAccessibleName(el) {
     const ariaLabel = el.getAttribute('aria-label');
     if (ariaLabel && ariaLabel.trim()) return ariaLabel.trim();
 
+    const scope = scopeOf(el);
     const labelledBy = el.getAttribute('aria-labelledby');
     if (labelledBy) {
-      const names = labelledBy.split(' ')
-        .map(id => document.getElementById(id))
+      const names = labelledBy.trim().split(/\s+/)
+        .map(id => scope.getElementById(id))
         .filter(Boolean)
         .map(e => e.textContent.trim())
         .filter(Boolean);
@@ -82,7 +91,7 @@
     const tag = el.tagName.toLowerCase();
     if (['input', 'select', 'textarea'].includes(tag)) {
       if (el.id) {
-        const label = document.querySelector(`label[for="${cssEscape(el.id)}"]`);
+        const label = scope.querySelector(`label[for="${cssEscape(el.id)}"]`);
         if (label) return label.textContent.trim();
       }
       const parentLabel = el.closest('label');
@@ -210,7 +219,11 @@
       parts.unshift(part);
       current = current.parentElement;
     }
-    return parts.join(' > ');
+    // The walk stops *at* <body>, so <body> itself produced an empty string — and
+    // `page.locator('')` is a runtime error in every framework and throws inside
+    // querySelectorAll here. The context-menu path falls back to document.body when
+    // it has no tracked element, so this was reachable by right-clicking.
+    return parts.join(' > ') || (el.tagName ? el.tagName.toLowerCase() : 'body');
   }
 
   // ── Find a unique parent for chaining ──────────────────────────────────────
@@ -239,11 +252,23 @@
   // flush per node) turned a click on a large page into a visible freeze.
   const SCAN_CAP = 4000;
 
+  // A chained locator resolves its child inside a parent, so both sides have to be
+  // materialised before they can be intersected — which is why these return nodes
+  // rather than a running count. `cap` bounds the work: UNIQ_CAP is enough to answer
+  // "unique or not", while a chain needs a wider child scan because the matches
+  // inside the parent may not be the first ones found in the document.
+  const CHAIN_CAP = 200;
+
   function attrSelectorValue(v) {
     return String(v == null ? '' : v).replace(/\\/g, '\\\\').replace(/"/g, '\\"');
   }
-  function countBySelector(sel) {
-    try { return Math.min(document.querySelectorAll(sel).length, UNIQ_CAP); } catch (e) { return null; }
+  function nodesBySelector(sel, cap) {
+    try {
+      const found = document.querySelectorAll(sel);
+      const out = [];
+      for (let i = 0; i < found.length && out.length < cap; i++) out.push(found[i]);
+      return out;
+    } catch (e) { return null; }
   }
   // textContent, not innerText: innerText is layout-dependent and forces a reflow on
   // every node touched. For "does this text match exactly one element" the difference
@@ -251,11 +276,11 @@
   function normText(node) {
     return (node.textContent || '').trim();
   }
-  function countByText(text) {
-    let count = 0;
+  function nodesByText(text, cap) {
+    const out = [];
     const all = document.querySelectorAll('*');
     const limit = Math.min(all.length, SCAN_CAP);
-    for (let i = 0; i < limit; i++) {
+    for (let i = 0; i < limit && out.length < cap; i++) {
       const node = all[i];
       if (normText(node) !== text) continue;
       // innermost only (mirrors Playwright getByText) — skip if a child holds the same text
@@ -263,45 +288,79 @@
       for (let c = 0; c < node.children.length; c++) {
         if (normText(node.children[c]) === text) { childHas = true; break; }
       }
-      if (!childHas && ++count >= UNIQ_CAP) break;
+      if (!childHas) out.push(node);
     }
-    return count;
+    return out;
   }
-  function countByRole(role, name) {
-    let count = 0;
+  function nodesByRole(role, name, cap) {
+    const out = [];
     const all = document.querySelectorAll('*');
     const limit = Math.min(all.length, SCAN_CAP);
-    for (let i = 0; i < limit; i++) {
+    for (let i = 0; i < limit && out.length < cap; i++) {
       if (getRole(all[i]) !== role) continue;
       if (name && getAccessibleName(all[i]) !== name) continue;
-      if (++count >= UNIQ_CAP) break;
+      out.push(all[i]);
     }
-    return count;
+    return out;
   }
-  function countByLabel(labelText) {
-    let count = 0;
+  function nodesByLabel(labelText, cap) {
+    const out = [];
     const controls = document.querySelectorAll('input, select, textarea');
-    for (let i = 0; i < controls.length; i++) {
-      if (getAccessibleName(controls[i]) === labelText && ++count >= UNIQ_CAP) break;
+    for (let i = 0; i < controls.length && out.length < cap; i++) {
+      if (getAccessibleName(controls[i]) === labelText) out.push(controls[i]);
     }
-    return count;
+    return out;
+  }
+  // Per-analysis memo. generateLocators() runs on every pick *and* on every captured
+  // click while recording, and the same target is now resolved more than once — a
+  // chain's child is usually the very role locator already counted above it. The DOM
+  // cannot change inside one call, so resolving each distinct target once is free
+  // correctness-wise and keeps this off the path that used to freeze large pages.
+  let matchCache = null;
+
+  function targetNodes(t, cap) {
+    if (!t) return null;
+    if (!matchCache) return resolveTargetNodes(t, cap);
+    const key = cap + '|' + JSON.stringify(t);
+    if (matchCache.has(key)) return matchCache.get(key);
+    const out = resolveTargetNodes(t, cap);
+    matchCache.set(key, out);
+    return out;
+  }
+
+  function resolveTargetNodes(t, cap) {
+    switch (t.kind) {
+      case 'testid': return nodesBySelector('[' + t.attr + '="' + attrSelectorValue(t.value) + '"]', cap);
+      case 'id': return nodesBySelector('#' + cssEscape(String(t.value)), cap);
+      case 'name': return nodesBySelector('[name="' + attrSelectorValue(t.value) + '"]', cap);
+      case 'placeholder': return nodesBySelector('[placeholder="' + attrSelectorValue(t.value) + '"]', cap);
+      case 'altText': return nodesBySelector('img[alt="' + attrSelectorValue(t.value) + '"]', cap);
+      case 'title': return nodesBySelector('[title="' + attrSelectorValue(t.value) + '"]', cap);
+      case 'css': return nodesBySelector(t.value, cap);
+      case 'text': return nodesByText(t.value, cap);
+      case 'role': return nodesByRole(t.role, t.name, cap);
+      case 'label': return nodesByLabel(t.value, cap);
+      case 'chain': {
+        const parents = targetNodes(t.parent, CHAIN_CAP);
+        const children = targetNodes(t.child, CHAIN_CAP);
+        if (!parents || !children) return null;
+        const out = [];
+        for (let i = 0; i < children.length && out.length < cap; i++) {
+          const c = children[i];
+          for (let p = 0; p < parents.length; p++) {
+            if (parents[p] !== c && parents[p].contains(c)) { out.push(c); break; }
+          }
+        }
+        return out;
+      }
+      default: return null;
+    }
   }
   function countTargetMatches(t) {
     if (!t) return null;
     try {
-      switch (t.kind) {
-        case 'testid': return countBySelector('[' + t.attr + '="' + attrSelectorValue(t.value) + '"]');
-        case 'id': return countBySelector('#' + cssEscape(String(t.value)));
-        case 'name': return countBySelector('[name="' + attrSelectorValue(t.value) + '"]');
-        case 'placeholder': return countBySelector('[placeholder="' + attrSelectorValue(t.value) + '"]');
-        case 'altText': return countBySelector('img[alt="' + attrSelectorValue(t.value) + '"]');
-        case 'title': return countBySelector('[title="' + attrSelectorValue(t.value) + '"]');
-        case 'css': return countBySelector(t.value);
-        case 'text': return countByText(t.value);
-        case 'role': return countByRole(t.role, t.name);
-        case 'label': return countByLabel(t.value);
-        default: return null;
-      }
+      const nodes = targetNodes(t, UNIQ_CAP);
+      return nodes ? Math.min(nodes.length, UNIQ_CAP) : null;
     } catch (e) { return null; }
   }
 
@@ -373,7 +432,7 @@
     if (['input', 'select', 'textarea'].includes(tag)) {
       let labelText = null;
       if (el.id) {
-        const lbl = document.querySelector(`label[for="${cssEscape(el.id)}"]`);
+        const lbl = scopeOf(el).querySelector(`label[for="${cssEscape(el.id)}"]`);
         if (lbl) labelText = lbl.textContent.trim();
       }
       if (!labelText) {
@@ -516,29 +575,43 @@
     }
 
     // 10. Chained / Filtered Locator (The Pro Approach)
+    //
+    // The parent and child are recorded as a structured `chain` target, not as the
+    // element's flat CSS path. They used to disagree: the card displayed the chained
+    // Playwright expression while `target` held the bare child selector, so every
+    // non-Playwright translation — and every recorded step whose best locator was
+    // this one — silently dropped the parent scope and addressed the *first* matching
+    // row instead of the one the user clicked.
     const uParent = findUniqueParent(el);
     if (uParent && locators.length > 0) {
       let pCode = '';
+      let pTarget = null;
       if (uParent.testId) {
         const tid = String(uParent.testId).replace(/\\/g, '\\\\').replace(/'/g, "\\'");
         pCode = `page.getByTestId('${tid}')`;
+        pTarget = { kind: 'testid', attr: 'data-testid', value: uParent.testId };
       } else if (uParent.id) {
         const escId = String(uParent.id).replace(/\\/g, '\\\\').replace(/'/g, "\\'");
         pCode = `page.locator('#${escId}')`;
+        pTarget = { kind: 'id', value: uParent.id };
       }
-      else if (uParent.role && uParent.name) pCode = `page.getByRole('${uParent.role}', { name: '${uParent.name.replace(/'/g, "\\'")}' })`;
+      else if (uParent.role && uParent.name) {
+        pCode = `page.getByRole('${uParent.role}', { name: '${uParent.name.replace(/'/g, "\\'")}' })`;
+        pTarget = { kind: 'role', role: uParent.role, name: uParent.name };
+      }
 
-      if (pCode) {
-        const bestChild = locators[0].code.replace('page.', '');
+      const childLoc = locators[0];
+      if (pCode && childLoc.target) {
+        const chainCode = `${pCode}.${childLoc.code.replace(/^page\./, '')}`;
         const action = suggestAction(el);
         locators.push({
           rank: locators.length + 1,
           method: 'Chained/Filtered',
           matchedAttr: `Parent: ${uParent.testId || uParent.id || uParent.name}`,
           stability: 'BEST',
-          target: { kind: 'css', value: buildCSSSelector(el) },
-          code: `${pCode}.${bestChild}`,
-          fullCode: `await (${pCode}).${bestChild}.${action};`,
+          target: { kind: 'chain', parent: pTarget, child: childLoc.target },
+          code: chainCode,
+          fullCode: `await ${chainCode}.${action};`,
           explanation: `Uses a unique parent (${uParent.id || uParent.role}) to narrow down the search. This is the pro approach for elements in lists, tables, or complex dashboards where name alone is ambiguous.`,
           why: 'Context-specific uniqueness'
         });
@@ -582,10 +655,15 @@
     });
 
     // ── Live uniqueness: tag each locator with how many elements it matches ───
-    locators.forEach(l => {
-      const c = countTargetMatches(l.target);
-      if (c != null) { l.matchCount = c; l.unique = (c === 1); }
-    });
+    matchCache = new Map();
+    try {
+      locators.forEach(l => {
+        const c = countTargetMatches(l.target);
+        if (c != null) { l.matchCount = c; l.unique = (c === 1); }
+      });
+    } finally {
+      matchCache = null;
+    }
 
     // ── Stability-First Sorting ──────────────────────────────────────────────
     const stabilityWeight = { 'BEST': 4, 'GOOD': 3, 'OK': 2, 'AVOID': 1 };
