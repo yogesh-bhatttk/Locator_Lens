@@ -939,13 +939,113 @@
   }
 
 
+  // ── Frames ─────────────────────────────────────────────────────────────────
+  // A locator generated inside an iframe is useless to a test runner unless it says
+  // which frame to enter first. The engine deals in one document and knows nothing
+  // about the frame tree, so the chain is computed here — this is the layer that can
+  // actually see it — and wrapped around every target the engine produced.
+
+  function attrQuote(v) {
+    return String(v == null ? '' : v).replace(/\\/g, '\\\\').replace(/"/g, '\\"');
+  }
+
+  /** A selector addressing this frame's <iframe> element *in its parent document*. */
+  function frameSelectorFor(fe) {
+    if (!fe) return null;
+    try {
+      const E = globalThis.__LocatorLensEngine;
+      if (fe.id && !/^\d/.test(fe.id)) {
+        const esc = (typeof CSS !== 'undefined' && CSS.escape) ? CSS.escape(fe.id) : fe.id;
+        return '#' + esc;
+      }
+      const name = fe.getAttribute('name');
+      if (name) return `iframe[name="${attrQuote(name)}"]`;
+      const title = fe.getAttribute('title');
+      if (title) return `iframe[title="${attrQuote(title)}"]`;
+      // Structural path, resolved against the parent document rather than ours.
+      return E && E.buildCSSSelector ? E.buildCSSSelector(fe, fe.ownerDocument) : null;
+    } catch (err) {
+      return null;
+    }
+  }
+
+  /** Position among the parent's frames — the only handle a cross-origin frame has. */
+  function frameIndexOf(win) {
+    try {
+      const siblings = win.parent.frames;
+      for (let i = 0; i < siblings.length; i++) {
+        if (siblings[i] === win) return i;
+      }
+    } catch (err) {
+      /* even identity comparison can be blocked */
+    }
+    return 0;
+  }
+
+  /** Outermost frame first. Empty in the top document. */
+  function frameChain() {
+    const chain = [];
+    let win = window;
+    let guard = 0;
+    while (win && win !== win.parent && guard++ < 8) {
+      let selector = null;
+      // frameElement is null across an origin boundary and throws when reaching
+      // through a cross-origin ancestor — either way we fall back to the index.
+      try { selector = frameSelectorFor(win.frameElement); } catch (err) { selector = null; }
+      chain.unshift({ selector, index: frameIndexOf(win) });
+      win = win.parent;
+    }
+    return chain;
+  }
+
+  function wrapInFrames(chain, target) {
+    let wrapped = target;
+    for (let i = chain.length - 1; i >= 0; i--) {
+      wrapped = { kind: 'frame', selector: chain[i].selector, index: chain[i].index, child: wrapped };
+    }
+    return wrapped;
+  }
+
+  function applyFramePath(result) {
+    if (window.self === window.top) return result;
+    const chain = frameChain();
+    if (!chain.length) return result;
+
+    const action = (result.elementData && result.elementData.suggestedAction) || 'click';
+    const value = action === 'fill' ? 'your value' : (action === 'selectOption' ? 'option text' : '');
+    (result.locators || []).forEach((l) => {
+      if (!l || !l.target) return;
+      l.target = wrapInFrames(chain, l.target);
+      // Re-render the display strings from the wrapped target so the card can never
+      // show a bare locator that would resolve against the top document.
+      if (window.LLCodegen) {
+        const expr = window.LLCodegen.locatorExpr(l.target, 'playwright', 'typescript');
+        const stmt = window.LLCodegen.actionStatement({ action, target: l.target, value }, 'playwright', 'typescript');
+        if (expr) l.code = expr;
+        if (stmt) l.fullCode = stmt;
+      }
+    });
+
+    const path = chain.map((f) => f.selector || `iframe (index ${f.index})`);
+    if (result.elementData) result.elementData.framePath = path;
+    const approximate = chain.some((f) => !f.selector);
+    result.proTip = `Inside ${chain.length > 1 ? 'nested iframes' : 'an iframe'} (${path.join(' › ')}). ` +
+      (approximate
+        ? 'This frame is cross-origin, so its <iframe> element cannot be read from here and the generated code addresses it by position — pin it to a stable selector if the page order can change. '
+        : '') +
+      'Selenium switches into the frame and back out again around the action; Playwright and Cypress address it inline.';
+    return result;
+  }
+
   function generateLocators(el) {
     const E = globalThis.__LocatorLensEngine;
     if (!E) {
       console.error('[LocatorLens] Missing __LocatorLensEngine — ensure content-locator-engine.js is listed before content.js in the manifest.');
       return { elementData: {}, locators: [], avoidList: [], proTip: '', a11y: [] };
     }
-    return E.generateLocators(el, customTestAttributes);
+    // Everything — picks, recording, quick-copy — routes through here, so frame
+    // wrapping applies once, in one place.
+    return applyFramePath(E.generateLocators(el, customTestAttributes));
   }
 
   // Locator expression for quick-copy, honoring the side panel's framework/language.
@@ -999,6 +1099,12 @@
         if (overlay) overlay.style.background = 'rgba(58, 223, 250, 0.05)';
       }, 300);
     }
+
+    // The panel receives this twice — once as a broadcast (runtime.sendMessage
+    // reaches every extension page) and once relayed by the worker over the port.
+    // runtime.sendMessage cannot address the worker alone, so the pick carries an id
+    // and the panel renders only the first copy it sees.
+    result.pickId = nextRecordEventId();
 
     // A failed send here means LocatorLens was reloaded or updated while this page
     // stayed open. Nothing will ever answer again, so tear the overlay down instead
@@ -1122,7 +1228,10 @@
         });
       }
 
-      if (isInspecting) safeSend({ type: 'ELEMENT_PICKED', data: result });
+      if (isInspecting) {
+        result.pickId = nextRecordEventId();
+        safeSend({ type: 'ELEMENT_PICKED', data: result });
+      }
       sendResponse({ ok: true });
     }
 

@@ -9,6 +9,10 @@
 //   { kind: 'role', role, name?, level? }
 //   { kind: 'label'|'placeholder'|'altText'|'title'|'text'|'id'|'name'|'css', value }
 //   { kind: 'chain', parent, child }   — child scoped inside parent (both targets)
+//   { kind: 'frame', selector, index, child }  — child inside an iframe. `selector`
+//       addresses the <iframe> in its parent document; when the frame is
+//       cross-origin its element is unreachable, so only `index` is known and the
+//       generators fall back to positional frame addressing. Nests for deep frames.
 //
 // An `action` step is: { action, target?, value?, key?, url?, width?, height? }
 //   action ∈ click | dblclick | check | uncheck | fill | selectOption | press | goto | viewport
@@ -237,8 +241,61 @@
     return child;
   }
 
+  // ── frames ──────────────────────────────────────────────────────────────────
+  // Playwright and Cypress can address into a frame from an expression, so a frame
+  // reuses the chain machinery above: render the child normally and re-point its
+  // root at the frame. Selenium cannot — switching frames is a statement, not part
+  // of a locator — so selenium is handled in selStatement() instead and its
+  // expression here is the child alone.
+
+  /** Peel any frame wrappers off a target. Returns the frames outermost-first. */
+  function unwrapFrames(target) {
+    var frames = [];
+    var t = target;
+    while (t && t.kind === 'frame') {
+      frames.push({ selector: t.selector, index: t.index });
+      t = t.child;
+    }
+    return { frames: frames, inner: t || null };
+  }
+
+  function frameEnterExpr(frame, fw, lang) {
+    var sel = frame.selector;
+    if (fw === 'cypress') {
+      var base = sel
+        ? 'cy.get(' + q(sel, lang) + ')'
+        : "cy.get('iframe').eq(" + (frame.index || 0) + ')';
+      // The no-plugin recipe: reach the frame's body, then continue inside it.
+      return base + ".its('0.contentDocument.body').should('not.be.empty').then(cy.wrap)";
+    }
+    var py = lang === 'python';
+    var fl = py ? 'frame_locator' : 'frameLocator';
+    // Without a selector the frame is cross-origin; address it positionally.
+    var arg = sel ? q(sel, lang) : q('iframe >> nth=' + (frame.index || 0), lang);
+    return 'page.' + fl + '(' + arg + ')';
+  }
+
+  function frameExpr(t, fw, lang) {
+    var peeled = unwrapFrames(t);
+    if (!peeled.inner) return '';
+    if (fw === 'selenium') return selLocator(peeled.inner, lang);
+
+    var expr = '';
+    for (var i = 0; i < peeled.frames.length; i++) {
+      var enter = frameEnterExpr(peeled.frames[i], fw, lang);
+      expr = expr ? expr + enter.replace(/^cy\.get\(/, '.find(').replace(/^page\./, '.') : enter;
+    }
+    var child = locatorExpr(peeled.inner, fw, lang);
+    var rules = CHAIN_ROOT[fw] || CHAIN_ROOT.playwright;
+    for (var r = 0; r < rules.length; r++) {
+      if (rules[r][0].test(child)) return expr + child.replace(rules[r][0], rules[r][1]);
+    }
+    return child;
+  }
+
   function locatorExpr(target, fw, lang, rel) {
     if (!target) return '';
+    if (target.kind === 'frame') return frameExpr(target, fw, lang);
     if (target.kind === 'chain') return chainExpr(target, fw, lang);
     if (fw === 'selenium') return selLocator(target, lang, rel);
     if (fw === 'cypress') return cyLocator(target, lang);
@@ -298,11 +355,36 @@
     }
   }
 
+  // Selenium has no frame-scoped locator: the driver is switched into the frame,
+  // acts, and is switched back. Emitted as one multi-line statement — indent() already
+  // pads every physical line, so it lands correctly inside the test scaffold.
+  function selFrameSwitch(frame, lang) {
+    var py = lang === 'python';
+    if (frame.selector) {
+      var el = selFind('css', frame.selector, lang);
+      return py ? 'driver.switch_to.frame(' + el + ')' : 'await driver.switchTo().frame(' + el + ');';
+    }
+    var idx = frame.index || 0;
+    return py ? 'driver.switch_to.frame(' + idx + ')' : 'await driver.switchTo().frame(' + idx + ');';
+  }
+
   function selStatement(step, lang) {
     var py = lang === 'python';
     var aw = py ? '' : 'await ';
     var semi = py ? '' : ';';
     var a = step.action;
+
+    var peeled = unwrapFrames(step.target);
+    if (peeled.frames.length) {
+      var lines = peeled.frames.map(function (f) { return selFrameSwitch(f, lang); });
+      var body = {};
+      for (var prop in step) if (Object.prototype.hasOwnProperty.call(step, prop)) body[prop] = step[prop];
+      body.target = peeled.inner;
+      lines.push(selStatement(body, lang));
+      // Back to the top document, or every later step would run inside this frame.
+      lines.push(py ? 'driver.switch_to.default_content()' : 'await driver.switchTo().defaultContent();');
+      return lines.join('\n');
+    }
     if (a === 'goto') return aw + 'driver.get(' + q(step.value || step.url || '', lang) + ')' + semi;
     if (a === 'press') {
       var k = KEY_SELENIUM[step.value || step.key] || 'ENTER';

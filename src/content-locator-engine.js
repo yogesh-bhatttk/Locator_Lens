@@ -191,10 +191,13 @@
   }
 
   // ── Build a reliable CSS selector fallback ─────────────────────────────────
-  function buildCSSSelector(el) {
+  function buildCSSSelector(el, doc) {
+    // Defaults to the element's own document, which is what makes this usable for an
+    // <iframe> element that lives in the parent document rather than in ours.
+    const d = doc || el.ownerDocument || document;
     const parts = [];
     let current = el;
-    while (current && current !== document.body && parts.length < 5) {
+    while (current && current !== d.body && parts.length < 5) {
       let part = current.tagName.toLowerCase();
       if (current.id && !isUnstableId(current.id)) {
         // CSS.escape: ids legally contain ':' '.' '[' etc. (Tailwind, Rails, Angular
@@ -618,25 +621,6 @@
       }
     }
 
-    // 11. Iframe Detection
-    const inIframe = window.self !== window.top;
-    if (inIframe) {
-      const frameChildSnippet = locators.length && locators[0].code
-        ? locators[0].code.replace('page.', '')
-        : "locator('iframe')";
-      locators.unshift({
-        rank: 0,
-        method: 'Frame Switch',
-        matchedAttr: 'Inside Iframe',
-        stability: 'GOOD',
-        target: { kind: 'css', value: buildCSSSelector(el) },
-        code: `page.frameLocator('iframe-selector')`,
-        fullCode: `await page.frameLocator('iframe').${frameChildSnippet}.${suggestAction(el)};`,
-        explanation: `Element is inside an Iframe. You must use frameLocator() to switch context before interacting. Replace 'iframe-selector' with the actual iframe ID or src.`,
-        why: 'Cross-document isolation'
-      });
-    }
-
     // 10. CSS selector fallback
     const cssSelector = buildCSSSelector(el);
     const hasUnstable = hasUnstableClasses(el);
@@ -779,6 +763,7 @@
   global.__LocatorLensEngine = {
     generateLocators,
     getRole,
-    getAccessibleName
+    getAccessibleName,
+    buildCSSSelector
   };
 })(typeof globalThis !== 'undefined' ? globalThis : window);

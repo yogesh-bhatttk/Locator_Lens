@@ -4,14 +4,40 @@
 /** Load order matters: engine defines __LocatorLensEngine before content.js runs. */
 const CONTENT_SCRIPT_FILES = ['src/codegen.js', 'src/content-locator-engine.js', 'src/content.js'];
 
-/** Long-lived channel so the service worker can push UI updates (recording, picks) to the side panel reliably. */
-let llSidePanelPort = null;
+// The manifest injects only the top frame, deliberately: a content script declared
+// with all_frames runs in every ad and tracking iframe of every page the user
+// visits, and parsing it there costs them something for nothing. Frames that
+// actually matter get the script when a feature is switched on, and content.js
+// no-ops on a frame that already has it.
+function injectAllFrames(tabId, done) {
+  chrome.scripting.executeScript(
+    { target: { tabId, allFrames: true }, files: CONTENT_SCRIPT_FILES },
+    () => {
+      void chrome.runtime.lastError; // restricted page, or a frame that vanished
+      if (done) done();
+    }
+  );
+}
+
+/** Send to one frame when we know which; otherwise every frame in the tab. */
+function sendToFrame(tabId, msg, frameId, cb) {
+  const options = typeof frameId === 'number' ? { frameId } : undefined;
+  if (options) chrome.tabs.sendMessage(tabId, msg, options, cb || (() => void chrome.runtime.lastError));
+  else chrome.tabs.sendMessage(tabId, msg, cb || (() => void chrome.runtime.lastError));
+}
+
+// Long-lived channels so the service worker can push UI updates (recording, picks)
+// to the side panel reliably.
+//
+// One panel exists per browser window, so this has to be a set: a single slot meant
+// opening a second window silently muted the first window's panel, which kept its
+// port but never received another relay. Every connected panel is a view of the same
+// session — one recording, one last pick — so a relay goes to all of them.
+const sidePanelPorts = new Set();
 chrome.runtime.onConnect.addListener((port) => {
   if (port.name !== 'll-sidepanel') return;
-  llSidePanelPort = port;
-  port.onDisconnect.addListener(() => {
-    if (llSidePanelPort === port) llSidePanelPort = null;
-  });
+  sidePanelPorts.add(port);
+  port.onDisconnect.addListener(() => sidePanelPorts.delete(port));
 });
 
 // ── Durable service-worker state ─────────────────────────────────────────────
@@ -38,6 +64,10 @@ const recordingTabs = new Set(); // tabs with an active recording (so we can re-
 // the cleanup never actually matched anything.)
 const PANEL_HEARTBEAT_TTL_MS = 12000;
 let panelLastSeen = 0;
+// Which tab+frame produced the last pick. The Stress Test runs against that element,
+// and only the frame holding it can answer — broadcasting to every frame would have
+// them all race to sendResponse.
+let lastPick = null;
 function isPanelActive() {
   return panelLastSeen > 0 && (Date.now() - panelLastSeen) < PANEL_HEARTBEAT_TTL_MS;
 }
@@ -56,6 +86,7 @@ function ready() {
       if (Array.isArray(saved.inspect)) saved.inspect.forEach((id) => inspectTabs.add(id));
       if (Array.isArray(saved.recording)) saved.recording.forEach((id) => recordingTabs.add(id));
       if (typeof saved.panelLastSeen === 'number') panelLastSeen = saved.panelLastSeen;
+      if (saved.lastPick) lastPick = saved.lastPick;
       hydrated = true;
       hydrating = null;
       resolve();
@@ -70,7 +101,8 @@ function persistState() {
     [SESSION_STATE_KEY]: {
       inspect: Array.from(inspectTabs),
       recording: Array.from(recordingTabs),
-      panelLastSeen
+      panelLastSeen,
+      lastPick
     }
   }, () => { void chrome.runtime.lastError; });
 }
@@ -105,17 +137,15 @@ chrome.contextMenus.onClicked.addListener((info, tab) => {
   if (info.menuItemId !== 'll-copy-locator') return;
   if (!tab || !tab.id) return;
 
-  chrome.tabs.sendMessage(tab.id, { type: 'CONTEXT_MENU_COPY' }, (res) => {
-    if (chrome.runtime.lastError) {
-      chrome.scripting.executeScript(
-        { target: { tabId: tab.id }, files: CONTENT_SCRIPT_FILES },
-        () => {
-          setTimeout(() => {
-            chrome.tabs.sendMessage(tab.id, { type: 'CONTEXT_MENU_COPY' });
-          }, 100);
-        }
-      );
-    }
+  // info.frameId identifies the frame the user right-clicked in. Without it the
+  // message goes to every frame and each one answers for whatever *it* last saw
+  // under the cursor — so the copied locator would be a race between frames.
+  const frameId = typeof info.frameId === 'number' ? info.frameId : 0;
+  sendToFrame(tab.id, { type: 'CONTEXT_MENU_COPY' }, frameId, () => {
+    if (!chrome.runtime.lastError) return;
+    injectAllFrames(tab.id, () => {
+      setTimeout(() => sendToFrame(tab.id, { type: 'CONTEXT_MENU_COPY' }, frameId), 100);
+    });
   });
 });
 
@@ -133,14 +163,18 @@ function openSidePanel(windowId) {
 
 // ── Helper: relay message to side panel ──────────────────────────────────────
 function relayToSidePanel(msg) {
-  if (llSidePanelPort) {
+  let delivered = 0;
+  for (const port of Array.from(sidePanelPorts)) {
     try {
-      llSidePanelPort.postMessage(msg);
-      return;
+      port.postMessage(msg);
+      delivered++;
     } catch (e) {
-      llSidePanelPort = null;
+      sidePanelPorts.delete(port); // disconnected between the check and the post
     }
   }
+  if (delivered > 0) return;
+  // No panel is connected over a port — fall back to a broadcast, which also
+  // reaches the popup.
   chrome.runtime.sendMessage(msg, () => {
     void chrome.runtime.lastError;
   });
@@ -170,16 +204,10 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
         persistState();
       });
 
-      chrome.tabs.sendMessage(tabId, { type: 'START_INSPECT' }, (r) => {
-        if (chrome.runtime.lastError) {
-          chrome.scripting.executeScript({
-            target: { tabId },
-            files: CONTENT_SCRIPT_FILES
-          }, () => {
-            void chrome.runtime.lastError;
-            chrome.tabs.sendMessage(tabId, { type: 'START_INSPECT' }, () => void chrome.runtime.lastError);
-          });
-        }
+      // Inject first, then broadcast: sub-frames have no content script until now,
+      // and each frame overlays and hit-tests its own document.
+      injectAllFrames(tabId, () => {
+        sendToFrame(tabId, { type: 'START_INSPECT' });
       });
     });
   }
@@ -203,6 +231,12 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
   if (msg.type === 'ELEMENT_PICKED') {
     if (chrome.storage && chrome.storage.local) {
       chrome.storage.local.set({ lastElement: msg.data }); // local storage for cross-browser compatibility
+    }
+    if (sender && sender.tab) {
+      ready().then(() => {
+        lastPick = { tabId: sender.tab.id, frameId: typeof sender.frameId === 'number' ? sender.frameId : 0 };
+        persistState();
+      });
     }
     relayToSidePanel({ type: 'ELEMENT_PICKED', data: msg.data });
   }
@@ -272,17 +306,19 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
         const data = (res && res.data) ? res.data : { survived: false, unavailable: true };
         relayToSidePanel({ type: 'STRESS_TEST_RESULT', data });
       };
-      chrome.tabs.sendMessage(tabId, { type: 'RUN_STRESS_TEST' }, (res) => {
-        if (chrome.runtime.lastError) {
-          chrome.scripting.executeScript({ target: { tabId }, files: CONTENT_SCRIPT_FILES }, () => {
-            void chrome.runtime.lastError;
-            setTimeout(() => {
-              chrome.tabs.sendMessage(tabId, { type: 'RUN_STRESS_TEST' }, finish);
-            }, 100);
-          });
-          return;
-        }
-        finish(res);
+      ready().then(() => {
+        // Only the frame holding the picked element can answer; every other frame
+        // would report noTarget and race it to sendResponse.
+        const frameId = lastPick && lastPick.tabId === tabId ? lastPick.frameId : 0;
+        sendToFrame(tabId, { type: 'RUN_STRESS_TEST' }, frameId, (res) => {
+          if (chrome.runtime.lastError) {
+            injectAllFrames(tabId, () => {
+              setTimeout(() => sendToFrame(tabId, { type: 'RUN_STRESS_TEST' }, frameId, finish), 100);
+            });
+            return;
+          }
+          finish(res);
+        });
       });
     });
   }
@@ -293,16 +329,17 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
     chrome.tabs.query({ active: true, currentWindow: true }, (tabs) => {
       if (!tabs[0]) return;
       const tabId = tabs[0].id;
-      chrome.tabs.sendMessage(tabId, msg, () => {
-        if (chrome.runtime.lastError) {
-          // Content script not yet present — inject, then retry.
-          chrome.scripting.executeScript({ target: { tabId }, files: CONTENT_SCRIPT_FILES }, () => {
-            void chrome.runtime.lastError;
-            setTimeout(() => {
-              chrome.tabs.sendMessage(tabId, msg, () => void chrome.runtime.lastError);
-            }, 100);
-          });
-        }
+      // Validation resolves against the top document and reports a single count, so
+      // it goes to frame 0 — letting every frame answer would make the number shown
+      // depend on whichever reply arrived last. Clearing highlights is safe (and
+      // necessary) everywhere.
+      const frameId = msg.type === 'LAB_VALIDATE' ? 0 : undefined;
+      sendToFrame(tabId, msg, frameId, () => {
+        if (!chrome.runtime.lastError) return;
+        // Content script not yet present — inject, then retry.
+        injectAllFrames(tabId, () => {
+          setTimeout(() => sendToFrame(tabId, msg, frameId), 100);
+        });
       });
     });
   }
@@ -314,19 +351,10 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
       const tabId = tabs[0].id;
       // so we can re-arm capture after a full-page navigation
       ready().then(() => { recordingTabs.add(tabId); persistState(); });
-      chrome.tabs.sendMessage(tabId, { type: 'START_RECORDING' }, (r) => {
-        if (chrome.runtime.lastError) {
-          // Inject content script first, then start recording
-          chrome.scripting.executeScript({
-            target: { tabId },
-            files: CONTENT_SCRIPT_FILES
-          }, () => {
-            void chrome.runtime.lastError;
-            setTimeout(() => {
-              chrome.tabs.sendMessage(tabId, { type: 'START_RECORDING' }, () => void chrome.runtime.lastError);
-            }, 80);
-          });
-        }
+      // Every frame records its own events — a click inside an iframe never reaches
+      // the top document's listeners.
+      injectAllFrames(tabId, () => {
+        sendToFrame(tabId, { type: 'START_RECORDING' });
       });
     });
   }
@@ -395,15 +423,11 @@ chrome.tabs.onUpdated.addListener((tabId, info) => {
     // Re-arm recording after a full-page navigation so multi-page flows keep capturing.
     // The content script (re-injected by the manifest on load) records a fresh goto on start.
     if (!recordingTabs.has(tabId)) return;
-    chrome.tabs.sendMessage(tabId, { type: 'START_RECORDING', rearm: true }, () => {
-      if (chrome.runtime.lastError) {
-        chrome.scripting.executeScript({ target: { tabId }, files: CONTENT_SCRIPT_FILES }, () => {
-          void chrome.runtime.lastError;
-          setTimeout(() => {
-            chrome.tabs.sendMessage(tabId, { type: 'START_RECORDING', rearm: true }, () => void chrome.runtime.lastError);
-          }, 80);
-        });
-      }
+    sendToFrame(tabId, { type: 'START_RECORDING', rearm: true }, undefined, () => {
+      if (!chrome.runtime.lastError) return;
+      injectAllFrames(tabId, () => {
+        setTimeout(() => sendToFrame(tabId, { type: 'START_RECORDING', rearm: true }), 80);
+      });
     });
   });
 });

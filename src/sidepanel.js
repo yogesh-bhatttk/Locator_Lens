@@ -434,6 +434,14 @@ function renderResults(data) {
   if (el.placeholder) chips.push(`<span class="el-chip"><span class="k">ph: </span><span class="v">${esc(el.placeholder.slice(0, 25))}</span></span>`);
   if (el.hasUnstableClasses) chips.push(`<span class="el-chip"><span class="k">classes: </span><span class="v warn">⚠ auto-generated</span></span>`);
   
+  // An element inside an iframe generates code that must enter the frame first —
+  // surface that, because otherwise the locator looks ordinary and inexplicably
+  // fails against the top document.
+  if (el.framePath && el.framePath.length) {
+    chips.push(`<span class="el-chip shadow">🖼 IFRAME</span>`);
+    chips.push(`<span class="el-chip shadow"><span class="k">frame: </span>${esc(el.framePath.join(' › '))}</span>`);
+  }
+
   if (el.isInShadow) {
     chips.push(`<span class="el-chip shadow">🧬 SHADOW</span>`);
     if (el.shadowHost) chips.push(`<span class="el-chip shadow"><span class="k">host: </span>${esc(el.shadowHost)}</span>`);
@@ -528,8 +536,16 @@ function toggleExplain(btn) {
 }
 
 // ── Message listener (also used by port bridge from background) ─────────────
+let lastRenderedPickId = null;
+
 function handleRuntimeMessage(msg) {
   if (msg.type === 'ELEMENT_PICKED' && msg.data) {
+    // Delivered twice on purpose-ish: the content script broadcasts (which reaches
+    // this page directly) and the worker also relays over the port. Rendering both
+    // rebuilt every card for nothing.
+    const id = msg.data.pickId;
+    if (id && id === lastRenderedPickId) return;
+    if (id) lastRenderedPickId = id;
     renderResults(msg.data);
   }
   if (msg.type === 'STOP_INSPECT') {
@@ -633,8 +649,13 @@ document.addEventListener('DOMContentLoaded', () => {
     document.getElementById('idleState').style.display = '';
   });
 
-  // ── STARTUP: Force Absolute Reset ──
-  chrome.runtime.sendMessage({ type: 'STOP_INSPECT' });
+  // ── STARTUP ──
+  // Show "not inspecting" until the worker answers, but do NOT tell it to stop.
+  // Sending STOP_INSPECT here cancelled the action that opened this panel: clicking
+  // Start Inspecting makes the worker open the side panel, the panel loads, and this
+  // line then tore down the overlay the click had just switched on — so inspecting
+  // from the popup silently did nothing whenever the panel was not already open.
+  // GET_INSPECT_STATE below reports the truth, which is all this needed.
   isInspecting = false;
   updateInspectUI();
 
@@ -1149,6 +1170,16 @@ function appendToRecorder(actionData) {
   const key = dedupeKeyForAction(actionData);
   if (seenActionKeys.has(key)) return;
   seenActionKeys.add(key);
+  // Trim in memory too, not only when persisting: a long session used to grow this
+  // without bound. A Set iterates in insertion order, so this drops the oldest keys,
+  // which are the least likely to be re-delivered.
+  if (seenActionKeys.size > LL_MAX_SEEN_KEYS) {
+    let excess = seenActionKeys.size - LL_MAX_SEEN_KEYS;
+    for (const old of seenActionKeys) {
+      seenActionKeys.delete(old);
+      if (--excess <= 0) break;
+    }
+  }
 
   recRedoStack = []; // a newly captured action invalidates the redo history
   recordedActions.push(Object.assign({}, actionData));
