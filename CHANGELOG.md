@@ -54,6 +54,26 @@ Adds iframe support, and clears the remaining known gaps from the 1.2.1 audit.
 - `seenActionKeys` grew without bound in memory during a long recording session; it
   was only trimmed when persisted.
 
+### Store submission
+
+- **Host access narrowed from `<all_urls>` to `http://*/*` + `https://*/*`**, in both
+  the grant and the content-script matches. `<all_urls>` also covers `file://`,
+  `ftp://` and every other scheme; this extension analyses web pages and has no use
+  for them. "The narrowest permission that works" is the rule a reviewer applies, and
+  the previous rejection was in that category.
+- The declared permission set is now pinned by test, per browser, so it cannot grow
+  by accident — the existing "every permission is justified" check could only inspect
+  what was declared and had no opinion on the set growing.
+- The Chrome Web Store dashboard text is verified against the manifest. The listing's
+  short description must be byte-identical to `manifest.description`, the
+  justification table must name exactly the permissions the manifests declare, and the
+  host-access row must state the grant actually requested. A listing that describes
+  something the manifest does not is a review finding, and the two drift the moment
+  they are maintained apart.
+- `STORE_SUBMISSION.md` now carries the single-purpose statement and every data-use
+  disclosure answer, so the dashboard is filled in from a reviewed source rather than
+  from memory.
+
 ### Changed
 
 - CI actions moved to `@v5`, off the deprecated Node 20 runtime.

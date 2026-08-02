@@ -157,9 +157,13 @@ describe.each(TARGETS)('%s package', (target) => {
     expect([...manifest().permissions].sort()).toEqual(expected);
   });
 
-  it('requests no optional or host permission beyond <all_urls>', () => {
+  it('asks for the two schemes it uses, not every scheme there is', () => {
+    // <all_urls> also covers file://, ftp:// and more. The extension analyses web
+    // pages and has no use for those, and "narrowest permission that works" is the
+    // policy a reviewer applies.
     const m = manifest();
-    expect(m.host_permissions ?? []).toEqual(['<all_urls>']);
+    expect(m.host_permissions).toEqual(['http://*/*', 'https://*/*']);
+    expect(m.content_scripts[0].matches).toEqual(['http://*/*', 'https://*/*']);
     expect(m.optional_permissions ?? []).toEqual([]);
     expect(m.optional_host_permissions ?? []).toEqual([]);
   });
@@ -245,5 +249,61 @@ describe('version consistency', () => {
     const chrome = readFileSync(join(ROOT, 'manifests/manifest.chrome.json'), 'utf8').trim();
     const firefox = readFileSync(join(ROOT, 'manifests/manifest.firefox.json'), 'utf8').trim();
     expect([chrome, firefox]).toContain(root);
+  });
+});
+
+// The manifest is only half of a submission. The other half is the text pasted into
+// the Chrome Web Store dashboard, and a justification table that disagrees with the
+// manifest — listing a permission that was dropped, or missing one that was added —
+// is the kind of contradiction that costs a review cycle. The rejection this repo
+// carries was about the gap between what was declared and what was needed; this
+// closes the matching gap between what is declared and what is claimed.
+describe('submission paperwork matches the manifest', () => {
+  const doc = () => readFileSync(join(ROOT, 'STORE_SUBMISSION.md'), 'utf8');
+
+  /** The permissions named in the "Permission justifications" table. */
+  function justifiedPermissions() {
+    const text = doc();
+    const start = text.indexOf('## 4. Permission justifications');
+    expect(start, 'the justification section moved or was renamed').toBeGreaterThan(-1);
+    const section = text.slice(start, text.indexOf('\n## ', start + 1));
+    const names = [];
+    for (const line of section.split('\n')) {
+      if (!line.startsWith('|') || /^\|\s*-+/.test(line) || /\|\s*Permission\s*\|/.test(line)) continue;
+      const m = /`([^`]+)`/.exec(line);
+      if (m) names.push(m[1]);
+    }
+    return names;
+  }
+
+  const declared = (file) => JSON.parse(readFileSync(join(ROOT, file), 'utf8'));
+
+  it('justifies every permission either browser declares, and nothing else', () => {
+    const chrome = declared('manifests/manifest.chrome.json').permissions;
+    const firefox = declared('manifests/manifest.firefox.json').permissions;
+    const union = [...new Set([...chrome, ...firefox])].sort();
+
+    const justified = justifiedPermissions();
+    const hostRows = justified.filter((n) => n.startsWith('host_permissions'));
+    const apiRows = justified.filter((n) => !n.startsWith('host_permissions')).sort();
+
+    expect(apiRows, 'justification table does not match the declared permissions').toEqual(union);
+    expect(hostRows, 'host access needs exactly one justification row').toHaveLength(1);
+  });
+
+  it('states the host grant the manifest actually asks for', () => {
+    // A row still promising <all_urls> after the grant was narrowed would be a
+    // reviewer reading one thing and installing another.
+    const hosts = declared('manifests/manifest.chrome.json').host_permissions;
+    const row = justifiedPermissions().find((n) => n.startsWith('host_permissions'));
+    for (const pattern of hosts) {
+      expect(row, `host justification omits ${pattern}`).toContain(pattern);
+    }
+    expect(row, 'the host row still promises <all_urls>').not.toContain('<all_urls>');
+  });
+
+  it('quotes the description the manifest ships', () => {
+    const description = declared('manifests/manifest.chrome.json').description;
+    expect(doc(), 'listing description drifted from the manifest').toContain(description);
   });
 });

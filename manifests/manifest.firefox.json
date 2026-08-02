@@ -17,7 +17,7 @@
     "default_panel": "src/sidepanel.html",
     "default_icon": "icons/icon32.png"
   },
-  "host_permissions": ["<all_urls>"],
+  "host_permissions": ["http://*/*", "https://*/*"],
   "background": {
     "scripts": ["src/background.js"],
     "type": "module"
@@ -34,7 +34,7 @@
   },
   "content_scripts": [
     {
-      "matches": ["<all_urls>"],
+      "matches": ["http://*/*", "https://*/*"],
       "js": ["src/codegen.js", "src/content-locator-engine.js", "src/content.js"],
       "run_at": "document_idle"
     }

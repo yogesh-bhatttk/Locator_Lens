@@ -78,19 +78,54 @@ Both stores reject an update that reuses a published version number, and AMO
 rejects a _decrease_. Always bump before resubmitting — including after a
 rejection, because the rejected version number is consumed on Chrome.
 
+## 3b. Listing copy and disclosures
+
+Paste verbatim. `tests/package.test.mjs` asserts the short description here is
+byte-identical to the one in the manifest — a listing that describes something the
+manifest does not is a review finding, and the two drift the moment they are
+maintained separately.
+
+**Short description** (112 chars, limit 132)
+
+> Inspect elements for ranked Playwright locators and record flows into test scripts—runs locally in your browser.
+
+**Single purpose**
+
+> LocatorLens inspects an element on the page the user is testing and produces a
+> ranked, uniqueness-checked locator for it, plus optional recording of a flow into
+> a runnable test script. Every feature serves that one purpose: inspecting page
+> elements to author test locators.
+
+**Data use** — answer every Chrome Web Store disclosure with _no collection_:
+
+| Question                     | Answer | Why                                                                                                     |
+| ---------------------------- | ------ | ------------------------------------------------------------------------------------------------------- |
+| Personally identifiable info | No     | none is read, derived or stored                                                                         |
+| Health, financial, auth info | No     | the extension never reads input values except the one it records into a test, which stays on the device |
+| Personal communications      | No     |                                                                                                         |
+| Location                     | No     |                                                                                                         |
+| Web history                  | No     | the recorded page URL is written into the generated script and stored locally, never transmitted        |
+| User activity                | No     | recording is explicit, local, and user-initiated                                                        |
+| Website content              | No     | page structure is read in-memory to compute a locator; nothing leaves the browser                       |
+
+Certify all three: no unauthorised use, no unauthorised transfer, no
+creditworthiness use. The package contains no network API at all, which
+`scripts/build.mjs` enforces — so these answers are checkable against the code
+rather than merely asserted.
+
 ## 4. Permission justifications
 
 Paste these into the Chrome Web Store "Privacy practices" tab. Each permission is
 exercised by the feature named; there are no unused permissions.
 
-| Permission                     | Justification                                                                                                                                                                                                                             |
-| ------------------------------ | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `activeTab`                    | Grants access to the tab the user is on at the moment they click Inspect, Record, Validate or Stress Test, so those actions work even when the user has restricted the extension's site access to "on click".                             |
-| `scripting`                    | The inspector, recorder and Selector Lab are content scripts. When a page loaded before the extension did — or after an extension update — `chrome.scripting.executeScript` re-injects them so the user does not have to reload the page. |
-| `storage`                      | Persists the user's framework/language choice, custom test-id attribute list, the last inspected element and the in-progress recording timeline. Local only; nothing is transmitted.                                                      |
-| `contextMenus`                 | Adds the right-click "Copy Best Locator" and "Open/Close Results Panel" entries.                                                                                                                                                          |
-| `sidePanel` (Chrome)           | The results panel is the extension's primary UI surface.                                                                                                                                                                                  |
-| `host_permissions: <all_urls>` | See below.                                                                                                                                                                                                                                |
+| Permission                                   | Justification                                                                                                                                                                                                                             |
+| -------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `activeTab`                                  | Grants access to the tab the user is on at the moment they click Inspect, Record, Validate or Stress Test, so those actions work even when the user has restricted the extension's site access to "on click".                             |
+| `scripting`                                  | The inspector, recorder and Selector Lab are content scripts. When a page loaded before the extension did — or after an extension update — `chrome.scripting.executeScript` re-injects them so the user does not have to reload the page. |
+| `storage`                                    | Persists the user's framework/language choice, custom test-id attribute list, the last inspected element and the in-progress recording timeline. Local only; nothing is transmitted.                                                      |
+| `contextMenus`                               | Adds the right-click "Copy Best Locator" and "Open/Close Results Panel" entries.                                                                                                                                                          |
+| `sidePanel` (Chrome)                         | The results panel is the extension's primary UI surface.                                                                                                                                                                                  |
+| `host_permissions: http://*/* + https://*/*` | See below.                                                                                                                                                                                                                                |
 
 ### Broad host access
 
@@ -98,6 +133,10 @@ exercised by the feature named; there are no unused permissions.
 > analyse the page the user is currently testing and generate a locator for it.
 > The user chooses that page — it may be any internal staging host, localhost port
 > or customer environment — so the set of URLs cannot be enumerated in advance.
+>
+> The grant is narrowed to `http://*/*` and `https://*/*` rather than `<all_urls>`:
+> the extension analyses web pages, so it has no use for `file://`, `ftp://` or any
+> other scheme, and does not ask for them.
 > The extension reads the DOM of a page only while the user has explicitly started
 > Inspect, Record or Selector Lab on it, uses the result solely to generate locator
 > text shown in the side panel, and transmits nothing: there is no backend, no
