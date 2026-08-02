@@ -23,7 +23,13 @@ function filesIn(dir, base = dir, out = []) {
   for (const name of readdirSync(dir)) {
     const abs = join(dir, name);
     if (statSync(abs).isDirectory()) filesIn(abs, base, out);
-    else out.push(abs.slice(base.length + 1).split(/[\\/]/).join('/'));
+    else
+      out.push(
+        abs
+          .slice(base.length + 1)
+          .split(/[\\/]/)
+          .join('/')
+      );
   }
   return out;
 }
@@ -75,6 +81,15 @@ describe.each(TARGETS)('%s package', (target) => {
     for (const forbidden of ['node_modules', 'graphify-out', 'tests/', 'scripts/', '.git', 'screenshots']) {
       expect(all, `package contains ${forbidden}`).not.toContain(forbidden);
     }
+  });
+
+  // The rejection this suite exists for came from uploading an archive built out of
+  // a stale directory. Two versions of the same package sitting in dist/ is the
+  // setup for repeating that by hand.
+  it('leaves exactly one package for this target in dist/', () => {
+    const zips = readdirSync(join(ROOT, 'dist')).filter((f) => f.startsWith(`locatorlens-${target}-`));
+    expect(zips, `found ${zips.join(', ')}`).toHaveLength(1);
+    expect(zips[0]).toBe(`locatorlens-${target}-${manifest().version}.zip`);
   });
 
   it('declares manifest v3 and a three-part version', () => {
@@ -195,9 +210,12 @@ describe('archive', () => {
 
 describe('version consistency', () => {
   it('reports the same version in package.json and all three manifests', () => {
-    const versions = ['package.json', 'manifest.json', 'manifests/manifest.chrome.json', 'manifests/manifest.firefox.json'].map(
-      (f) => JSON.parse(readFileSync(join(ROOT, f), 'utf8')).version
-    );
+    const versions = [
+      'package.json',
+      'manifest.json',
+      'manifests/manifest.chrome.json',
+      'manifests/manifest.firefox.json',
+    ].map((f) => JSON.parse(readFileSync(join(ROOT, f), 'utf8')).version);
     expect(new Set(versions).size, `versions differ: ${versions.join(', ')}`).toBe(1);
   });
 

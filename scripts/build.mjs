@@ -104,13 +104,18 @@ const HOST_ACCESS_PERMISSIONS = new Set(['activeTab']);
  * results, which nothing here reads.
  */
 const BANNED_PERMISSIONS = new Map([
-  ['tabs', 'tabs.query/sendMessage/onUpdated/onRemoved all work without it; only url/title/favIconUrl need it, and nothing reads those. Rejected by CWS as "Purple Potassium".'],
+  [
+    'tabs',
+    'tabs.query/sendMessage/onUpdated/onRemoved all work without it; only url/title/favIconUrl need it, and nothing reads those. Rejected by CWS as "Purple Potassium".',
+  ],
 ]);
 
 function verifyPermissions(manifest, code, problems) {
   for (const permission of manifest.permissions ?? []) {
     if (BANNED_PERMISSIONS.has(permission)) {
-      problems.push(`manifest requests banned permission "${permission}" — ${BANNED_PERMISSIONS.get(permission)}`);
+      problems.push(
+        `manifest requests banned permission "${permission}" — ${BANNED_PERMISSIONS.get(permission)}`
+      );
       continue;
     }
     if (HOST_ACCESS_PERMISSIONS.has(permission)) continue;
@@ -124,7 +129,9 @@ function verifyPermissions(manifest, code, problems) {
       continue;
     }
     if (!evidence.test(code)) {
-      problems.push(`manifest requests "${permission}" but no packaged file calls the matching API — remove it`);
+      problems.push(
+        `manifest requests "${permission}" but no packaged file calls the matching API — remove it`
+      );
     }
   }
 }
@@ -152,7 +159,10 @@ function verify(entries, target) {
 
     // A network call from an extension that advertises "runs entirely locally".
     const fetchCall = text.match(/\b(?:fetch|XMLHttpRequest)\b/);
-    if (fetchCall) problems.push(`${entry.name}: contains a network API (${fetchCall[0]}) — the listing claims no network access`);
+    if (fetchCall)
+      problems.push(
+        `${entry.name}: contains a network API (${fetchCall[0]}) — the listing claims no network access`
+      );
   }
 
   const manifest = JSON.parse(entries.find((e) => e.name === 'manifest.json').data.toString('utf8'));
@@ -179,7 +189,8 @@ function verify(entries, target) {
 
   const present = new Set(entries.map((e) => e.name));
   for (const ref of referenced) {
-    if (!present.has(ref)) problems.push(`manifest.json references "${ref}", which is not in the ${target} package`);
+    if (!present.has(ref))
+      problems.push(`manifest.json references "${ref}", which is not in the ${target} package`);
   }
 
   if (problems.length) {
@@ -191,7 +202,8 @@ function verify(entries, target) {
 
 function build(target) {
   const config = TARGETS[target];
-  if (!config) throw new Error(`Unknown target "${target}". Expected one of: ${Object.keys(TARGETS).join(', ')}`);
+  if (!config)
+    throw new Error(`Unknown target "${target}". Expected one of: ${Object.keys(TARGETS).join(', ')}`);
 
   const manifest = readFileSync(join(ROOT, config.manifest));
   const version = JSON.parse(manifest.toString('utf8')).version;
@@ -207,6 +219,14 @@ function build(target) {
     const dest = join(unpacked, entry.name);
     mkdirSync(dirname(dest), { recursive: true });
     writeFileSync(dest, entry.data);
+  }
+
+  // Drop this target's earlier packages. Leaving 1.1.6, 1.2.0 and 1.2.1 side by side
+  // in dist/ is how the wrong archive gets picked at upload time — which is the exact
+  // failure this script exists to prevent, and the one that caused the rejection.
+  const stale = new RegExp(`^locatorlens-${target}-.*\\.zip$`);
+  for (const name of readdirSync(OUT)) {
+    if (stale.test(name)) rmSync(join(OUT, name), { force: true });
   }
 
   const zip = createZip(entries);
