@@ -14,7 +14,8 @@ const LANGUAGES = ['typescript', 'javascript', 'python'];
 /** Every framework/language pair the UI will actually let a user select. */
 function validCombos() {
   const out = [];
-  for (const fw of FRAMEWORKS) for (const lang of LANGUAGES) if (C.isValidCombo(fw, lang)) out.push([fw, lang]);
+  for (const fw of FRAMEWORKS)
+    for (const lang of LANGUAGES) if (C.isValidCombo(fw, lang)) out.push([fw, lang]);
   return out;
 }
 
@@ -46,8 +47,10 @@ describe('locator expressions', () => {
   });
 
   it('uses snake_case for Playwright Python and camelCase elsewhere', () => {
-    expect(C.locatorExpr(target, 'playwright', 'python')).toBe("page.get_by_role(\"button\", name=\"Submit\")");
-    expect(C.locatorExpr(target, 'playwright', 'typescript')).toBe("page.getByRole('button', { name: 'Submit' })");
+    expect(C.locatorExpr(target, 'playwright', 'python')).toBe('page.get_by_role("button", name="Submit")');
+    expect(C.locatorExpr(target, 'playwright', 'typescript')).toBe(
+      "page.getByRole('button', { name: 'Submit' })"
+    );
   });
 
   it('passes a heading level through to getByRole', () => {
@@ -57,9 +60,9 @@ describe('locator expressions', () => {
   });
 
   it('maps getByTestId only for data-testid, and a CSS attribute otherwise', () => {
-    expect(C.locatorExpr({ kind: 'testid', attr: 'data-testid', value: 'x' }, 'playwright', 'typescript')).toBe(
-      "page.getByTestId('x')"
-    );
+    expect(
+      C.locatorExpr({ kind: 'testid', attr: 'data-testid', value: 'x' }, 'playwright', 'typescript')
+    ).toBe("page.getByTestId('x')");
     expect(C.locatorExpr({ kind: 'testid', attr: 'data-qa', value: 'x' }, 'playwright', 'typescript')).toBe(
       'page.locator(\'[data-qa="x"]\')'
     );
@@ -86,7 +89,7 @@ describe('escaping of hostile values', () => {
   it('does not CSS-escape values passed to a native Selenium By locator', () => {
     // By.name takes a bare name, not a selector — escaping here would corrupt it.
     expect(C.locatorExpr({ kind: 'name', value: 'field"name' }, 'selenium', 'javascript')).toBe(
-      'driver.findElement(By.name(\'field"name\'))'
+      "driver.findElement(By.name('field\"name'))"
     );
   });
 
@@ -96,7 +99,11 @@ describe('escaping of hostile values', () => {
   });
 
   it('keeps quotes in an accessible name instead of deleting them (Selenium xpath)', () => {
-    const expr = C.locatorExpr({ kind: 'role', role: 'button', name: 'Delete "row"' }, 'selenium', 'javascript');
+    const expr = C.locatorExpr(
+      { kind: 'role', role: 'button', name: 'Delete "row"' },
+      'selenium',
+      'javascript'
+    );
     // Previously every " was stripped, so the xpath searched for `Delete row` and
     // quietly matched a different button.
     expect(expr).toContain('Delete "row"');
@@ -148,7 +155,18 @@ describe('action statements', () => {
   const target = { kind: 'testid', attr: 'data-testid', value: 'email' };
 
   it('emits a statement for every action across every valid combination', () => {
-    const actions = ['click', 'dblclick', 'check', 'uncheck', 'fill', 'selectOption', 'hover', 'press', 'goto', 'viewport'];
+    const actions = [
+      'click',
+      'dblclick',
+      'check',
+      'uncheck',
+      'fill',
+      'selectOption',
+      'hover',
+      'press',
+      'goto',
+      'viewport',
+    ];
     for (const [fw, lang] of validCombos()) {
       for (const action of actions) {
         const stmt = C.actionStatement({ action, target, value: 'v' }, fw, lang);
@@ -175,9 +193,15 @@ describe('action statements', () => {
   });
 
   it('maps key names per framework', () => {
-    expect(C.actionStatement({ action: 'press', value: 'Enter' }, 'cypress', 'javascript')).toContain('{enter}');
-    expect(C.actionStatement({ action: 'press', value: 'Enter' }, 'selenium', 'python')).toContain('Keys.ENTER');
-    expect(C.actionStatement({ action: 'press', value: 'Enter' }, 'playwright', 'typescript')).toContain("press('Enter')");
+    expect(C.actionStatement({ action: 'press', value: 'Enter' }, 'cypress', 'javascript')).toContain(
+      '{enter}'
+    );
+    expect(C.actionStatement({ action: 'press', value: 'Enter' }, 'selenium', 'python')).toContain(
+      'Keys.ENTER'
+    );
+    expect(C.actionStatement({ action: 'press', value: 'Enter' }, 'playwright', 'typescript')).toContain(
+      "press('Enter')"
+    );
   });
 
   it('defaults an unparseable viewport to 1280x720', () => {
@@ -221,7 +245,11 @@ describe('assertions', () => {
   });
 
   it('falls back to a visibility assertion for an unknown type', () => {
-    const stmt = C.actionStatement({ action: 'assert', assertType: 'nope', target }, 'playwright', 'typescript');
+    const stmt = C.actionStatement(
+      { action: 'assert', assertType: 'nope', target },
+      'playwright',
+      'typescript'
+    );
     expect(stmt).toContain('toBeVisible()');
   });
 });
@@ -231,14 +259,24 @@ describe('script scaffolding', () => {
     expect(C.wrapScript(["await page.goto('/');"], 'playwright', 'typescript')).toContain(
       "import { test, expect } from '@playwright/test'"
     );
-    expect(C.wrapScript(['page.goto("/")'], 'playwright', 'python')).toContain('from playwright.sync_api import');
+    expect(C.wrapScript(['page.goto("/")'], 'playwright', 'python')).toContain(
+      'from playwright.sync_api import'
+    );
     expect(C.wrapScript(["cy.visit('/');"], 'cypress', 'javascript')).toContain('describe(');
-    expect(C.wrapScript(["await driver.get('/');"], 'selenium', 'javascript')).toContain('selenium-webdriver');
-    expect(C.wrapScript(['driver.get("/")'], 'selenium', 'python')).toContain('from selenium import webdriver');
+    expect(C.wrapScript(["await driver.get('/');"], 'selenium', 'javascript')).toContain(
+      'selenium-webdriver'
+    );
+    expect(C.wrapScript(['driver.get("/")'], 'selenium', 'python')).toContain(
+      'from selenium import webdriver'
+    );
   });
 
   it('adds Selenium imports only for the APIs the body actually uses', () => {
-    const withSelect = C.wrapScript(['await new Select(x).selectByVisibleText("a");'], 'selenium', 'javascript');
+    const withSelect = C.wrapScript(
+      ['await new Select(x).selectByVisibleText("a");'],
+      'selenium',
+      'javascript'
+    );
     expect(withSelect).toContain('Select');
 
     const without = C.wrapScript(['await driver.get("/");'], 'selenium', 'javascript');
@@ -247,7 +285,9 @@ describe('script scaffolding', () => {
 
   it('pulls in the assert module only when an assertion is present', () => {
     expect(C.wrapScript(['assert.ok(true);'], 'selenium', 'javascript')).toContain("require('assert')");
-    expect(C.wrapScript(['await driver.get("/");'], 'selenium', 'javascript')).not.toContain("require('assert')");
+    expect(C.wrapScript(['await driver.get("/");'], 'selenium', 'javascript')).not.toContain(
+      "require('assert')"
+    );
   });
 
   it('indents every physical line of a multi-line statement', () => {
@@ -280,5 +320,85 @@ describe('script scaffolding', () => {
 
   it('tolerates a null action list', () => {
     expect(() => C.testScript(null, 'playwright', 'typescript')).not.toThrow();
+  });
+});
+
+// A chained locator is the answer to "the Delete button in *this* row". It used to
+// exist only as a Playwright display string: the structured target carried the bare
+// child selector, so every other framework — and every recorded step built from it —
+// quietly addressed the first matching row on the page instead of the chosen one.
+describe('chained locators', () => {
+  const chain = {
+    kind: 'chain',
+    parent: { kind: 'testid', attr: 'data-testid', value: 'row-7' },
+    child: { kind: 'role', role: 'button', name: 'Delete' },
+  };
+
+  it('keeps the parent scope in every framework and language', () => {
+    for (const [fw, lang] of validCombos()) {
+      expect(C.locatorExpr(chain, fw, lang), `${fw}/${lang}`).toContain('row-7');
+      expect(C.locatorExpr(chain, fw, lang), `${fw}/${lang}`).toContain('Delete');
+    }
+  });
+
+  it('continues the parent expression rather than starting a second root query', () => {
+    expect(C.locatorExpr(chain, 'playwright', 'typescript')).toBe(
+      "page.getByTestId('row-7').getByRole('button', { name: 'Delete' })"
+    );
+    expect(C.locatorExpr(chain, 'playwright', 'python')).toBe(
+      'page.get_by_test_id("row-7").get_by_role("button", name="Delete")'
+    );
+    expect(C.locatorExpr(chain, 'cypress', 'javascript')).toBe(
+      "cy.get('[data-testid=\"row-7\"]').find('button, [role=\"button\"]').contains('Delete')"
+    );
+  });
+
+  it('scopes the Selenium child XPath to the parent with a leading dot', () => {
+    // Selenium's element.find_element(By.XPATH, "//…") still searches the whole
+    // document — the dot is the entire difference between scoped and not.
+    const js = C.locatorExpr(chain, 'selenium', 'javascript');
+    expect(js).toContain('row-7');
+    expect(js).toMatch(/By\.xpath\('\.\/\//);
+    expect(js).not.toMatch(/By\.xpath\('\/\//);
+
+    const py = C.locatorExpr(chain, 'selenium', 'python');
+    expect(py).toMatch(/By\.XPATH, "\.\/\//);
+  });
+
+  it('leaves an unchained role locator absolute', () => {
+    const plain = C.locatorExpr({ kind: 'role', role: 'button', name: 'Delete' }, 'selenium', 'javascript');
+    expect(plain).toMatch(/By\.xpath\('\/\//);
+  });
+
+  it('scopes a chained text child too', () => {
+    const textChain = {
+      kind: 'chain',
+      parent: { kind: 'id', value: 'cart' },
+      child: { kind: 'text', value: 'Remove' },
+    };
+    expect(C.locatorExpr(textChain, 'selenium', 'python')).toMatch(/By\.XPATH, "\.\/\//);
+    expect(C.locatorExpr(textChain, 'cypress', 'javascript')).toBe("cy.get('#cart').contains('Remove')");
+  });
+
+  it('drives a full action statement through the chain', () => {
+    const step = { action: 'click', target: chain };
+    for (const [fw, lang] of validCombos()) {
+      const line = C.actionStatement(step, fw, lang);
+      expect(line, `${fw}/${lang}`).toContain('row-7');
+      expect(line, `${fw}/${lang}`).not.toContain('undefined');
+    }
+  });
+
+  it('falls back to the parent alone when there is no child', () => {
+    expect(
+      C.locatorExpr({ kind: 'chain', parent: { kind: 'id', value: 'a' } }, 'playwright', 'typescript')
+    ).toBe("page.locator('#a')");
+  });
+
+  it('never emits a broken expression for a malformed chain', () => {
+    for (const [fw, lang] of validCombos()) {
+      expect(() => C.locatorExpr({ kind: 'chain' }, fw, lang)).not.toThrow();
+      expect(C.locatorExpr({ kind: 'chain' }, fw, lang), `${fw}/${lang}`).toBe('');
+    }
   });
 });

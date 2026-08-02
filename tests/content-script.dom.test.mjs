@@ -341,3 +341,97 @@ describe('debug logging', () => {
     expect(calls).toHaveLength(0);
   });
 });
+
+// A content script inherits the *page's* security context, so on any http:// site
+// navigator.clipboard is undefined. Calling it threw straight out of the message
+// listener, which killed the context-menu copy and its sendResponse with it.
+describe('clipboard on a non-secure page', () => {
+  beforeEach(() => {
+    document.body.innerHTML = '<button id="go">Place order</button>';
+    delete navigator.clipboard; // jsdom has none either — this is the http:// case
+  });
+
+  it('answers the context-menu copy instead of throwing', () => {
+    const target = document.getElementById('go');
+    pointAt(target);
+    target.dispatchEvent(new window.MouseEvent('contextmenu', { bubbles: true }));
+
+    let response;
+    expect(() => {
+      response = send({ type: 'CONTEXT_MENU_COPY' });
+    }).not.toThrow();
+    expect(response).toEqual({ ok: true });
+  });
+
+  it('tells the user the context-menu copy was blocked instead of doing nothing', async () => {
+    const target = document.getElementById('go');
+    pointAt(target);
+    target.dispatchEvent(new window.MouseEvent('contextmenu', { bubbles: true }));
+    send({ type: 'CONTEXT_MENU_COPY' });
+    await new Promise((r) => setTimeout(r, 0));
+
+    const toast = document.getElementById('ll-toast');
+    expect(toast).not.toBeNull();
+    expect(toast.textContent).toContain('Copy blocked');
+    // The toast styles live in the injected sheet, which Inspect never ran here.
+    expect(document.getElementById('ll-styles')).not.toBeNull();
+  });
+
+  it('reports the copy as blocked rather than showing a false "Copied"', async () => {
+    // execCommand is unavailable here too, so nothing reaches the clipboard. Claiming
+    // success sent people off to paste an empty buffer.
+    send({ type: 'START_INSPECT' });
+    const target = document.getElementById('go');
+    pointAt(target);
+    target.dispatchEvent(new window.MouseEvent('click', { bubbles: true }));
+    await new Promise((r) => setTimeout(r, 0));
+
+    const toast = document.getElementById('ll-toast');
+    expect(toast).not.toBeNull();
+    expect(toast.textContent).toContain('Copy blocked');
+    expect(toast.textContent).toContain('Place order');
+  });
+
+  it('says Copied when the clipboard write actually succeeds', async () => {
+    const written = [];
+    navigator.clipboard = {
+      writeText: (t) => {
+        written.push(t);
+        return Promise.resolve();
+      },
+    };
+    send({ type: 'START_INSPECT' });
+    const target = document.getElementById('go');
+    pointAt(target);
+    target.dispatchEvent(new window.MouseEvent('click', { bubbles: true }));
+    await new Promise((r) => setTimeout(r, 0));
+
+    expect(written).toHaveLength(1);
+    expect(document.getElementById('ll-toast').textContent).toContain('Copied');
+    delete navigator.clipboard;
+  });
+});
+
+describe('recorder teardown', () => {
+  it('does not leak a debounced keystroke into the next recording session', async () => {
+    // Typing is emitted on a 450ms debounce. Stopping and starting again inside that
+    // window used to let the *previous* session's timer fire against the new one, so
+    // a fresh recording opened with a fill nobody performed during it.
+    document.body.innerHTML = '<label for="q">Search</label><input id="q">';
+    const field = document.getElementById('q');
+    const sent = [];
+    chrome.runtime.sendMessage = (msg) => {
+      if (msg && msg.type === 'RECORDED_ACTION') sent.push(msg.data);
+    };
+
+    send({ type: 'START_RECORDING' });
+    field.value = 'typed just before stop';
+    field.dispatchEvent(new window.Event('input', { bubbles: true }));
+    send({ type: 'STOP_RECORDING' });
+    send({ type: 'START_RECORDING' }); // new session, well inside the debounce window
+
+    await new Promise((r) => setTimeout(r, 600)); // past the 450ms debounce
+    expect(sent.filter((a) => a.action === 'fill')).toHaveLength(0);
+    send({ type: 'STOP_RECORDING' });
+  });
+});

@@ -72,7 +72,8 @@ describe('accessible name computation', () => {
   });
 
   it('resolves aria-labelledby against the referenced elements', () => {
-    document.body.innerHTML = '<span id="a">Hello</span><span id="b">World</span><button id="subject" aria-labelledby="a b">x</button>';
+    document.body.innerHTML =
+      '<span id="a">Hello</span><span id="b">World</span><button id="subject" aria-labelledby="a b">x</button>';
     expect(E.getAccessibleName(document.getElementById('subject'))).toBe('Hello World');
   });
 
@@ -254,5 +255,89 @@ describe('resilience', () => {
     expect(analyse(mount('<input id="subject" type="text">')).elementData.suggestedAction).toBe('fill');
     expect(analyse(mount('<select id="subject"></select>')).elementData.suggestedAction).toBe('selectOption');
     expect(analyse(mount('<button id="subject">x</button>')).elementData.suggestedAction).toBe('click');
+  });
+});
+
+// Every locator card shows a `code` string and carries a structured `target`. The
+// two must describe the same element: `code` is what the user reads, `target` is
+// what the recorder and the Selenium/Cypress/Python translators actually generate
+// from. A divergence produces confident, plausible, wrong test code.
+describe('chained locators', () => {
+  const row = (id, label) => `<tr data-testid="${id}"><td>${label}</td><td><button>Delete</button></td></tr>`;
+
+  function deleteButtonInSecondRow() {
+    document.body.innerHTML = `<table><tbody>${row('row-1', 'Ada')}${row('row-2', 'Grace')}</tbody></table>`;
+    return document.querySelector('[data-testid="row-2"] button');
+  }
+
+  it('records the parent and the child as a structured chain', () => {
+    const chained = analyse(deleteButtonInSecondRow()).locators.find((l) => l.method === 'Chained/Filtered');
+    expect(chained).toBeDefined();
+    expect(chained.target.kind).toBe('chain');
+    expect(chained.target.parent).toEqual({ kind: 'testid', attr: 'data-testid', value: 'row-2' });
+    expect(chained.target.child.kind).toBe('role');
+    expect(chained.target.child.name).toBe('Delete');
+  });
+
+  it('keeps the displayed code and the structured target in agreement', () => {
+    const chained = analyse(deleteButtonInSecondRow()).locators.find((l) => l.method === 'Chained/Filtered');
+    // The card says getByTestId('row-2')…; the target must not say "any Delete button".
+    expect(chained.code).toContain('row-2');
+    expect(chained.target.parent.value).toBe('row-2');
+  });
+
+  it('counts a chained locator as unique even though the child alone is not', () => {
+    const result = analyse(deleteButtonInSecondRow());
+    const chained = result.locators.find((l) => l.method === 'Chained/Filtered');
+    const bareRole = result.locators.find((l) => l.target.kind === 'role');
+    expect(bareRole.matchCount).toBe(2); // two Delete buttons on the page
+    expect(chained.matchCount).toBe(1);
+    expect(chained.unique).toBe(true);
+  });
+});
+
+describe('CSS fallback selector', () => {
+  it('never produces an empty selector, which is a runtime error everywhere', () => {
+    // The context-menu path falls back to document.body when it has no tracked
+    // element, and <body> walked zero levels — so the fallback was page.locator('').
+    document.body.innerHTML = '<p>hello</p>';
+    for (const el of [document.body, document.documentElement]) {
+      const css = E.generateLocators(el, DEFAULT_ATTRS).locators.find((l) => l.target.kind === 'css');
+      expect(css.target.value, el.tagName).not.toBe('');
+      expect(() => document.querySelectorAll(css.target.value)).not.toThrow();
+      expect(css.code).not.toContain("locator('')");
+    }
+  });
+});
+
+describe('shadow DOM', () => {
+  /** A labelled control inside a closed-off shadow tree, as a web component ships it. */
+  function shadowInput(markup) {
+    document.body.innerHTML = '<div id="host"></div>';
+    const root = document.getElementById('host').attachShadow({ mode: 'open' });
+    root.innerHTML = markup;
+    return root;
+  }
+
+  it('resolves aria-labelledby against the shadow root, not the document', () => {
+    // IDREFs are scoped to their root. document.getElementById can never see inside
+    // a shadow tree, so a properly-labelled component read as unnamed.
+    const root = shadowInput('<span id="lbl">Card number</span><input id="f" aria-labelledby="lbl">');
+    expect(E.getAccessibleName(root.getElementById('f'))).toBe('Card number');
+  });
+
+  it('resolves a <label for> association inside a shadow root', () => {
+    const root = shadowInput('<label for="f">Expiry date</label><input id="f">');
+    const el = root.getElementById('f');
+    expect(E.getAccessibleName(el)).toBe('Expiry date');
+    const label = E.generateLocators(el, DEFAULT_ATTRS).locators.find((l) => l.target.kind === 'label');
+    expect(label.target.value).toBe('Expiry date');
+  });
+
+  it('does not confuse a same-id element in the light DOM for the shadow one', () => {
+    document.body.innerHTML = '<span id="lbl">Light DOM label</span><div id="host"></div>';
+    const root = document.getElementById('host').attachShadow({ mode: 'open' });
+    root.innerHTML = '<span id="lbl">Shadow label</span><input id="f" aria-labelledby="lbl">';
+    expect(E.getAccessibleName(root.getElementById('f'))).toBe('Shadow label');
   });
 });

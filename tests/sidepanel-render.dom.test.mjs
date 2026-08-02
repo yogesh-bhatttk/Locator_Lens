@@ -9,11 +9,13 @@ import { readFileSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import vm from 'node:vm';
-import { beforeAll, beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 
-beforeAll(() => {
+beforeAll(async () => {
+  // sidepanel.html loads codegen.js first; formatLocator/buildActionCode need it.
+  await import('../src/codegen.js');
   const noop = () => {};
   globalThis.chrome = {
     runtime: {
@@ -140,5 +142,131 @@ describe('hl (syntax highlighting)', () => {
   it('handles an empty or nullish input', () => {
     expect(() => hl('')).not.toThrow();
     expect(() => hl(null)).not.toThrow();
+  });
+});
+
+// The panel is where a locator stops being data and becomes the line a user pastes
+// into their suite. These cover the two ways that went wrong: a translated locator
+// that quietly dropped its parent scope, and a payload shape that threw mid-render
+// and left the panel stranded on a half-drawn result.
+describe('output target translation', () => {
+  const chained = {
+    rank: 1,
+    method: 'Chained/Filtered',
+    stability: 'BEST',
+    matchedAttr: 'Parent: row-2',
+    code: "page.getByTestId('row-2').getByRole('button', { name: 'Delete' })",
+    fullCode: "await page.getByTestId('row-2').getByRole('button', { name: 'Delete' }).click();",
+    target: {
+      kind: 'chain',
+      parent: { kind: 'testid', attr: 'data-testid', value: 'row-2' },
+      child: { kind: 'role', role: 'button', name: 'Delete' },
+    },
+  };
+
+  /** outFramework/outLanguage are top-level `let`s, so assign them in the same realm. */
+  const setOutput = (fw, lang) =>
+    vm.runInThisContext(`outFramework = ${JSON.stringify(fw)}; outLanguage = ${JSON.stringify(lang)};`);
+
+  afterEach(() => setOutput('playwright', 'typescript'));
+
+  it('keeps Playwright JS/TS on the engine strings', () => {
+    setOutput('playwright', 'typescript');
+    expect(formatLocator(chained, 'click').code).toBe(chained.code);
+  });
+
+  it('keeps the parent scope when translating to another framework', () => {
+    for (const [fw, lang] of [
+      ['selenium', 'javascript'],
+      ['selenium', 'python'],
+      ['cypress', 'javascript'],
+      ['playwright', 'python'],
+    ]) {
+      setOutput(fw, lang);
+      const { code, fullCode } = formatLocator(chained, 'click');
+      expect(code, `${fw}/${lang}`).toContain('row-2');
+      expect(fullCode, `${fw}/${lang}`).toContain('row-2');
+    }
+  });
+
+  it('labels a chained locator meaningfully outside Playwright', () => {
+    setOutput('playwright', 'typescript');
+    expect(strategyLabel(chained)).toBe('Chained/Filtered');
+    setOutput('selenium', 'python');
+    expect(strategyLabel(chained)).toBe('Scoped to parent');
+  });
+
+  it('generates a recorded step from the chain rather than the bare child', () => {
+    for (const [fw, lang] of [
+      ['playwright', 'typescript'],
+      ['selenium', 'python'],
+      ['cypress', 'javascript'],
+    ]) {
+      setOutput(fw, lang);
+      const line = buildActionCode({ action: 'click', target: chained.target });
+      expect(line, `${fw}/${lang}`).toContain('row-2');
+      expect(line, `${fw}/${lang}`).not.toContain('undefined');
+    }
+  });
+});
+
+describe('renderResults resilience', () => {
+  /** The subset of sidepanel.html that renderResults writes into. */
+  function mountPanel() {
+    document.body.innerHTML = [
+      'idleState',
+      'resultsState',
+      'a11yLabel',
+      'a11yContainer',
+      'elBar',
+      'cardsContainer',
+      'avoidLabel',
+      'avoidContainer',
+      'proTip',
+    ]
+      .map((id) => `<div id="${id}"></div>`)
+      .join('');
+  }
+
+  beforeEach(mountPanel);
+
+  it('renders a full result', () => {
+    renderResults({
+      elementData: { tag: 'button', role: 'button', suggestedAction: 'click' },
+      locators: [
+        {
+          rank: 1,
+          method: 'getByRole()',
+          stability: 'BEST',
+          matchedAttr: 'role="button"',
+          code: "page.getByRole('button')",
+          fullCode: "await page.getByRole('button').click();",
+          target: { kind: 'role', role: 'button' },
+          matchCount: 1,
+          unique: true,
+        },
+      ],
+      avoidList: [{ locator: 'xpath', reason: 'fragile' }],
+      proTip: 'add a test id',
+      a11y: [{ severity: 'high', message: 'no label' }],
+    });
+    expect(document.querySelectorAll('#cardsContainer .card')).toHaveLength(1);
+    expect(document.getElementById('cardsContainer').textContent).toContain('getByRole');
+    expect(document.getElementById('proTip').textContent).toContain('add a test id');
+    expect(document.getElementById('resultsState').style.display).toBe('');
+  });
+
+  it('does not throw on a payload missing every optional array', () => {
+    // A result restored from storage can predate the current shape. One missing
+    // array used to throw out of the render, leaving the panel unusable.
+    expect(() => renderResults({ elementData: { tag: 'div' } })).not.toThrow();
+    expect(() => renderResults({})).not.toThrow();
+    expect(document.getElementById('avoidContainer').style.display).toBe('none');
+    expect(document.getElementById('a11yContainer').style.display).toBe('none');
+  });
+
+  it('ignores a null payload without wiping the last result', () => {
+    renderResults({ elementData: { tag: 'div' }, locators: [], avoidList: [], a11y: [] });
+    expect(() => renderResults(null)).not.toThrow();
   });
 });
