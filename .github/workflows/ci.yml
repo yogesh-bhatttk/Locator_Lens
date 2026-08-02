@@ -13,9 +13,9 @@ jobs:
   verify:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v5
         with:
           node-version: 22
           cache: npm
@@ -34,7 +34,9 @@ jobs:
 
       - run: npm run lint
 
-      - run: npm test
+      # test:coverage runs the same suite and additionally enforces the thresholds in
+      # vitest.config.mjs.
+      - run: npm run test:coverage
 
       # Builds both packages and fails on any store-policy violation
       # (remote code, eval, stray files, missing manifest references).
@@ -42,8 +44,32 @@ jobs:
         run: npm run build
 
       - name: Upload store packages
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v5
         with:
           name: locatorlens-packages
           path: dist/*.zip
           if-no-files-found: error
+
+  # The unit suites run in jsdom, which has no layout, no real message plumbing and no
+  # frames. This job loads the built extension into a real browser and drives it: the
+  # picker's hit testing, service-worker relays, iframe injection and multi-page
+  # recording only exist here. It needs a display, hence xvfb.
+  smoke:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-node@v5
+        with:
+          node-version: 22
+          cache: npm
+
+      - run: npm ci
+
+      - name: Install Chromium for Playwright
+        run: npx playwright install --with-deps chromium
+
+      - run: npm run build
+
+      - name: Smoke test the built extension
+        run: xvfb-run -a npm run smoke
