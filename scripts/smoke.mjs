@@ -80,7 +80,9 @@ async function main() {
     const toDemo = (message) =>
       worker.evaluate(async (msg) => {
         const tabs = await chrome.tabs.query({});
-        const t = tabs.find((x) => (x.url || '').includes('/checkout'));
+        // Match the host, not the path: the multi-page check navigates away from
+        // /checkout and the demo server answers every path with the same page.
+        const t = tabs.find((x) => (x.url || '').includes('localhost:4174'));
         if (!t) return false;
         await chrome.tabs.sendMessage(t.id, msg).catch(() => {});
         return true;
@@ -96,29 +98,49 @@ async function main() {
     // created with a 1px border, so isVisible() is true before updateOverlay() has
     // ever run and a fixed delay races the first mouseover.
     await page
-      .waitForFunction(() => (document.getElementById('ll-overlay')?.getBoundingClientRect().width ?? 0) > 20, null, {
-        timeout: 5000,
-      })
+      .waitForFunction(
+        () => (document.getElementById('ll-overlay')?.getBoundingClientRect().width ?? 0) > 20,
+        null,
+        {
+          timeout: 5000,
+        }
+      )
       .catch(() => {});
 
     const box = await page.locator('#ll-overlay').boundingBox();
     const target = await page.locator('#email').boundingBox();
-    check('overlay is positioned over the hovered element',
+    check(
+      'overlay is positioned over the hovered element',
       box && target && Math.abs(box.width - target.width) < 4 && Math.abs(box.y - target.y) < 4,
-      `overlay ${JSON.stringify(box)} vs element ${JSON.stringify(target)}`);
-    check('tooltip names the element', (await page.locator('#ll-tooltip').textContent())?.includes('input#email'));
+      `overlay ${JSON.stringify(box)} vs element ${JSON.stringify(target)}`
+    );
+    check(
+      'tooltip names the element',
+      (await page.locator('#ll-tooltip').textContent())?.includes('input#email')
+    );
 
     // A real click, hit-tested through document.elementFromPoint.
     await page.locator('#email').click();
     await page.waitForTimeout(700);
 
-    const picked = await worker.evaluate(async () => (await chrome.storage.local.get('lastElement')).lastElement);
-    check('clicking picks the element and stores the result', picked?.elementData?.id === 'email',
-      `stored id was ${JSON.stringify(picked?.elementData?.id)}`);
-    check('locators were generated', (picked?.locators?.length ?? 0) >= 3,
-      `got ${picked?.locators?.length ?? 0}`);
-    check('top locator is the test id', picked?.locators?.[0]?.target?.kind === 'testid',
-      `got ${picked?.locators?.[0]?.target?.kind}`);
+    const picked = await worker.evaluate(
+      async () => (await chrome.storage.local.get('lastElement')).lastElement
+    );
+    check(
+      'clicking picks the element and stores the result',
+      picked?.elementData?.id === 'email',
+      `stored id was ${JSON.stringify(picked?.elementData?.id)}`
+    );
+    check(
+      'locators were generated',
+      (picked?.locators?.length ?? 0) >= 3,
+      `got ${picked?.locators?.length ?? 0}`
+    );
+    check(
+      'top locator is the test id',
+      picked?.locators?.[0]?.target?.kind === 'testid',
+      `got ${picked?.locators?.[0]?.target?.kind}`
+    );
     check('uniqueness was measured against the live page', picked?.locators?.[0]?.unique === true);
 
     // Keyboard traversal needs a focused document and a live overlay.
@@ -133,10 +155,14 @@ async function main() {
     console.log('\nselector lab');
     await toDemo({ type: 'LAB_VALIDATE', selector: "page.getByRole('button', { name: 'Place order' })" });
     await page.waitForTimeout(500);
-    check('a pasted Playwright locator highlights its match',
-      (await page.locator('.ll-lab-highlight').count()) === 1);
-    check('the highlight stylesheet is present without inspecting first',
-      (await page.locator('#ll-styles').count()) === 1);
+    check(
+      'a pasted Playwright locator highlights its match',
+      (await page.locator('.ll-lab-highlight').count()) === 1
+    );
+    check(
+      'the highlight stylesheet is present without inspecting first',
+      (await page.locator('#ll-styles').count()) === 1
+    );
 
     await toDemo({ type: 'LAB_CLEAR' });
     await page.waitForTimeout(300);
@@ -171,15 +197,20 @@ async function main() {
     check('the fill was captured', /\.fill\('Ada'\)/.test(script));
     check('the select was captured', /selectOption\('Ireland'\)/.test(script));
     check('checking a box records check()', /\.check\(\)/.test(script));
-    check('unchecking records uncheck(), not check()', /\.uncheck\(\)/.test(script),
-      'the pointer handler used to emit check() before the control toggled');
+    check(
+      'unchecking records uncheck(), not check()',
+      /\.uncheck\(\)/.test(script),
+      'the pointer handler used to emit check() before the control toggled'
+    );
 
     const checkCalls = (script.match(/\.check\(\)/g) || []).length;
     check('a single tick produces exactly one step', checkCalls === 1, `found ${checkCalls} .check() calls`);
 
     console.log('\ngenerated locators actually resolve');
     // The real proof: run what the extension wrote back through Playwright.
-    const locators = [...script.matchAll(/page\.(getBy\w+)\(([^\n]*?)\)(?=\.(?:click|fill|check|uncheck|selectOption)\()/g)];
+    const locators = [
+      ...script.matchAll(/page\.(getBy\w+)\(([^\n]*?)\)(?=\.(?:click|fill|check|uncheck|selectOption)\()/g),
+    ];
     check('locator lines were found in the script', locators.length >= 4, `found ${locators.length}`);
 
     for (const [, method, args] of locators) {
@@ -191,12 +222,49 @@ async function main() {
         check(`page.${method}(${args.slice(0, 50)}) resolves`, false, err.message.split('\n')[0]);
         continue;
       }
-      check(`page.${method}(${args.slice(0, 46)}) matches exactly 1 element`, count === 1, `matched ${count}`);
+      check(
+        `page.${method}(${args.slice(0, 46)}) matches exactly 1 element`,
+        count === 1,
+        `matched ${count}`
+      );
     }
 
+    // Recording a real flow means navigating. Capture on the new page is re-armed by
+    // the service worker from its own tab set, and nothing until now exercised that
+    // hand-off end to end — a break here silently truncates every multi-page recording.
+    console.log('\nrecording across a navigation');
+    await panel.bringToFront();
+    await panel.click('#clearTimelineBtn');
+    await panel.waitForTimeout(300);
+    // Drive this one through the service worker, exactly as the panel's Record
+    // button does: the worker is what remembers which tab is recording, and that
+    // memory is the whole mechanism being tested. Messaging the content script
+    // directly (as toDemo does) would skip it entirely.
+    await page.bringToFront();
+    await panel.evaluate(() => chrome.runtime.sendMessage({ type: 'START_RECORDING' }));
+    await page.waitForTimeout(400);
+
+    await page.click('[data-testid="account-menu"]');
+    await page.waitForTimeout(400);
+    await page.goto(`http://localhost:${PORT}/confirmation`, { waitUntil: 'load' });
+    await page.waitForTimeout(1200); // document_idle re-injection + the worker's re-arm
+    await page.click('#last-name');
+    await page.fill('#last-name', 'Lovelace');
+    await page.waitForTimeout(800);
+    await panel.evaluate(() => chrome.runtime.sendMessage({ type: 'STOP_RECORDING' }));
+
+    await panel.bringToFront();
+    await panel.waitForTimeout(600);
+    const multiPage = await panel.evaluate(() => document.getElementById('codePreview')?.innerText ?? '');
+    check('the step before the navigation is kept', /account-menu/.test(multiPage), multiPage.slice(0, 400));
+    check('capture resumes on the page navigated to', /Lovelace/.test(multiPage), multiPage.slice(0, 400));
+
     console.log('\nhygiene');
-    check('the content script logged nothing to the page console', pageErrors.length === 0,
-      pageErrors.slice(0, 3).join(' | '));
+    check(
+      'the content script logged nothing to the page console',
+      pageErrors.length === 0,
+      pageErrors.slice(0, 3).join(' | ')
+    );
 
     await panel.reload();
     await panel.waitForTimeout(800);

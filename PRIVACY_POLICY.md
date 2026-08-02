@@ -45,13 +45,13 @@ This data **stays on your machine** inside the browser profile. It is **not** sy
 
 Permissions are used **only** to deliver the features below. Exact lists may vary slightly by browser; see `manifest.json` and `manifests/manifest.*.json` for the authoritative set.
 
-| Permission / access | Purpose |
-|---------------------|---------|
-| `activeTab` | Operate on the tab you are using when you invoke the extension |
-| `scripting` | Inject the inspector / recorder / selector-lab logic when needed |
-| `storage` | Persist local preferences and saved POM data (see above) |
-| `contextMenus` | Optional quick actions from the right-click menu (where enabled) |
-| `sidePanel` (Chromium) | Show results in the browser side panel |
+| Permission / access                       | Purpose                                                                                           |
+| ----------------------------------------- | ------------------------------------------------------------------------------------------------- |
+| `activeTab`                               | Operate on the tab you are using when you invoke the extension                                    |
+| `scripting`                               | Inject the inspector / recorder / selector-lab logic when needed                                  |
+| `storage`                                 | Persist local preferences and saved POM data (see above)                                          |
+| `contextMenus`                            | Optional quick actions from the right-click menu (where enabled)                                  |
+| `sidePanel` (Chromium)                    | Show results in the browser side panel                                                            |
 | `host_permissions` / `<all_urls>` matches | Allow the content script to run on pages you open so inspection and validation work on your sites |
 
 ## Third-party services

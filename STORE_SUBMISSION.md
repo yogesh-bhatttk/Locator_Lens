@@ -14,12 +14,12 @@ npm run verify     # version check + lint + tests + build
 
 `npm run build` writes to `dist/`:
 
-| Artifact | Use |
-|---|---|
-| `dist/chrome/` | unpacked tree — `chrome://extensions` → Load unpacked |
-| `dist/firefox/` | unpacked tree — `about:debugging` → Load Temporary Add-on |
-| `dist/locatorlens-chrome-<version>.zip` | upload to the Chrome Web Store |
-| `dist/locatorlens-firefox-<version>.zip` | upload to AMO |
+| Artifact                                 | Use                                                       |
+| ---------------------------------------- | --------------------------------------------------------- |
+| `dist/chrome/`                           | unpacked tree — `chrome://extensions` → Load unpacked     |
+| `dist/firefox/`                          | unpacked tree — `about:debugging` → Load Temporary Add-on |
+| `dist/locatorlens-chrome-<version>.zip`  | upload to the Chrome Web Store                            |
+| `dist/locatorlens-firefox-<version>.zip` | upload to AMO                                             |
 
 The build prints a SHA-256 for each archive. Builds are byte-reproducible, so the
 same commit always yields the same hash — record it with the submission.
@@ -47,8 +47,8 @@ catches a regression before an upload does.
 ### Prior rejection on record
 
 > **Chrome Web Store — violation "Purple Potassium"**
-> *The following permission(s) need not be requested for the methods/properties
-> implemented by the item: `tabs`.*
+> _The following permission(s) need not be requested for the methods/properties
+> implemented by the item: `tabs`._
 
 No manifest committed to this repository has ever declared `tabs`. The rejected
 upload was assembled by hand from a stale, untracked `dist-chrome/` directory
@@ -71,7 +71,7 @@ node scripts/version.mjs           # verify they agree
 ```
 
 Both stores reject an update that reuses a published version number, and AMO
-rejects a *decrease*. Always bump before resubmitting — including after a
+rejects a _decrease_. Always bump before resubmitting — including after a
 rejection, because the rejected version number is consumed on Chrome.
 
 ## 4. Permission justifications
@@ -79,14 +79,14 @@ rejection, because the rejected version number is consumed on Chrome.
 Paste these into the Chrome Web Store "Privacy practices" tab. Each permission is
 exercised by the feature named; there are no unused permissions.
 
-| Permission | Justification |
-|---|---|
-| `activeTab` | Grants access to the tab the user is on at the moment they click Inspect, Record, Validate or Stress Test, so those actions work even when the user has restricted the extension's site access to "on click". |
-| `scripting` | The inspector, recorder and Selector Lab are content scripts. When a page loaded before the extension did — or after an extension update — `chrome.scripting.executeScript` re-injects them so the user does not have to reload the page. |
-| `storage` | Persists the user's framework/language choice, custom test-id attribute list, the last inspected element and the in-progress recording timeline. Local only; nothing is transmitted. |
-| `contextMenus` | Adds the right-click "Copy Best Locator" and "Open/Close Results Panel" entries. |
-| `sidePanel` (Chrome) | The results panel is the extension's primary UI surface. |
-| `host_permissions: <all_urls>` | See below. |
+| Permission                     | Justification                                                                                                                                                                                                                             |
+| ------------------------------ | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `activeTab`                    | Grants access to the tab the user is on at the moment they click Inspect, Record, Validate or Stress Test, so those actions work even when the user has restricted the extension's site access to "on click".                             |
+| `scripting`                    | The inspector, recorder and Selector Lab are content scripts. When a page loaded before the extension did — or after an extension update — `chrome.scripting.executeScript` re-injects them so the user does not have to reload the page. |
+| `storage`                      | Persists the user's framework/language choice, custom test-id attribute list, the last inspected element and the in-progress recording timeline. Local only; nothing is transmitted.                                                      |
+| `contextMenus`                 | Adds the right-click "Copy Best Locator" and "Open/Close Results Panel" entries.                                                                                                                                                          |
+| `sidePanel` (Chrome)           | The results panel is the extension's primary UI surface.                                                                                                                                                                                  |
+| `host_permissions: <all_urls>` | See below.                                                                                                                                                                                                                                |
 
 ### Broad host access
 
@@ -120,20 +120,20 @@ npm run screenshots
 drives it against `scripts/screenshots/demo-page.html` and captures the result.
 Every image is a real capture — nothing is drawn or mocked up.
 
-| File | Size | Upload? |
-|---|---|---|
-| `store-01-inspect.png` | 1280×800 | ✅ ranked locators for a picked field |
-| `store-02-selector-lab.png` | 1280×800 | ✅ Selector Lab resolving a Playwright locator |
-| `store-03-recorder.png` | 1280×800 | ✅ the recorder timeline |
-| `store-04-codegen.png` | 1280×800 | ✅ the generated test script |
-| `01`–`09-*.png` | native | raw captures — source material, and fine for AMO |
+| File                        | Size     | Upload?                                          |
+| --------------------------- | -------- | ------------------------------------------------ |
+| `store-01-inspect.png`      | 1280×800 | ✅ ranked locators for a picked field            |
+| `store-02-selector-lab.png` | 1280×800 | ✅ Selector Lab resolving a Playwright locator   |
+| `store-03-recorder.png`     | 1280×800 | ✅ the recorder timeline                         |
+| `store-04-codegen.png`      | 1280×800 | ✅ the generated test script                     |
+| `01`–`09-*.png`             | native   | raw captures — source material, and fine for AMO |
 
 The `store-*` images place the real page capture and the real panel capture at the
 geometry Chrome uses with a side panel docked (820 + 460 = 1280). They are a layout
 of genuine screenshots, which the stores allow; a redrawn approximation is not.
 
 > **Why this matters here.** The previous listing set could not be used. Seven of the
-> images showed a *different product* — a build with AI, Fix Test and Diagnostics
+> images showed a _different product_ — a build with AI, Fix Test and Diagnostics
 > tabs that this extension does not contain — and the rest were rendered mock-ups
 > with garbled placeholder text and code the generator never emits. Either is a
 > straightforward rejection: listing images must depict the item's actual
@@ -163,7 +163,7 @@ feature that exists.
 - [ ] source code is unminified and unbundled — the package ships the same files as
       the repository, so no "source code submission" step is required
 - [ ] `browser_specific_settings.gecko.id` unchanged (`locatorlens@yogesh-bhatttk.com`);
-      changing it creates a *new* add-on rather than updating the existing listing
+      changing it creates a _new_ add-on rather than updating the existing listing
 - [ ] `strict_min_version` still correct for the APIs in use
 
 ## 8. If a submission is rejected

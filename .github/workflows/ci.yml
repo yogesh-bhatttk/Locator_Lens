@@ -27,6 +27,11 @@ jobs:
       - name: Check version consistency
         run: npm run version:check
 
+      # The repo ships a `format` script; without this the check drifts until it is
+      # noise and nobody runs it.
+      - name: Check formatting
+        run: npm run format:check
+
       - run: npm run lint
 
       - run: npm test

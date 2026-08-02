@@ -14,7 +14,7 @@ This document describes how the extension is structured and how distribution fol
 ## 2. Locator pipeline + multi-framework codegen
 
 - **`content-locator-engine.js`** (injected first) ranks candidate locators, attaches a structured `target` (kind + values) and live **uniqueness** (`matchCount` / `unique`) per candidate, plus explanations. Runs in the content script (it needs the live DOM).
-- **`codegen.js`** is a pure module (loaded as a content script *and* in the side panel) that translates a `target` + action into **Playwright / Selenium / Cypress** code for **JS / TS / Python**. `LLCodegen.isValidCombo()` blocks the impossible combo (Cypress + Python).
+- **`codegen.js`** is a pure module (loaded as a content script _and_ in the side panel) that translates a `target` + action into **Playwright / Selenium / Cypress** code for **JS / TS / Python**. `LLCodegen.isValidCombo()` blocks the impossible combo (Cypress + Python).
 - **`content.js`** handles overlay, pick, keyboard traversal, stress test, recorder hooks, selector-lab validation, and framework-aware quick-copy (context menu + click).
 - **`sidepanel.js`** renders cards via **`formatLocator()`** (native Playwright JS/TS, else `codegen`), the uniqueness badges, and all recorder logic; the chosen framework/language is persisted in `chrome.storage.local`.
 
@@ -138,14 +138,14 @@ the root `manifest.json` for the load-from-root workflow.
 
 **Declared permissions and why they are needed**
 
-| Permission / key | Used by |
-|---|---|
-| `activeTab` | Host access to the tab the user is on at the moment they invoke a feature. Keeps Inspect / Record / Lab / Stress Test working for users who restrict the extension's site access to "on click". It gates no API, so there is no call signature to point at. |
-| `scripting` + `host_permissions: <all_urls>` | `chrome.scripting.executeScript` (inject content scripts on demand for the Lab relay, Stress Test, context-menu copy) and content-script messaging on any page |
-| `storage` | `chrome.storage.local` (last picked element, recorder state, framework/language, custom test attributes) |
-| `contextMenus` | the “Copy Best Locator” / “Open/Close Panel” entries |
-| `sidePanel` + `side_panel` (Chrome) | the side-panel surface |
-| `sidebar_action` (Firefox) | the sidebar surface — Firefox has **no** `sidePanel` permission; `background.js` detects this and falls back from `chrome.sidePanel` to `browser.sidebarAction` |
+| Permission / key                             | Used by                                                                                                                                                                                                                                                     |
+| -------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `activeTab`                                  | Host access to the tab the user is on at the moment they invoke a feature. Keeps Inspect / Record / Lab / Stress Test working for users who restrict the extension's site access to "on click". It gates no API, so there is no call signature to point at. |
+| `scripting` + `host_permissions: <all_urls>` | `chrome.scripting.executeScript` (inject content scripts on demand for the Lab relay, Stress Test, context-menu copy) and content-script messaging on any page                                                                                              |
+| `storage`                                    | `chrome.storage.local` (last picked element, recorder state, framework/language, custom test attributes)                                                                                                                                                    |
+| `contextMenus`                               | the “Copy Best Locator” / “Open/Close Panel” entries                                                                                                                                                                                                        |
+| `sidePanel` + `side_panel` (Chrome)          | the side-panel surface                                                                                                                                                                                                                                      |
+| `sidebar_action` (Firefox)                   | the sidebar surface — Firefox has **no** `sidePanel` permission; `background.js` detects this and falls back from `chrome.sidePanel` to `browser.sidebarAction`                                                                                             |
 
 ### The `tabs` permission is deliberately **not** requested
 
@@ -153,12 +153,12 @@ A Chrome Web Store submission was rejected under violation **"Purple Potassium"*
 for requesting `tabs` when nothing needed it. Everything this extension does with
 `chrome.tabs` works without the permission:
 
-| Call | Why it needs no permission |
-|---|---|
+| Call                                                       | Why it needs no permission                                                                                                                             |
+| ---------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------ |
 | `chrome.tabs.query({ active: true, currentWindow: true })` | Returns tabs either way. `tabs` only adds `url`, `title` and `favIconUrl` to the result; the code reads `id` and `windowId`, which are always present. |
-| `chrome.tabs.sendMessage(tabId, …)` | Gated by **host** access, not by `tabs`. |
-| `chrome.tabs.onUpdated` | Fires either way. `tabs` only adds `url` to `changeInfo`; the code reads `status`. |
-| `chrome.tabs.onRemoved` | Never required a permission. |
+| `chrome.tabs.sendMessage(tabId, …)`                        | Gated by **host** access, not by `tabs`.                                                                                                               |
+| `chrome.tabs.onUpdated`                                    | Fires either way. `tabs` only adds `url` to `changeInfo`; the code reads `status`.                                                                     |
+| `chrome.tabs.onRemoved`                                    | Never required a permission.                                                                                                                           |
 
 This is enforced, not just documented: `scripts/build.mjs` fails the build if any
 manifest declares `tabs`, if a declared permission is not backed by an API the
@@ -170,7 +170,7 @@ cannot quietly stop being true.
 **Cross-browser notes**
 
 - **Background:** Chrome uses `background.service_worker`; Firefox uses `background.scripts` + `"type": "module"`. `src/background.js` is plain (no top-level imports) and uses only APIs available in both, so the single file works in either context.
-- **Firefox requirements:** `browser_specific_settings.gecko.id`, `strict_min_version: "142.0"`, and `data_collection_permissions: { required: ["none"] }` are present so AMO/`about:debugging` accept the add-on without data-collection prompts. Changing `gecko.id` would create a *new* add-on rather than update the existing listing.
+- **Firefox requirements:** `browser_specific_settings.gecko.id`, `strict_min_version: "142.0"`, and `data_collection_permissions: { required: ["none"] }` are present so AMO/`about:debugging` accept the add-on without data-collection prompts. Changing `gecko.id` would create a _new_ add-on rather than update the existing listing.
 - **Namespaces:** code uses the `chrome.*` namespace, which Firefox aliases; Firefox-only calls (`browser.sidebarAction`) are guarded with `typeof browser !== 'undefined'`.
 - All three manifests are valid MV3 JSON, and the build verifies that every path a manifest references is actually present in its package.
 
@@ -181,13 +181,13 @@ cannot quietly stop being true.
 `npm test` runs five Vitest suites (152 tests). They drive the real shipping files —
 nothing is duplicated or re-implemented for testability.
 
-| Suite | Environment | Covers |
-|---|---|---|
-| `tests/codegen.test.mjs` | node | Every framework × language combination, action and assertion statements, script scaffolding, and escaping of values containing quotes, backslashes and newlines |
-| `tests/locator-engine.dom.test.mjs` | jsdom | Role resolution, accessible-name computation, ranking and stability, live uniqueness counts, the a11y audit, and CSS-special identifiers |
-| `tests/content-script.dom.test.mjs` | jsdom | Loads all three content scripts in manifest order behind a `chrome` stub and drives them through the background's message API — inspect lifecycle, Selector Lab, Stress Test, recorder controls |
-| `tests/sidepanel-render.dom.test.mjs` | jsdom | `esc` / `hl` / `safeRender`, including that inline event handlers, `<script>` and `javascript:` URLs never survive rendering |
-| `tests/package.test.mjs` | node | Builds both packages and asserts the store contract against the built bytes |
+| Suite                                 | Environment | Covers                                                                                                                                                                                          |
+| ------------------------------------- | ----------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `tests/codegen.test.mjs`              | node        | Every framework × language combination, action and assertion statements, script scaffolding, and escaping of values containing quotes, backslashes and newlines                                 |
+| `tests/locator-engine.dom.test.mjs`   | jsdom       | Role resolution, accessible-name computation, ranking and stability, live uniqueness counts, the a11y audit, and CSS-special identifiers                                                        |
+| `tests/content-script.dom.test.mjs`   | jsdom       | Loads all three content scripts in manifest order behind a `chrome` stub and drives them through the background's message API — inspect lifecycle, Selector Lab, Stress Test, recorder controls |
+| `tests/sidepanel-render.dom.test.mjs` | jsdom       | `esc` / `hl` / `safeRender`, including that inline event handlers, `<script>` and `javascript:` URLs never survive rendering                                                                    |
+| `tests/package.test.mjs`              | node        | Builds both packages and asserts the store contract against the built bytes                                                                                                                     |
 
 `.github/workflows/ci.yml` runs version check → lint → tests → build on every push
 and pull request, and uploads both `.zip` files as artifacts. A pre-commit hook runs

@@ -215,7 +215,11 @@ function resolveChromium() {
       .filter((d) => /^chromium-\d+$/.test(d))
       .sort((a, b) => Number(b.split('-')[1]) - Number(a.split('-')[1]));
     for (const build of builds) {
-      for (const variant of ['chrome-linux64/chrome', 'chrome-linux/chrome', 'chrome-mac/Chromium.app/Contents/MacOS/Chromium']) {
+      for (const variant of [
+        'chrome-linux64/chrome',
+        'chrome-linux/chrome',
+        'chrome-mac/Chromium.app/Contents/MacOS/Chromium',
+      ]) {
         const candidate = join(cache, build, variant);
         if (existsSync(candidate)) return candidate;
       }

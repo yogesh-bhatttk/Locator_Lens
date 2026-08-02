@@ -11,12 +11,28 @@
   },
   "extends": "eslint:recommended",
   "rules": {
-    "no-unused-vars": ["error", { "args": "none", "caughtErrors": "none" }],
-    "no-empty": ["error", { "allowEmptyCatch": true }],
+    "no-unused-vars": [
+      "error",
+      {
+        "args": "none",
+        "caughtErrors": "none"
+      }
+    ],
+    "no-empty": [
+      "error",
+      {
+        "allowEmptyCatch": true
+      }
+    ],
     "eqeqeq": ["error", "smart"],
     "no-var": "off",
     "prefer-const": "off",
-    "no-console": ["error", { "allow": ["warn", "error"] }]
+    "no-console": [
+      "error",
+      {
+        "allow": ["warn", "error"]
+      }
+    ]
   },
   "overrides": [
     {
@@ -28,9 +44,17 @@
     },
     {
       "files": ["scripts/**/*.mjs", "*.config.mjs"],
-      "env": { "browser": false, "node": true, "webextensions": false },
-      "parserOptions": { "sourceType": "module" },
-      "rules": { "no-console": "off" }
+      "env": {
+        "browser": false,
+        "node": true,
+        "webextensions": false
+      },
+      "parserOptions": {
+        "sourceType": "module"
+      },
+      "rules": {
+        "no-console": "off"
+      }
     },
     {
       "files": ["scripts/screenshots/*.mjs", "scripts/smoke.mjs"],
@@ -38,12 +62,20 @@
         "chrome": "readonly",
         "document": "readonly"
       },
-      "rules": { "no-eval": "off" }
+      "rules": {
+        "no-eval": "off"
+      }
     },
     {
       "files": ["tests/**/*.test.mjs"],
-      "env": { "browser": true, "node": true, "webextensions": true },
-      "parserOptions": { "sourceType": "module" },
+      "env": {
+        "browser": true,
+        "node": true,
+        "webextensions": true
+      },
+      "parserOptions": {
+        "sourceType": "module"
+      },
       "globals": {
         "describe": "readonly",
         "it": "readonly",
@@ -54,9 +86,15 @@
         "vi": "readonly",
         "esc": "readonly",
         "hl": "readonly",
-        "safeRender": "readonly"
+        "safeRender": "readonly",
+        "formatLocator": "readonly",
+        "strategyLabel": "readonly",
+        "buildActionCode": "readonly",
+        "renderResults": "readonly"
       },
-      "rules": { "no-console": "off" }
+      "rules": {
+        "no-console": "off"
+      }
     }
   ]
 }
