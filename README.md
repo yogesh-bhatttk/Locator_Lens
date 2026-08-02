@@ -6,7 +6,7 @@
 
 **LocatorLens** is a browser extension for end-to-end test authoring: inspect any element to get **ranked, uniqueness-checked locators**, validate selectors, and **record a flow into a runnable test** — all from the side panel. Output targets **Playwright, Selenium, or Cypress** in **TypeScript, JavaScript, or Python** (Cypress is JS/TS only).
 
-Extension version is defined in `manifest.json` (currently **1.2.1**) and kept in step
+Extension version is defined in `manifest.json` (currently **1.3.0**) and kept in step
 with `package.json` and both browser manifests by `node scripts/version.mjs`.
 
 ---
@@ -27,6 +27,17 @@ with `package.json` and both browser manifests by `node scripts/version.mjs`.
 ### Shadow DOM–aware picking
 
 - Coordinate-based deep hit testing so targets inside **open shadow roots** can be inspected and described.
+
+### Iframe-aware locators
+
+- Elements inside iframes can be inspected and recorded, and the generated code
+  **enters the frame first** — `page.frameLocator(...)` for Playwright, a
+  `switchTo().frame(...)` / `switch_to.default_content()` pair around the action for
+  Selenium, and `contentDocument` traversal for Cypress. Nested frames compose.
+- The content script is injected into sub-frames only when Inspect or Record is
+  switched on, so ordinary browsing pays nothing for it.
+- A cross-origin frame's `<iframe>` element cannot be read from inside the frame, so
+  those are addressed by position and the panel says so.
 
 ### DOM traversal while inspecting
 
@@ -88,7 +99,7 @@ then load the root folder. Use `dist/` for anything you intend to submit — see
 | Command                 | What it does                                                                                                           |
 | ----------------------- | ---------------------------------------------------------------------------------------------------------------------- |
 | `npm run lint`          | ESLint over `src/`, `scripts/`, `tests/`                                                                               |
-| `npm test`              | Vitest — 204 tests across codegen, locator engine, content scripts, the service worker, rendering and package contents |
+| `npm test`              | Vitest — 271 tests across codegen, locator engine, content scripts, the service worker, rendering and package contents |
 | `npm run build`         | Reproducible Chrome + Firefox packages in `dist/`                                                                      |
 | `npm run version:check` | Assert `package.json` and all three manifests agree                                                                    |
 | `npm run screenshots`   | Capture store listing images from the built extension                                                                  |
@@ -149,6 +160,7 @@ LocatorLens requests only what it needs to inspect pages and drive the side pane
 | `scripting` + host access (`<all_urls>`)          | inject the inspector/recorder content scripts into the page you’re testing |
 | `storage`                                         | remember your last pick, recorder timeline, and framework/language choice  |
 | `contextMenus`                                    | the right-click “Copy Best Locator” / “Open Panel” entries                 |
+| `clipboardWrite`                                  | copy a locator from a page that isn’t HTTPS (see below)                    |
 | `sidePanel` (Chrome) · `sidebar_action` (Firefox) | the side-panel / sidebar surface                                           |
 
 `tabs` is deliberately **not** requested — everything the extension does with

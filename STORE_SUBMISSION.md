@@ -50,10 +50,14 @@ catches a regression before an upload does.
 > _The following permission(s) need not be requested for the methods/properties
 > implemented by the item: `tabs`._
 
-No manifest committed to this repository has ever declared `tabs`. The rejected
-upload was assembled by hand from a stale, untracked `dist-chrome/` directory
-whose manifest matched no source in git — which is precisely why packaging is now
-a script that builds from tracked files and verifies the result.
+The finding is correct, and it lands on **v1.1.3** — the last version whose
+manifests declared `tabs`, in both `manifest.json` and
+`manifests/manifest.chrome.json` (commit `9706b85`). No code path ever read a
+property the permission unlocks, so it was pure over-request. It was dropped in
+**v1.1.4** (commit `8d6792c`) and no version since has declared it.
+
+There is nothing here to appeal: the remedy is to upload a build of 1.1.4 or
+later. The guards above exist so it cannot come back unnoticed.
 
 Everything the extension calls on `chrome.tabs` works without the permission:
 `tabs.query` (reads only `id` and `windowId`), `tabs.sendMessage` (needs host
@@ -79,14 +83,15 @@ rejection, because the rejected version number is consumed on Chrome.
 Paste these into the Chrome Web Store "Privacy practices" tab. Each permission is
 exercised by the feature named; there are no unused permissions.
 
-| Permission                     | Justification                                                                                                                                                                                                                             |
-| ------------------------------ | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `activeTab`                    | Grants access to the tab the user is on at the moment they click Inspect, Record, Validate or Stress Test, so those actions work even when the user has restricted the extension's site access to "on click".                             |
-| `scripting`                    | The inspector, recorder and Selector Lab are content scripts. When a page loaded before the extension did — or after an extension update — `chrome.scripting.executeScript` re-injects them so the user does not have to reload the page. |
-| `storage`                      | Persists the user's framework/language choice, custom test-id attribute list, the last inspected element and the in-progress recording timeline. Local only; nothing is transmitted.                                                      |
-| `contextMenus`                 | Adds the right-click "Copy Best Locator" and "Open/Close Results Panel" entries.                                                                                                                                                          |
-| `sidePanel` (Chrome)           | The results panel is the extension's primary UI surface.                                                                                                                                                                                  |
-| `host_permissions: <all_urls>` | See below.                                                                                                                                                                                                                                |
+| Permission                     | Justification                                                                                                                                                                                                                                                                                     |
+| ------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `activeTab`                    | Grants access to the tab the user is on at the moment they click Inspect, Record, Validate or Stress Test, so those actions work even when the user has restricted the extension's site access to "on click".                                                                                     |
+| `scripting`                    | The inspector, recorder and Selector Lab are content scripts. When a page loaded before the extension did — or after an extension update — `chrome.scripting.executeScript` re-injects them so the user does not have to reload the page.                                                         |
+| `storage`                      | Persists the user's framework/language choice, custom test-id attribute list, the last inspected element and the in-progress recording timeline. Local only; nothing is transmitted.                                                                                                              |
+| `contextMenus`                 | Adds the right-click "Copy Best Locator" and "Open/Close Results Panel" entries.                                                                                                                                                                                                                  |
+| `clipboardWrite`               | Chrome requires this for `document.execCommand('copy')` from a content script outside a user gesture, which is how "Copy Best Locator" reaches the clipboard on pages that are not HTTPS — `navigator.clipboard` does not exist in a non-secure context. Nothing is ever read from the clipboard. |
+| `sidePanel` (Chrome)           | The results panel is the extension's primary UI surface.                                                                                                                                                                                                                                          |
+| `host_permissions: <all_urls>` | See below.                                                                                                                                                                                                                                                                                        |
 
 ### Broad host access
 
@@ -120,13 +125,14 @@ npm run screenshots
 drives it against `scripts/screenshots/demo-page.html` and captures the result.
 Every image is a real capture — nothing is drawn or mocked up.
 
-| File                        | Size     | Upload?                                          |
-| --------------------------- | -------- | ------------------------------------------------ |
-| `store-01-inspect.png`      | 1280×800 | ✅ ranked locators for a picked field            |
-| `store-02-selector-lab.png` | 1280×800 | ✅ Selector Lab resolving a Playwright locator   |
-| `store-03-recorder.png`     | 1280×800 | ✅ the recorder timeline                         |
-| `store-04-codegen.png`      | 1280×800 | ✅ the generated test script                     |
-| `01`–`09-*.png`             | native   | raw captures — source material, and fine for AMO |
+| File                        | Size     | Upload?                                                             |
+| --------------------------- | -------- | ------------------------------------------------------------------- |
+| `store-01-inspect.png`      | 1280×800 | ✅ ranked locators for a picked field                               |
+| `store-02-selector-lab.png` | 1280×800 | ✅ Selector Lab resolving a Playwright locator                      |
+| `store-03-recorder.png`     | 1280×800 | ✅ the recorder timeline                                            |
+| `store-04-codegen.png`      | 1280×800 | ✅ the generated test script                                        |
+| `store-05-iframes.png`      | 1280×800 | ✅ a field inside a payment iframe, addressed with `frameLocator()` |
+| `01`–`09-*.png`             | native   | raw captures — source material, and fine for AMO                    |
 
 The `store-*` images place the real page capture and the real panel capture at the
 geometry Chrome uses with a side panel docked (820 + 460 = 1280). They are a layout

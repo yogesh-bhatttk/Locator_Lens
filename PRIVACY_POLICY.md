@@ -51,6 +51,7 @@ Permissions are used **only** to deliver the features below. Exact lists may var
 | `scripting`                               | Inject the inspector / recorder / selector-lab logic when needed                                  |
 | `storage`                                 | Persist local preferences and saved POM data (see above)                                          |
 | `contextMenus`                            | Optional quick actions from the right-click menu (where enabled)                                  |
+| `clipboardWrite`                          | Write a locator you asked to copy to your clipboard                                               |
 | `sidePanel` (Chromium)                    | Show results in the browser side panel                                                            |
 | `host_permissions` / `<all_urls>` matches | Allow the content script to run on pages you open so inspection and validation work on your sites |
 

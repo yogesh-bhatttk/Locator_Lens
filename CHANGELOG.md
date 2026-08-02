@@ -2,6 +2,73 @@
 
 All notable changes to LocatorLens. Versions follow [semantic versioning](https://semver.org).
 
+## [1.3.0] — 2026-08-02
+
+Adds iframe support, and clears the remaining known gaps from the 1.2.1 audit.
+
+### Added
+
+- **Locators for elements inside iframes.** Previously an iframe was a dead end: the
+  picker highlighted the whole frame box and described the `<iframe>` element itself,
+  and nothing inside it could be inspected or recorded — which rules out most real
+  checkouts, since payment fields are almost always framed. Elements inside frames
+  are now first-class, and the generated code enters the frame before acting:
+  `page.frameLocator(…)` for Playwright, a `switchTo().frame(…)` /
+  `switch_to.default_content()` pair wrapped around the action for Selenium (which
+  has no frame-scoped locator — switching is a statement), and `contentDocument`
+  traversal for Cypress. Nested frames compose, and a chained locator inside a frame
+  renders correctly through both wrappers.
+  - The content script is still declared for the top frame only. It is injected into
+    sub-frames when Inspect or Record is switched on, so ordinary browsing does not
+    pay for parsing it inside every ad and tracking iframe.
+  - A cross-origin frame's `<iframe>` element is unreadable from inside the frame, so
+    those are addressed by position and the panel flags the locator as approximate.
+  - Messages that carry a reply are now aimed at a single frame: the context-menu copy
+    goes to the frame that was right-clicked, and the Stress Test to the frame that
+    made the pick. Broadcasting them would have every frame race to answer.
+
+### Fixed
+
+- **Start Inspecting did nothing when the side panel was not already open.** The
+  worker opens the panel, and the panel's startup "force reset" then told the worker
+  to stop inspecting — cancelling the click that had opened it. Found by the new
+  browser smoke test; the panel now asks for the live state instead of imposing one.
+- **A second browser window silently muted the first window's panel.** The worker
+  held a single side-panel port, so connecting a second panel replaced the first,
+  which then kept its port and never received another update. Every connected panel
+  now receives relays.
+- **Copying a locator on a non-HTTPS page.** 1.2.1 stopped this from throwing and
+  made the toast honest, but the copy still could not happen: `navigator.clipboard`
+  does not exist in a non-secure context, and `execCommand` from a content script
+  needs the `clipboardWrite` permission to run outside a user gesture. That
+  permission is now declared, so the copy actually completes.
+- Every pick rendered the panel twice — the content script broadcast reaches the
+  panel directly and the worker also relayed it over the port. Picks carry an id and
+  the panel renders the first copy only.
+- `seenActionKeys` grew without bound in memory during a long recording session; it
+  was only trimmed when persisted.
+
+### Changed
+
+- CI actions moved to `@v5`, off the deprecated Node 20 runtime.
+- `npm run test:coverage` is meaningful and enforced. It previously reported 23% and
+  a flat 0% for `background.js`, `content.js`, `sidepanel.js` and `popup.js` — the
+  most heavily tested files in the repo — because their suites run the real shipping
+  file through `node:vm`, which v8 coverage cannot instrument. Coverage is now scoped
+  to the two files it can genuinely measure, with thresholds: 90.6% statements, 98%
+  functions, 92% lines.
+- The browser smoke test runs in CI under xvfb, as its own job.
+
+### Testing
+
+- `tests/popup.dom.test.mjs` is new — `popup.js` was the last source file with no
+  coverage at all.
+- The demo page now embeds a real cross-document payment iframe (not `srcdoc`, which
+  Chrome will not inject content scripts into), and the smoke test picks a field
+  inside it and hands the generated `frameLocator` chain back to Playwright to
+  resolve.
+- 271 unit tests (was 204) and 34 smoke checks (was 27).
+
 ## [1.2.1] — 2026-08-02
 
 Correctness release. Six defects that produced wrong output or silently lost work,
@@ -74,11 +141,10 @@ the extension for submission.
 Violation **"Purple Potassium"** — the submitted package requested the `tabs`
 permission, which nothing in the item needs.
 
-No manifest committed to this repository has ever declared `tabs`; the rejected
-upload was built by hand from a stale, untracked `dist-chrome/` directory whose
-manifest matched no source in git. The root cause was therefore the release
-process, not the source, and the fix is a build script that packages tracked files
-and verifies the result:
+The finding is correct and applies to v1.1.3, whose manifests declared `tabs`
+(commit `9706b85`) although no code path read a property it unlocks. The
+permission was removed in v1.1.4 (commit `8d6792c`). What was missing was
+anything to stop it coming back, so the release process now enforces it:
 
 - the build now fails if a declared permission is not backed by an API the code
   actually calls, if `tabs` appears at all, or if a permission has no evidence rule
