@@ -270,3 +270,40 @@ describe('renderResults resilience', () => {
     expect(() => renderResults(null)).not.toThrow();
   });
 });
+
+// The panel's own startup used to cancel the action that opened it. Clicking Start
+// Inspecting makes the worker open the side panel; the panel then loaded and sent
+// STOP_INSPECT as a "force reset", tearing down the overlay the click had just
+// switched on. Inspecting from the popup therefore did nothing at all whenever the
+// panel was not already open.
+describe('panel startup', () => {
+  /** The real markup, so the DOMContentLoaded wiring runs against what ships. */
+  function mountRealPanel() {
+    const html = readFileSync(join(ROOT, 'src/sidepanel.html'), 'utf8');
+    const body = /<body[^>]*>([\s\S]*)<\/body>/i.exec(html);
+    document.body.innerHTML = (body ? body[1] : '').replace(/<script[\s\S]*?<\/script>/gi, '');
+  }
+
+  let sentTypes;
+  beforeEach(() => {
+    mountRealPanel();
+    sentTypes = [];
+    chrome.runtime.sendMessage = (msg) => {
+      if (msg && msg.type) sentTypes.push(msg.type);
+    };
+    document.dispatchEvent(new window.Event('DOMContentLoaded'));
+  });
+
+  it('never tells the worker to stop inspecting just because it opened', () => {
+    expect(sentTypes).not.toContain('STOP_INSPECT');
+  });
+
+  it('asks for the live state instead of forcing one', () => {
+    expect(sentTypes).toContain('GET_INSPECT_STATE');
+    expect(sentTypes).toContain('GET_RECORDING_STATE');
+  });
+
+  it('renders the not-inspecting default while waiting for the answer', () => {
+    expect(document.getElementById('btnText').textContent).toBe('Start Inspecting');
+  });
+});

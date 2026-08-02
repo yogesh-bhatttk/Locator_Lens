@@ -75,8 +75,12 @@ function startWorker(session = {}, options = {}) {
     },
     tabs: {
       query: (_q, cb) => cb(activeTab ? [activeTab] : []),
-      sendMessage: (tabId, msg, cb) => {
-        sent.push({ tabId, msg });
+      // chrome.tabs.sendMessage(tabId, msg, options?, callback?) — the options form
+      // is how a message is aimed at one frame.
+      sendMessage: (tabId, msg, optionsOrCb, maybeCb) => {
+        const options = typeof optionsOrCb === 'function' ? undefined : optionsOrCb;
+        const cb = typeof optionsOrCb === 'function' ? optionsOrCb : maybeCb;
+        sent.push({ tabId, msg, frameId: options ? options.frameId : undefined });
         withLastError(tabId, cb);
       },
       onRemoved: { addListener: (fn) => listeners.tabRemoved.push(fn) },
@@ -136,10 +140,14 @@ function startWorker(session = {}, options = {}) {
     },
     /** Deliver a runtime message and hand back whatever sendResponse was given. */
     send(msg) {
+      return this.sendFrom(msg, {});
+    },
+    /** Same, with an explicit sender — this is how tab and frameId reach the worker. */
+    sendFrom(msg, sender) {
       let response;
       let keptOpen = false;
       for (const fn of listeners.message) {
-        if (fn(msg, {}, (r) => (response = r)) === true) keptOpen = true;
+        if (fn(msg, sender, (r) => (response = r)) === true) keptOpen = true;
       }
       return {
         get response() {
@@ -404,5 +412,87 @@ describe('stress test relay', () => {
     const result = w.relayed.find((m) => m.type === 'STRESS_TEST_RESULT');
     expect(result).toBeDefined();
     expect(result.data).toMatchObject({ survived: false, unavailable: true });
+  });
+});
+
+// Content scripts are declared for the top frame only, so anything inside an iframe
+// is unreachable until a feature is switched on and the worker injects there. These
+// cover both halves: arming every frame, and aiming a reply-bearing message at the
+// one frame that can answer it.
+describe('frames', () => {
+  const injectedAllFrames = (w) => w.injected.filter((i) => i.target?.allFrames === true);
+
+  it('injects into every frame when inspect starts, then broadcasts', async () => {
+    const w = startWorker();
+    w.send({ type: 'START_INSPECT' });
+    await flush();
+
+    expect(injectedAllFrames(w)).toHaveLength(1);
+    const starts = w.sent.filter((m) => m.msg.type === 'START_INSPECT');
+    expect(starts).toHaveLength(1);
+    // No frameId: every frame overlays and hit-tests its own document.
+    expect(starts[0].frameId).toBeUndefined();
+  });
+
+  it('injects into every frame when recording starts', async () => {
+    const w = startWorker();
+    w.send({ type: 'START_RECORDING' });
+    await flush();
+    expect(injectedAllFrames(w)).toHaveLength(1);
+    expect(w.sent.filter((m) => m.msg.type === 'START_RECORDING' && m.frameId === undefined)).toHaveLength(1);
+  });
+
+  it('sends the context-menu copy only to the frame that was right-clicked', () => {
+    const w = startWorker();
+    w.listeners.menuClicked.forEach((fn) => fn({ menuItemId: 'll-copy-locator', frameId: 3 }, { id: TAB }));
+    const copies = w.sent.filter((m) => m.msg.type === 'CONTEXT_MENU_COPY');
+    expect(copies).toHaveLength(1);
+    expect(copies[0].frameId).toBe(3);
+  });
+
+  it('falls back to the top frame when the menu reports no frame', () => {
+    const w = startWorker();
+    w.listeners.menuClicked.forEach((fn) => fn({ menuItemId: 'll-copy-locator' }, { id: TAB }));
+    expect(w.sent.find((m) => m.msg.type === 'CONTEXT_MENU_COPY').frameId).toBe(0);
+  });
+
+  it('runs the stress test in the frame that made the pick', async () => {
+    const w = startWorker();
+    w.sendFrom({ type: 'ELEMENT_PICKED', data: {} }, { tab: { id: TAB }, frameId: 5 });
+    await flush();
+
+    w.send({ type: 'RUN_STRESS_TEST' });
+    await flush();
+    const runs = w.sent.filter((m) => m.msg.type === 'RUN_STRESS_TEST');
+    expect(runs).toHaveLength(1);
+    expect(runs[0].frameId).toBe(5);
+  });
+
+  it('remembers the picking frame across a worker eviction', async () => {
+    const first = startWorker();
+    first.sendFrom({ type: 'ELEMENT_PICKED', data: {} }, { tab: { id: TAB }, frameId: 4 });
+    await flush();
+
+    const second = startWorker(first.session);
+    second.send({ type: 'RUN_STRESS_TEST' });
+    await flush();
+    expect(second.sent.find((m) => m.msg.type === 'RUN_STRESS_TEST').frameId).toBe(4);
+  });
+
+  it('defaults the stress test to the top frame when nothing was picked', async () => {
+    const w = startWorker();
+    w.send({ type: 'RUN_STRESS_TEST' });
+    await flush();
+    expect(w.sent.find((m) => m.msg.type === 'RUN_STRESS_TEST').frameId).toBe(0);
+  });
+
+  it('validates in the top frame but clears highlights in every frame', async () => {
+    const w = startWorker();
+    w.send({ type: 'LAB_VALIDATE', selector: 'button' });
+    w.send({ type: 'LAB_CLEAR' });
+    await flush();
+
+    expect(w.sent.find((m) => m.msg.type === 'LAB_VALIDATE').frameId).toBe(0);
+    expect(w.sent.find((m) => m.msg.type === 'LAB_CLEAR').frameId).toBeUndefined();
   });
 });

@@ -44,6 +44,38 @@ describe('role resolution', () => {
     ['<select id="subject"></select>', 'combobox'],
     ['<h2 id="subject">T</h2>', 'heading'],
     ['<nav id="subject"></nav>', 'navigation'],
+    // The rest of the implicit-role map. It is the core of the whole tool — an
+    // element mapped to the wrong role produces a getByRole locator that silently
+    // matches nothing — so every entry is pinned, not just the common ones.
+    ['<input id="subject" type="password">', 'textbox'],
+    ['<input id="subject" type="tel">', 'textbox'],
+    ['<input id="subject" type="url">', 'textbox'],
+    ['<input id="subject" type="range">', 'slider'],
+    ['<input id="subject" type="submit" value="Go">', 'button'],
+    ['<input id="subject" type="reset" value="Reset">', 'button'],
+    ['<input id="subject" type="button" value="Go">', 'button'],
+    ['<img id="subject" alt="x">', 'img'],
+    ['<h1 id="subject">T</h1>', 'heading'],
+    ['<h3 id="subject">T</h3>', 'heading'],
+    ['<h4 id="subject">T</h4>', 'heading'],
+    ['<h5 id="subject">T</h5>', 'heading'],
+    ['<h6 id="subject">T</h6>', 'heading'],
+    ['<main id="subject"></main>', 'main'],
+    ['<table id="subject"></table>', 'table'],
+    ['<table><tr id="subject"></tr></table>', 'row'],
+    ['<table><tr><td id="subject"></td></tr></table>', 'cell'],
+    ['<table><tr><th id="subject"></th></tr></table>', 'columnheader'],
+    ['<ul id="subject"></ul>', 'list'],
+    ['<ol id="subject"></ol>', 'list'],
+    ['<ul><li id="subject"></li></ul>', 'listitem'],
+    ['<dialog id="subject"></dialog>', 'dialog'],
+    ['<form id="subject"></form>', 'form'],
+    ['<article id="subject"></article>', 'article'],
+    ['<aside id="subject"></aside>', 'complementary'],
+    ['<header id="subject"></header>', 'banner'],
+    ['<footer id="subject"></footer>', 'contentinfo'],
+    ['<section id="subject"></section>', 'region'],
+    ['<menuitem id="subject"></menuitem>', 'menuitem'],
   ])('derives the implicit role from %s', (html, role) => {
     expect(E.getRole(mount(html))).toBe(role);
   });
@@ -339,5 +371,14 @@ describe('shadow DOM', () => {
     const root = document.getElementById('host').attachShadow({ mode: 'open' });
     root.innerHTML = '<span id="lbl">Shadow label</span><input id="f" aria-labelledby="lbl">';
     expect(E.getAccessibleName(root.getElementById('f'))).toBe('Shadow label');
+  });
+});
+
+describe('heading levels', () => {
+  it.each([1, 2, 3, 4, 5, 6])('passes level %i through to the getByRole locator', (level) => {
+    document.body.innerHTML = `<h${level} id="subject">Title</h${level}>`;
+    const role = analyse(document.getElementById('subject')).locators.find((l) => l.target.kind === 'role');
+    expect(role.target.level).toBe(level);
+    expect(role.code).toContain(`level: ${level}`);
   });
 });

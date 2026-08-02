@@ -402,3 +402,103 @@ describe('chained locators', () => {
     }
   });
 });
+
+// An element inside an iframe is unreachable unless the generated code enters the
+// frame first. Playwright and Cypress can express that inline; Selenium cannot —
+// switching frames is a statement, so the whole action is wrapped in one.
+describe('frames', () => {
+  const inFrame = {
+    kind: 'frame',
+    selector: '#payment',
+    index: 0,
+    child: { kind: 'role', role: 'textbox', name: 'Card number' },
+  };
+
+  it('enters the frame in every framework and language', () => {
+    for (const [fw, lang] of validCombos()) {
+      const line = C.actionStatement({ action: 'fill', target: inFrame, value: '4242' }, fw, lang);
+      expect(line, `${fw}/${lang}`).toContain('payment');
+      expect(line, `${fw}/${lang}`).toContain('4242');
+      expect(line, `${fw}/${lang}`).not.toContain('undefined');
+    }
+  });
+
+  it('uses frameLocator for Playwright', () => {
+    expect(C.locatorExpr(inFrame, 'playwright', 'typescript')).toBe(
+      "page.frameLocator('#payment').getByRole('textbox', { name: 'Card number' })"
+    );
+    expect(C.locatorExpr(inFrame, 'playwright', 'python')).toBe(
+      'page.frame_locator("#payment").get_by_role("textbox", name="Card number")'
+    );
+  });
+
+  it('reaches through contentDocument for Cypress', () => {
+    const expr = C.locatorExpr(inFrame, 'cypress', 'javascript');
+    expect(expr).toContain("cy.get('#payment')");
+    expect(expr).toContain("its('0.contentDocument.body')");
+    expect(expr).toContain('.find(');
+  });
+
+  it('switches the Selenium driver in and back out again', () => {
+    // Leaving the driver inside the frame would silently break every later step.
+    const js = C.actionStatement({ action: 'click', target: inFrame }, 'selenium', 'javascript');
+    const lines = js.split('\n');
+    expect(lines[0]).toContain("switchTo().frame(driver.findElement(By.css('#payment')))");
+    expect(lines[lines.length - 1]).toContain('switchTo().defaultContent()');
+
+    const py = C.actionStatement({ action: 'click', target: inFrame }, 'selenium', 'python');
+    expect(py.split('\n')[0]).toContain('driver.switch_to.frame(');
+    expect(py.trim().split('\n').pop()).toBe('driver.switch_to.default_content()');
+  });
+
+  it('addresses a cross-origin frame positionally, since its element is unreadable', () => {
+    const xo = { kind: 'frame', selector: null, index: 2, child: { kind: 'text', value: 'Pay' } };
+    expect(C.locatorExpr(xo, 'playwright', 'typescript')).toBe(
+      "page.frameLocator('iframe >> nth=2').getByText('Pay')"
+    );
+    expect(C.locatorExpr(xo, 'cypress', 'javascript')).toContain("cy.get('iframe').eq(2)");
+    expect(C.actionStatement({ action: 'click', target: xo }, 'selenium', 'python')).toContain(
+      'driver.switch_to.frame(2)'
+    );
+  });
+
+  it('nests frames and composes with a chained child', () => {
+    const nested = {
+      kind: 'frame',
+      selector: '#outer',
+      child: {
+        kind: 'frame',
+        selector: '#inner',
+        child: {
+          kind: 'chain',
+          parent: { kind: 'testid', attr: 'data-testid', value: 'row-2' },
+          child: { kind: 'role', role: 'button', name: 'Delete' },
+        },
+      },
+    };
+    expect(C.locatorExpr(nested, 'playwright', 'typescript')).toBe(
+      "page.frameLocator('#outer').frameLocator('#inner').getByTestId('row-2').getByRole('button', { name: 'Delete' })"
+    );
+    const py = C.actionStatement({ action: 'click', target: nested }, 'selenium', 'python').split('\n');
+    expect(py[0]).toContain('#outer');
+    expect(py[1]).toContain('#inner');
+    expect(py[py.length - 1]).toBe('driver.switch_to.default_content()');
+  });
+
+  it('indents every line of a frame-switching statement inside the scaffold', () => {
+    const script = C.testScript([{ action: 'click', target: inFrame }], 'selenium', 'python');
+    for (const line of script
+      .split('\n')
+      .filter((l) => l.includes('switch_to') || l.includes('find_element'))) {
+      expect(line).toMatch(/^ {4}\S/);
+    }
+  });
+
+  it('leaves a frameless target untouched', () => {
+    const plain = { kind: 'role', role: 'button', name: 'Go' };
+    expect(C.locatorExpr(plain, 'playwright', 'typescript')).toBe("page.getByRole('button', { name: 'Go' })");
+    expect(C.actionStatement({ action: 'click', target: plain }, 'selenium', 'python')).not.toContain(
+      'switch_to'
+    );
+  });
+});
