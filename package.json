@@ -1,6 +1,6 @@
 {
   "name": "locatorlens",
-  "version": "1.2.1",
+  "version": "1.3.0",
   "private": true,
   "description": "Browser extension that inspects elements for ranked, uniqueness-checked locators and records flows into runnable Playwright / Selenium / Cypress tests.",
   "license": "MIT",
