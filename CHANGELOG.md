@@ -2,6 +2,67 @@
 
 All notable changes to LocatorLens. Versions follow [semantic versioning](https://semver.org).
 
+## [1.2.1] — 2026-08-02
+
+Correctness release. Six defects that produced wrong output or silently lost work,
+found by auditing the paths the test suite did not reach — chiefly the service
+worker, which had no coverage at all until this release.
+
+### Fixed
+
+- **Recording stopped partway through any multi-page flow.** MV3 evicts an idle
+  service worker after roughly 30 seconds and every module-scope variable goes with
+  it, including the set of tabs being recorded. Re-arming capture after a navigation
+  reads that set, so once the worker had been evicted — which needs nothing more
+  than half a minute spent reading the page — the navigation was ignored and every
+  step after it was dropped without any indication. Worker state now lives in
+  `chrome.storage.session`, which survives eviction and never touches disk.
+  `GET_INSPECT_STATE` was wrong across the same boundary, so the popup and panel
+  reported "not inspecting" for a page that still had the crosshair on it.
+- **Chained locators generated code for the wrong element.** The "Chained/Filtered"
+  card displayed `page.getByTestId('row-2').getByRole('button', …)` while its
+  structured target held only the bare child selector. Everything that reads the
+  target rather than the display string — the Selenium, Cypress and Python
+  translations, and every recorded step whose best locator was this one — therefore
+  dropped the parent scope and addressed the _first_ matching row on the page. The
+  chain is now a first-class target that every framework renders with the scope
+  intact, including the leading `.` that makes a Selenium child XPath relative.
+- **Copying a locator did nothing on `http://` pages.** A content script inherits the
+  page's security context, so `navigator.clipboard` is undefined on any non-secure
+  site. The context-menu copy called it unguarded and threw out of the message
+  listener; the inspect-click path guarded the call but then showed "✅ Copied"
+  regardless, sending people off to paste an empty buffer. There is now a real
+  `execCommand` fallback, and the toast reports a blocked copy as blocked.
+- **`page.locator('')` for `<body>`.** The CSS fallback walks up _to_ `<body>`, so
+  `<body>` itself yielded an empty selector — a runtime error in every framework.
+  Reachable by right-clicking before anything had been tracked.
+- **Labelled web components read as unnamed.** `aria-labelledby` and `label[for]`
+  were resolved against `document`, but IDREFs are scoped to their root, so a
+  control inside a shadow root could never find its own label.
+- **A keystroke could leak into the next recording.** Typing is emitted on a 450 ms
+  debounce whose timer was not cancelled on stop, so stopping and starting again
+  inside that window opened the new recording with a fill nobody performed in it.
+
+### Changed
+
+- The side panel asks the worker whether recording is live when it opens, instead of
+  showing "Start Recording" over a session that is still capturing.
+- Content-script messaging is funnelled through one guarded helper, so reloading the
+  extension can no longer throw into a visited site's console — and a pick that can
+  no longer be delivered tears the overlay down rather than leaving a dead crosshair.
+- A result payload missing an optional array renders instead of throwing and
+  stranding the panel on a half-drawn card.
+
+### Testing
+
+- `tests/background.test.mjs` is new: the service worker had no coverage. Each case
+  runs it in its own VM context, and an eviction is reproduced by starting a second
+  context over the same `storage.session` store. Six of these fail against the
+  previous release.
+- The browser smoke test now records across a real navigation, driven through the
+  service worker rather than straight into the content script.
+- 204 unit tests (was 156) and 29 smoke checks (was 27).
+
 ## [1.2.0] — 2026-08-02
 
 Store-readiness release. Fixes the packaging flaw behind the Chrome Web Store
@@ -28,7 +89,7 @@ and verifies the result:
 ### Fixed
 
 - **Selector Lab highlights were invisible.** The `.ll-lab-highlight` style was only
-  injected by *Start Inspecting*, so validating a selector marked the matches but
+  injected by _Start Inspecting_, so validating a selector marked the matches but
   showed nothing unless the user had already inspected on that page.
 - **Context menus broke after every extension update.** `onInstalled` also fires on
   update and menu items persist, so re-creating them failed with a duplicate-id
@@ -38,7 +99,7 @@ and verifies the result:
   containing `&amp;lt;` was copied as `<`.
 - **Generated code broke on values containing quotes.** Attribute values were
   interpolated into CSS selectors unescaped, and Selenium XPath literals had every
-  double quote *deleted* — so a button labelled `Delete "row"` silently generated a
+  double quote _deleted_ — so a button labelled `Delete "row"` silently generated a
   locator that matched something else. XPath now uses `concat()` where required.
 - **Element ids with CSS-special characters produced invalid selectors.** Ids such
   as `md:w-1/2` (Tailwind, Rails, Angular) are now escaped, in both the engine and
@@ -48,7 +109,7 @@ and verifies the result:
 - **Checkboxes and radios were recorded twice.** Both the pointer handler and the
   change handler emitted a step, so every tick produced a duplicate line. The
   pointer copy was also always `.check()` — it ran before the control toggled, so
-  *unchecking* a box generated `.check()` too. Only the change handler records
+  _unchecking_ a box generated `.check()` too. Only the change handler records
   these now, and it sees the settled state.
 - Inspecting a document without a `<body>` no longer throws.
 
@@ -57,7 +118,7 @@ and verifies the result:
 - Bounded every full-DOM scan in the locator engine and switched uniqueness
   counting from `innerText` to `textContent`. Reading `innerText` forces a layout
   flush per node, and these scans run for every candidate locator on every element
-  pick *and* every recorded click — on a large page that was a visible freeze.
+  pick _and_ every recorded click — on a large page that was a visible freeze.
 - The Selector Lab's `getByRole` / `getByText` resolution now applies its cheap
   predicates before the expensive `getComputedStyle` visibility check, and caps the
   match set so a loose substring cannot pin the tab.

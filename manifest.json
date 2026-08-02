@@ -1,21 +1,13 @@
 {
   "manifest_version": 3,
   "name": "LocatorLens – Smart Locator Automation",
-  "version": "1.2.0",
+  "version": "1.2.1",
   "description": "Inspect elements for ranked Playwright locators and record flows into test scripts—runs locally in your browser.",
-  "permissions": [
-    "activeTab",
-    "scripting",
-    "storage",
-    "contextMenus",
-    "sidePanel"
-  ],
+  "permissions": ["activeTab", "scripting", "storage", "contextMenus", "sidePanel"],
   "side_panel": {
     "default_path": "src/sidepanel.html"
   },
-  "host_permissions": [
-    "<all_urls>"
-  ],
+  "host_permissions": ["<all_urls>"],
   "background": {
     "service_worker": "src/background.js"
   },
@@ -31,14 +23,8 @@
   },
   "content_scripts": [
     {
-      "matches": [
-        "<all_urls>"
-      ],
-      "js": [
-        "src/codegen.js",
-        "src/content-locator-engine.js",
-        "src/content.js"
-      ],
+      "matches": ["<all_urls>"],
+      "js": ["src/codegen.js", "src/content-locator-engine.js", "src/content.js"],
       "run_at": "document_idle"
     }
   ],
