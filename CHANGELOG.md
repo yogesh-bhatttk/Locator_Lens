@@ -37,11 +37,17 @@ Adds iframe support, and clears the remaining known gaps from the 1.2.1 audit.
   held a single side-panel port, so connecting a second panel replaced the first,
   which then kept its port and never received another update. Every connected panel
   now receives relays.
-- **Copying a locator on a non-HTTPS page.** 1.2.1 stopped this from throwing and
-  made the toast honest, but the copy still could not happen: `navigator.clipboard`
-  does not exist in a non-secure context, and `execCommand` from a content script
-  needs the `clipboardWrite` permission to run outside a user gesture. That
-  permission is now declared, so the copy actually completes.
+- **Copying a locator on a non-HTTPS page.** `navigator.clipboard` does not exist in
+  a non-secure context, so 1.2.0 threw and 1.2.1 reported the failure honestly
+  without being able to act on it. There is now an `execCommand` fallback, which
+  covers every copy that happens inside a user gesture — the picker's click-to-copy
+  and the panel's own Copy buttons. The right-click "Copy Best Locator" on a
+  non-HTTPS page still cannot copy, because a context-menu click delivers no gesture
+  to the page and bypassing that requires the `clipboardWrite` permission.
+  Deliberately not requested: this item was once rejected for carrying a permission
+  nothing needed, and a convenience on non-HTTPS pages does not justify widening the
+  permission set. That path reports "Copy blocked" and shows the locator to read off
+  the screen.
 - Every pick rendered the panel twice — the content script broadcast reaches the
   panel directly and the worker also relayed it over the port. Picks carry an id and
   the panel renders the first copy only.

@@ -145,6 +145,25 @@ describe.each(TARGETS)('%s package', (target) => {
     expect(bg).not.toMatch(/\b(?:changeInfo|info)\.(url|title|favIconUrl)\b/);
   });
 
+  // The rejection was for a permission nothing needed. "Every permission is
+  // justified" is checked below, but that check only ever sees what is declared —
+  // it cannot object to a permission being added. This pins the set exactly, so
+  // growing it is a deliberate edit to this list and shows up in review.
+  it('declares exactly the reviewed permission set, no more', () => {
+    const expected =
+      target === 'firefox'
+        ? ['activeTab', 'contextMenus', 'scripting', 'storage'] // no sidePanel: Firefox uses sidebar_action
+        : ['activeTab', 'contextMenus', 'scripting', 'sidePanel', 'storage'];
+    expect([...manifest().permissions].sort()).toEqual(expected);
+  });
+
+  it('requests no optional or host permission beyond <all_urls>', () => {
+    const m = manifest();
+    expect(m.host_permissions ?? []).toEqual(['<all_urls>']);
+    expect(m.optional_permissions ?? []).toEqual([]);
+    expect(m.optional_host_permissions ?? []).toEqual([]);
+  });
+
   it('backs every declared permission with an API the code actually calls', () => {
     const code = filesIn(dir)
       .filter((f) => f.endsWith('.js') || f.endsWith('.html'))

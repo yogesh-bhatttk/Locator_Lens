@@ -160,7 +160,6 @@ LocatorLens requests only what it needs to inspect pages and drive the side pane
 | `scripting` + host access (`<all_urls>`)          | inject the inspector/recorder content scripts into the page you’re testing |
 | `storage`                                         | remember your last pick, recorder timeline, and framework/language choice  |
 | `contextMenus`                                    | the right-click “Copy Best Locator” / “Open Panel” entries                 |
-| `clipboardWrite`                                  | copy a locator from a page that isn’t HTTPS (see below)                    |
 | `sidePanel` (Chrome) · `sidebar_action` (Firefox) | the side-panel / sidebar surface                                           |
 
 `tabs` is deliberately **not** requested — everything the extension does with
