@@ -1,6 +1,6 @@
 # LocatorLens — locator inspector & test recorder
 
-[![Chrome](https://img.shields.io/badge/Chrome-Ready-green?logo=google-chrome&logoColor=white)]()
+[![Chrome](https://img.shields.io/badge/Chrome-Available-green?logo=google-chrome&logoColor=white)](https://chromewebstore.google.com/detail/locatorlens-%E2%80%93-smart-locat/amnagildbdfgfcjijilomhelgdbpgmeb)
 [![Firefox](https://img.shields.io/badge/Firefox-Ready-orange?logo=firefox-browser&logoColor=white)]()
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 
