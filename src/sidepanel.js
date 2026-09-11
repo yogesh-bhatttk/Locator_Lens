@@ -378,9 +378,7 @@ function initRecorderControls() {
     }, 200);
   });
   if (filterClear) filterClear.addEventListener('click', () => {
-    if (filterInput) filterInput.value = '';
-    recFilter = '';
-    filterClear.style.display = 'none';
+    clearRecFilter();
     renderTimeline();
     if (filterInput) filterInput.focus();
   });

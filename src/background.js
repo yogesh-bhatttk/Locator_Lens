@@ -57,12 +57,14 @@ const sessionArea = (chrome.storage && chrome.storage.session) || null;
 
 const inspectTabs = new Set();
 const recordingTabs = new Set(); // tabs with an active recording (so we can re-arm after navigation)
-// A single recording session can be paused/resumed. Content scripts hold their own
-// isPaused and apply it correctly, but the panel only learns the *recording* half of
-// that from GET_RECORDING_STATE — reopening it mid-pause used to always render the
-// Pause button (i.e. "capture is live"), with no way back to Resume short of
-// stopping the whole recording, because nothing here tracked or reported the pause.
-let recordingPaused = false;
+// Pause/resume is tracked per tab, not as one global flag: the side panel is a
+// window-level surface, so two windows can each have their own recording tab live at
+// once, and pausing one must not make the other's GET_RECORDING_STATE/rearm lie about
+// being paused too. Content scripts hold their own isPaused and apply it correctly,
+// but the panel only learns it from GET_RECORDING_STATE — reopening it mid-pause used
+// to always render the Pause button (i.e. "capture is live"), with no way back to
+// Resume short of stopping the whole recording, because nothing here tracked it.
+const pausedTabs = new Set();
 
 // The side panel is a single window-level surface with no sender.tab, so it can't be
 // tracked per tab — it's one timestamp kept alive by a heartbeat. (It used to be a Set
@@ -91,7 +93,7 @@ function ready() {
       const saved = (res && res[SESSION_STATE_KEY]) || {};
       if (Array.isArray(saved.inspect)) saved.inspect.forEach((id) => inspectTabs.add(id));
       if (Array.isArray(saved.recording)) saved.recording.forEach((id) => recordingTabs.add(id));
-      if (typeof saved.recordingPaused === 'boolean') recordingPaused = saved.recordingPaused;
+      if (Array.isArray(saved.paused)) saved.paused.forEach((id) => pausedTabs.add(id));
       if (typeof saved.panelLastSeen === 'number') panelLastSeen = saved.panelLastSeen;
       if (saved.lastPick) lastPick = saved.lastPick;
       hydrated = true;
@@ -108,7 +110,7 @@ function persistState() {
     [SESSION_STATE_KEY]: {
       inspect: Array.from(inspectTabs),
       recording: Array.from(recordingTabs),
-      recordingPaused,
+      paused: Array.from(pausedTabs),
       panelLastSeen,
       lastPick
     }
@@ -266,7 +268,8 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
     ready().then(() => {
       chrome.tabs.query({ active: true, currentWindow: true }, (tabs) => {
         const active = tabs[0] ? recordingTabs.has(tabs[0].id) : false;
-        sendResponse({ active, anyTab: recordingTabs.size > 0, paused: active && recordingPaused });
+        const paused = active && pausedTabs.has(tabs[0].id);
+        sendResponse({ active, anyTab: recordingTabs.size > 0, paused });
       });
     });
     return true;
@@ -358,7 +361,7 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
       if (!tabs[0]) return;
       const tabId = tabs[0].id;
       // so we can re-arm capture after a full-page navigation
-      ready().then(() => { recordingTabs.add(tabId); recordingPaused = false; persistState(); });
+      ready().then(() => { recordingTabs.add(tabId); pausedTabs.delete(tabId); persistState(); });
       // Every frame records its own events — a click inside an iframe never reaches
       // the top document's listeners.
       injectAllFrames(tabId, () => {
@@ -369,7 +372,7 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
 
   if (msg.type === 'STOP_RECORDING') {
     // single recording session — stop re-arming on any tab
-    ready().then(() => { recordingTabs.clear(); recordingPaused = false; persistState(); });
+    ready().then(() => { recordingTabs.clear(); pausedTabs.clear(); persistState(); });
     chrome.tabs.query({ active: true, currentWindow: true }, (tabs) => {
       if (!tabs[0]) return;
       chrome.tabs.sendMessage(tabs[0].id, { type: 'STOP_RECORDING' }, () => {
@@ -380,14 +383,21 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
 
   // Pause/resume + assert-mode: forward the whole message (carries `on`/`assertType`).
   if (msg.type === 'PAUSE_RECORDING' || msg.type === 'RESUME_RECORDING' || msg.type === 'SET_ASSERT_MODE') {
-    if (msg.type !== 'SET_ASSERT_MODE') {
-      // Tracked here (not just in the content script) so a panel reopened mid-pause
-      // can ask GET_RECORDING_STATE what's actually true instead of assuming "live".
-      ready().then(() => { recordingPaused = msg.type === 'PAUSE_RECORDING'; persistState(); });
-    }
     chrome.tabs.query({ active: true, currentWindow: true }, (tabs) => {
       if (!tabs[0]) return;
-      chrome.tabs.sendMessage(tabs[0].id, msg, () => { void chrome.runtime.lastError; });
+      const tabId = tabs[0].id;
+      if (msg.type !== 'SET_ASSERT_MODE') {
+        // Tracked per tab (not just in the content script) so a panel reopened
+        // mid-pause can ask GET_RECORDING_STATE what's actually true instead of
+        // assuming "live" — and so pausing one window's recording tab can't be
+        // misreported for a different tab recording in another window.
+        ready().then(() => {
+          if (msg.type === 'PAUSE_RECORDING') pausedTabs.add(tabId);
+          else pausedTabs.delete(tabId);
+          persistState();
+        });
+      }
+      chrome.tabs.sendMessage(tabId, msg, () => { void chrome.runtime.lastError; });
     });
   }
 
@@ -417,8 +427,14 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
 // Clean up when tab closes
 chrome.tabs.onRemoved.addListener((tabId) => {
   ready().then(() => {
-    const changed = inspectTabs.delete(tabId) || recordingTabs.delete(tabId);
-    if (changed) persistState();
+    // Each delete() must run regardless of the others' result — `||` short-circuits
+    // once the first is true, which used to leave a closed tab's id stuck in
+    // recordingTabs (and now pausedTabs) forever whenever it also happened to be the
+    // inspected tab, silently mis-arming re-arm/pause logic if that id was ever reused.
+    const wasInspecting = inspectTabs.delete(tabId);
+    const wasRecording = recordingTabs.delete(tabId);
+    const wasPaused = pausedTabs.delete(tabId);
+    if (wasInspecting || wasRecording || wasPaused) persistState();
   });
 });
 // Clean up on navigation (and sync UI)
@@ -435,11 +451,15 @@ chrome.tabs.onUpdated.addListener((tabId, info) => {
     }
     // Re-arm recording after a full-page navigation so multi-page flows keep capturing.
     // The content script (re-injected by the manifest on load) records a fresh goto on start.
+    // It's a brand-new JS context with no memory of `isPaused`, so the current pause
+    // state has to ride along explicitly — otherwise a paused recording silently goes
+    // live again the moment the page navigates, while the panel keeps showing "paused".
     if (!recordingTabs.has(tabId)) return;
-    sendToFrame(tabId, { type: 'START_RECORDING', rearm: true }, undefined, () => {
+    const rearmMsg = { type: 'START_RECORDING', rearm: true, paused: pausedTabs.has(tabId) };
+    sendToFrame(tabId, rearmMsg, undefined, () => {
       if (!chrome.runtime.lastError) return;
       injectAllFrames(tabId, () => {
-        setTimeout(() => sendToFrame(tabId, { type: 'START_RECORDING', rearm: true }), 80);
+        setTimeout(() => sendToFrame(tabId, rearmMsg), 80);
       });
     });
   });

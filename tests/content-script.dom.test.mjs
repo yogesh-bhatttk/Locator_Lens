@@ -208,6 +208,30 @@ describe('Selector Lab', () => {
     expect(res.ok).toBe(false);
     expect(res.error).toBeTruthy();
   });
+
+  // A plain CSS selector used to resolve via document.querySelectorAll alone, which
+  // never sees into shadow roots — a web-component button was invisible to the Lab
+  // even though the rest of the extension advertises shadow-DOM support.
+  it('finds a plain CSS match living inside an open shadow root', () => {
+    const root = document.createElement('div');
+    document.body.appendChild(root);
+    const shadow = root.attachShadow({ mode: 'open' });
+    shadow.innerHTML = '<button class="widget-save">Save</button>';
+
+    const res = send({ type: 'LAB_VALIDATE', selector: '.widget-save' });
+    expect(res.count).toBe(1);
+    expect(shadow.querySelector('.widget-save').classList.contains('ll-lab-highlight')).toBe(true);
+  });
+
+  it('resolves getByRole against an element inside an open shadow root', () => {
+    const root = document.createElement('div');
+    document.body.appendChild(root);
+    const shadow = root.attachShadow({ mode: 'open' });
+    shadow.innerHTML = '<button>Shadow Save</button>';
+
+    const res = send({ type: 'LAB_VALIDATE', selector: "page.getByRole('button', { name: 'Shadow Save' })" });
+    expect(res.count).toBe(1);
+  });
 });
 
 describe('stress test', () => {
@@ -259,6 +283,26 @@ describe('stress test', () => {
     target.dispatchEvent(new window.MouseEvent('contextmenu', { bubbles: true, composed: true }));
 
     expect(send({ type: 'RUN_STRESS_TEST' }).data).toMatchObject({ survived: false, name: 'Duplicate' });
+  });
+
+  // sendResponse must always fire, even if the analysis throws — otherwise the side
+  // panel's "Testing…" state hangs (background only recovers on a port-closed error,
+  // which a synchronous throw inside the handler never produces).
+  it('answers safely instead of hanging when the analysis throws', () => {
+    document.body.innerHTML = '<button id="only">Unique Action</button>';
+    const target = document.getElementById('only');
+    pointAt(target);
+    target.dispatchEvent(new window.MouseEvent('contextmenu', { bubbles: true }));
+
+    const E = globalThis.__LocatorLensEngine;
+    const original = E.getRole;
+    E.getRole = () => { throw new Error('boom'); };
+    try {
+      const { data } = send({ type: 'RUN_STRESS_TEST' });
+      expect(data).toMatchObject({ survived: false, unavailable: true });
+    } finally {
+      E.getRole = original;
+    }
   });
 });
 
@@ -329,6 +373,45 @@ describe('recorder capture', () => {
       .dispatchEvent(new window.PointerEvent('pointerdown', { bubbles: true, button: 0, isPrimary: true }));
 
     expect(sent).toHaveLength(before);
+  });
+
+  // A full-page navigation tears down this JS context entirely; the freshly re-injected
+  // instance has never seen a PAUSE_RECORDING message, so background has to tell it the
+  // recording was paused via the rearm message itself. Without that, a paused recording
+  // silently went live again on the next page while the panel kept showing "paused".
+  it('stays paused across a navigation rearm when background says so', () => {
+    document.body.innerHTML = '<button id="go">Go</button>';
+    let sent = captureActions();
+    send({ type: 'START_RECORDING' });
+    send({ type: 'PAUSE_RECORDING' });
+
+    // Simulate the full-page navigation: a brand-new content-script instance.
+    loadContentScripts();
+    document.body.innerHTML = '<button id="go">Go</button>';
+    sent = captureActions();
+    send({ type: 'START_RECORDING', rearm: true, paused: true });
+
+    document
+      .getElementById('go')
+      .dispatchEvent(new window.PointerEvent('pointerdown', { bubbles: true, button: 0, isPrimary: true }));
+
+    expect(sent.filter((a) => a.action === 'click')).toHaveLength(0);
+  });
+
+  it('resumes capturing across a navigation rearm when the recording was not paused', () => {
+    document.body.innerHTML = '<button id="go">Go</button>';
+    send({ type: 'START_RECORDING' });
+
+    loadContentScripts();
+    document.body.innerHTML = '<button id="go">Go</button>';
+    const sent = captureActions();
+    send({ type: 'START_RECORDING', rearm: true, paused: false });
+
+    document
+      .getElementById('go')
+      .dispatchEvent(new window.PointerEvent('pointerdown', { bubbles: true, button: 0, isPrimary: true }));
+
+    expect(sent.filter((a) => a.action === 'click')).toHaveLength(1);
   });
 });
 

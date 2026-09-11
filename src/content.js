@@ -425,11 +425,14 @@
   // In that case we only resume listening; we do NOT record a goto/viewport, because the
   // navigation was already produced by the previously-recorded action (the frameworks
   // auto-wait for it), and re-recording the size would be noise.
-  function startRecording(rearm) {
+  // `paused` carries background's last-known pause state across the rearm: this is a
+  // fresh JS context that has never seen a PAUSE_RECORDING message, so without it a
+  // paused recording would silently resume capturing on every new page.
+  function startRecording(rearm, paused) {
     if (isRecording) return;
     recordActionSeq = 0;
     isRecording = true;
-    isPaused = false;
+    isPaused = !!(rearm && paused);
     assertMode = false;
     if (typeof PointerEvent !== 'undefined') {
       document.addEventListener('pointerdown', onRecordPrimaryPointer, _recordPointerOptions);
@@ -514,24 +517,6 @@
       el = shadowEl;
     }
     return el;
-  }
-
-  // document.querySelectorAll never sees into shadow roots, so the Stress Test's
-  // uniqueness count silently ignored web-component content — a uniquely-named
-  // element inside an open shadow root always "failed" the test (0 candidates found,
-  // never even itself), directly contradicting the shadow-DOM support the rest of the
-  // extension has. Bounded so a pathological page can't hang the check.
-  const DEEP_QUERY_CAP = 5000;
-  function deepElementsByTag(tag, root, out) {
-    out = out || [];
-    const kids = (root || document).children;
-    for (let i = 0; i < kids.length && out.length < DEEP_QUERY_CAP; i++) {
-      const el = kids[i];
-      if (el.tagName && el.tagName.toLowerCase() === tag) out.push(el);
-      if (el.shadowRoot) deepElementsByTag(tag, el.shadowRoot, out);
-      if (out.length < DEEP_QUERY_CAP) deepElementsByTag(tag, el, out);
-    }
-    return out;
   }
 
   // ── Track right-clicked element (always active for context menu) ───────────
@@ -1197,7 +1182,7 @@
     }
     // 🎬 RECORDING: Start/Stop recording user interactions
     else if (msg.type === 'START_RECORDING') {
-      startRecording(msg.rearm);
+      startRecording(msg.rearm, msg.paused);
       sendResponse({ ok: true });
     }
     else if (msg.type === 'STOP_RECORDING') {
@@ -1324,7 +1309,14 @@
           const cs = getComputedStyle(el);
           return cs.display === 'none' || cs.visibility === 'hidden';
         };
-        const within = (root) => Array.from((root === document ? document : root).querySelectorAll('*'));
+        const within = (root) => {
+          const scope = root === document ? document : root;
+          if (E && E.deepQueryAll) {
+            const out = E.deepQueryAll('*', scope, Infinity);
+            if (out) return out;
+          }
+          return Array.from(scope.querySelectorAll('*'));
+        };
 
         // Upper bound on how many text/role matches we resolve. The innermost-match
         // filter below is O(n²) in `hit`, and a loose substring like "a" can match
@@ -1391,7 +1383,14 @@
                 for (let k = 0; k < r.snapshotLength; k++) out.push(r.snapshotItem(k));
                 return out;
               }
-              try { return Array.from((root === document ? document : root).querySelectorAll(sel)); }
+              try {
+                const scope = root === document ? document : root;
+                if (E && E.deepQueryAll) {
+                  const out = E.deepQueryAll(sel, scope, Infinity);
+                  return out || [];
+                }
+                return Array.from(scope.querySelectorAll(sel));
+              }
               catch (e) { return []; }
             }
             default: return [];
@@ -1426,7 +1425,9 @@
             matches.push(result.snapshotItem(i));
           }
         } else {
-          matches = Array.from(document.querySelectorAll(selector));
+          const engine = globalThis.__LocatorLensEngine;
+          const deep = engine && engine.deepQueryAll ? engine.deepQueryAll(selector, document, Infinity) : null;
+          matches = deep || Array.from(document.querySelectorAll(selector));
         }
 
         matches.forEach(el => {
@@ -1469,23 +1470,30 @@
         return;
       }
 
-      const role = E.getRole(target);
-      const name = E.getAccessibleName(target);
-      const tag = target.tagName.toLowerCase();
-      let survived = false;
+      try {
+        const role = E.getRole(target);
+        const name = E.getAccessibleName(target);
+        const tag = target.tagName.toLowerCase();
+        let survived = false;
 
-      if (role && name) {
-        const candidates = deepElementsByTag(tag);
-        let semanticMatches = 0;
-        for (const c of candidates) {
-          if (E.getRole(c) === role && E.getAccessibleName(c) === name) {
-            semanticMatches++;
+        if (role && name) {
+          // Shadow-DOM-piercing: a plain querySelectorAll(tag) would never see a
+          // uniquely-named element living inside an open shadow root, always
+          // "failing" the test for it (0 candidates found, never even itself).
+          const candidates = E.deepQueryAll(tag, document, 5000) || [];
+          let semanticMatches = 0;
+          for (const c of candidates) {
+            if (E.getRole(c) === role && E.getAccessibleName(c) === name) {
+              semanticMatches++;
+            }
           }
+          survived = semanticMatches === 1;
         }
-        survived = semanticMatches === 1;
-      }
 
-      sendResponse({ ok: true, data: { survived, role, name, tag } });
+        sendResponse({ ok: true, data: { survived, role, name, tag } });
+      } catch (err) {
+        sendResponse({ ok: true, data: { survived: false, unavailable: true } });
+      }
     }
   });
 })();

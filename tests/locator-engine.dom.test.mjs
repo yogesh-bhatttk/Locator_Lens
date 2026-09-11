@@ -397,6 +397,20 @@ describe('displayed code survives being re-parsed as real JS source', () => {
     expect(() => document.querySelectorAll(selector)).not.toThrow();
     expect(document.querySelectorAll(selector)).toHaveLength(1);
   });
+
+  it('escapes an embedded newline in getByText, which is otherwise a syntax error when pasted', () => {
+    // A raw \n byte (as opposed to the two-character \n escape) inside a single-quoted
+    // JS string literal is invalid syntax — realistic here since innerText/textContent
+    // on multi-line content routinely contains one. (jsdom has no layout engine, so a
+    // literal newline in the markup — not a <br>, which only becomes one during real
+    // rendering — is what stands in for that here.)
+    document.body.innerHTML = '<div id="subject">Line one\nLine two</div>';
+    const el = document.getElementById('subject');
+    const text = E.generateLocators(el, DEFAULT_ATTRS).locators.find((l) => l.target.kind === 'text');
+    expect(text.code).toContain('\\n');
+    // eslint-disable-next-line no-new-func -- deliberately re-parsing as a JS engine would
+    expect(() => new Function('return ' + text.code.replace(/^page\.getByText\(/, '').replace(/\)$/, ''))()).not.toThrow();
+  });
 });
 
 describe('shadow DOM', () => {
@@ -428,6 +442,39 @@ describe('shadow DOM', () => {
     const root = document.getElementById('host').attachShadow({ mode: 'open' });
     root.innerHTML = '<span id="lbl">Shadow label</span><input id="f" aria-labelledby="lbl">';
     expect(E.getAccessibleName(root.getElementById('f'))).toBe('Shadow label');
+  });
+
+  // Uniqueness counts drive the "unique"/ambiguous badge shown to the user. Every
+  // counting path (querySelector-by-attribute, text scan, role scan) used to run only
+  // against document.querySelectorAll, which never sees into a shadow root — so a
+  // duplicate living inside a web component was invisible and a genuinely ambiguous
+  // locator was reported as unique.
+  it('counts a duplicate testid living inside a shadow root, not just in the light DOM', () => {
+    document.body.innerHTML = '<button id="subject" data-testid="dup">Save</button><div id="host"></div>';
+    document.getElementById('host').attachShadow({ mode: 'open' }).innerHTML =
+      '<button data-testid="dup">Save</button>';
+    const testid = analyse(document.getElementById('subject')).locators.find((l) => l.target.kind === 'testid');
+    expect(testid.matchCount).toBe(2);
+    expect(testid.unique).toBe(false);
+  });
+
+  it('counts a duplicate visible text living inside a shadow root', () => {
+    document.body.innerHTML = '<span id="subject">Shared label</span><div id="host"></div>';
+    document.getElementById('host').attachShadow({ mode: 'open' }).innerHTML = '<span>Shared label</span>';
+    const text = analyse(document.getElementById('subject')).locators.find((l) => l.target.kind === 'text');
+    expect(text.matchCount).toBe(2);
+  });
+
+  it('finds candidates by tag inside a shadow root (what the Stress Test relies on)', () => {
+    document.body.innerHTML = '<div id="host"></div><button>Light</button>';
+    document.getElementById('host').attachShadow({ mode: 'open' }).innerHTML =
+      '<button>Shadow one</button><button>Shadow two</button>';
+    const buttons = E.deepQueryAll('button', document, Infinity);
+    expect(buttons).toHaveLength(3);
+  });
+
+  it('still returns null for a syntactically invalid selector', () => {
+    expect(E.deepQueryAll('[', document, Infinity)).toBeNull();
   });
 });
 

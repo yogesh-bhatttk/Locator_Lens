@@ -20,8 +20,61 @@
   // in JS source is either a recognised escape or silently dropped — so without this,
   // copying the shown code into a real test file re-parses to the unescaped selector
   // it was built to avoid. Mirrors codegen.js's q().
+  // Delegates to codegen.js's q() so "escape a JS string literal" has one
+  // implementation, not two that can quietly drift apart (as happened before: this
+  // used to have its own copy that was missing \r/\n/\t handling — a literal one of
+  // those bytes inside a single-quoted JS string literal, as opposed to the
+  // two-character escape, is a syntax error when the generated code is pasted into a
+  // test file, and values like getByText's visible text come from innerText/
+  // textContent and routinely contain one). Falls back to a local copy of the same
+  // logic for contexts that load this file without codegen.js (e.g. its unit tests).
   function jsStr(value) {
-    return "'" + String(value == null ? '' : value).replace(/\\/g, '\\\\').replace(/'/g, "\\'") + "'";
+    if (global.LLCodegen && typeof global.LLCodegen.q === 'function') {
+      return global.LLCodegen.q(value);
+    }
+    return "'" + String(value == null ? '' : value)
+      .replace(/\\/g, '\\\\')
+      .replace(/\r/g, '\\r')
+      .replace(/\n/g, '\\n')
+      .replace(/\t/g, '\\t')
+      .replace(/'/g, "\\'") + "'";
+  }
+
+  // ── Shadow-DOM-piercing query ────────────────────────────────────────────────
+  // document.querySelectorAll (and root.querySelectorAll) never descends into shadow
+  // roots. Every place that needs "every matching element on the page" — uniqueness
+  // counts, the Stress Test, the Selector Lab — funnels through this so an element
+  // inside an open shadow root is actually found instead of silently producing zero
+  // matches (or a false "unique") for pages built with web components.
+  //
+  // Each level uses one native querySelectorAll('*') call (fast, unbounded — same
+  // cost as before for the common case with no shadow DOM at all) and only recurses
+  // into shadow roots discovered among those elements. Recursion is guarded by a cap
+  // on shadow roots visited, not on light-DOM node count, so an ordinary large flat
+  // page costs nothing extra while a pathological chain of nested shadow roots can't
+  // blow the stack or hang the tab.
+  const DEEP_QUERY_SHADOW_ROOT_CAP = 500;
+  function deepQueryAll(selector, root, cap) {
+    const scope0 = root || document;
+    if (selector !== '*') {
+      try { scope0.querySelectorAll(selector); } catch (e) { return null; } // invalid selector
+    }
+    const out = [];
+    const max = typeof cap === 'number' ? cap : Infinity;
+    let shadowRootsVisited = 0;
+    (function walk(scope) {
+      if (out.length >= max) return;
+      let all;
+      try { all = scope.querySelectorAll('*'); } catch (e) { return; }
+      for (let i = 0; i < all.length && out.length < max; i++) {
+        const el = all[i];
+        if (selector === '*' || el.matches(selector)) out.push(el);
+      }
+      for (let i = 0; i < all.length && shadowRootsVisited < DEEP_QUERY_SHADOW_ROOT_CAP; i++) {
+        if (all[i].shadowRoot) { shadowRootsVisited++; walk(all[i].shadowRoot); }
+      }
+    })(scope0);
+    return out;
   }
 
   // ── ARIA role lookup ───────────────────────────────────────────────────────
@@ -282,10 +335,7 @@
   }
   function nodesBySelector(sel, cap) {
     try {
-      const found = document.querySelectorAll(sel);
-      const out = [];
-      for (let i = 0; i < found.length && out.length < cap; i++) out.push(found[i]);
-      return out;
+      return deepQueryAll(sel, document, cap);
     } catch (e) { return null; }
   }
   // textContent, not innerText: innerText is layout-dependent and forces a reflow on
@@ -296,9 +346,8 @@
   }
   function nodesByText(text, cap) {
     const out = [];
-    const all = document.querySelectorAll('*');
-    const limit = Math.min(all.length, SCAN_CAP);
-    for (let i = 0; i < limit && out.length < cap; i++) {
+    const all = deepQueryAll('*', document, SCAN_CAP);
+    for (let i = 0; i < all.length && out.length < cap; i++) {
       const node = all[i];
       if (normText(node) !== text) continue;
       // innermost only (mirrors Playwright getByText) — skip if a child holds the same text
@@ -312,9 +361,8 @@
   }
   function nodesByRole(role, name, cap) {
     const out = [];
-    const all = document.querySelectorAll('*');
-    const limit = Math.min(all.length, SCAN_CAP);
-    for (let i = 0; i < limit && out.length < cap; i++) {
+    const all = deepQueryAll('*', document, SCAN_CAP);
+    for (let i = 0; i < all.length && out.length < cap; i++) {
       if (getRole(all[i]) !== role) continue;
       if (name && getAccessibleName(all[i]) !== name) continue;
       out.push(all[i]);
@@ -323,7 +371,7 @@
   }
   function nodesByLabel(labelText, cap) {
     const out = [];
-    const controls = document.querySelectorAll('input, select, textarea');
+    const controls = deepQueryAll('input, select, textarea', document, Infinity);
     for (let i = 0; i < controls.length && out.length < cap; i++) {
       if (getAccessibleName(controls[i]) === labelText) out.push(controls[i]);
     }
@@ -382,6 +430,14 @@
     } catch (e) { return null; }
   }
 
+  // Builds the two fields every locator card carries — the bare Playwright expression
+  // and the actionable statement wrapping it — from one source instead of writing the
+  // same expression twice per call site, which several of the methods below used to
+  // do (a future change to one copy and not the other is exactly how these drift).
+  function withAction(code, el) {
+    return { code, fullCode: `await ${code}.${suggestAction(el)};` };
+  }
+
   // ── Main locator generation engine ────────────────────────────────────────
   function generateLocators(el, customTestAttributes) {
     const locators = [];
@@ -398,17 +454,17 @@
         // dedicated API fall back to a CSS attribute selector, which does need the
         // value escaped for the double-quoted selector (a value containing a `"`,
         // e.g. a testid embedding JSON, otherwise breaks the selector outright).
-        const code = attr === 'data-testid'
+        const isTestId = attr === 'data-testid';
+        const code = isTestId
           ? `page.getByTestId(${jsStr(val)})`
           : `page.locator(${jsStr('[' + attr + '="' + attrSelectorValue(val) + '"]')})`;
         locators.push({
           rank: 1,
-          method: 'getByTestId() / Custom',
+          method: isTestId ? 'getByTestId()' : 'locator() / Custom attribute',
           matchedAttr: `${attr}="${val}"`,
           stability: 'BEST',
           target: { kind: 'testid', attr: attr, value: val },
-          code,
-          fullCode: `await ${code}.${suggestAction(el)};`,
+          ...withAction(code, el),
           explanation: `Uses the <${attr}> attribute which is purpose-built for testing or custom configuration. This is highly stable.`,
           why: 'Stable / Custom test attribute'
         });
@@ -433,8 +489,7 @@
         matchedAttr: `role="${role}", name="${name}"${extra}`,
         stability: 'BEST',
         target: { kind: 'role', role: role, name: name, level: (role === 'heading' ? getHeadingLevel(el) : null) },
-        code: codeBase,
-        fullCode: `await ${codeBase}.${suggestAction(el)};`,
+        ...withAction(codeBase, el),
         explanation: `Finds the element by its ARIA role "${role}" and accessible name "${name}". This is Playwright's most recommended locator — it tests your app the same way screen readers use it.`,
         why: 'Semantic ARIA role'
       });
@@ -445,8 +500,7 @@
         matchedAttr: `role="${role}" (no accessible name found)`,
         stability: 'OK',
         target: { kind: 'role', role: role },
-        code: `page.getByRole(${jsStr(role)})`,
-        fullCode: `await page.getByRole(${jsStr(role)}).${suggestAction(el)};`,
+        ...withAction(`page.getByRole(${jsStr(role)})`, el),
         explanation: `Finds by role "${role}" but without a name filter — this may match multiple elements. Add an accessible name (aria-label, visible text) to make it unique.`,
         why: 'Role only — may be ambiguous'
       });
@@ -475,8 +529,7 @@
           matchedAttr: `label text: "${labelText}"`,
           stability: 'BEST',
           target: { kind: 'label', value: labelText },
-          code: `page.getByLabel(${jsStr(labelText)})`,
-          fullCode: `await page.getByLabel(${jsStr(labelText)}).${suggestAction(el)};`,
+          ...withAction(`page.getByLabel(${jsStr(labelText)})`, el),
           explanation: `Finds the ${tag} element by its associated label "${labelText}". Ideal for form inputs — directly reflects what the user sees on screen.`,
           why: 'Associated label text'
         });
@@ -493,8 +546,7 @@
         matchedAttr: `placeholder="${ph}"`,
         stability: 'GOOD',
         target: { kind: 'placeholder', value: ph },
-        code: `page.getByPlaceholder(${jsStr(ph)})`,
-        fullCode: `await page.getByPlaceholder(${jsStr(ph)}).${suggestAction(el)};`,
+        ...withAction(`page.getByPlaceholder(${jsStr(ph)})`, el),
         explanation: `Finds the input by its placeholder text "${placeholder.trim()}". Good when no label is present — but note placeholder text can change with copy updates.`,
         why: 'Placeholder attribute'
       });
@@ -511,8 +563,7 @@
           matchedAttr: `alt="${altText}"`,
           stability: 'GOOD',
           target: { kind: 'altText', value: altText },
-          code: `page.getByAltText(${jsStr(altText)})`,
-          fullCode: `await page.getByAltText(${jsStr(altText)}).${suggestAction(el)};`,
+          ...withAction(`page.getByAltText(${jsStr(altText)})`, el),
           explanation: `Finds the image by its alt text "${alt.trim()}". The correct semantic approach for images — also important for accessibility.`,
           why: 'Alt text attribute'
         });
@@ -529,8 +580,7 @@
         matchedAttr: `title="${titleText}"`,
         stability: 'GOOD',
         target: { kind: 'title', value: titleText },
-        code: `page.getByTitle(${jsStr(titleText)})`,
-        fullCode: `await page.getByTitle(${jsStr(titleText)}).${suggestAction(el)};`,
+        ...withAction(`page.getByTitle(${jsStr(titleText)})`, el),
         explanation: `Finds the element by its title attribute "${titleAttr.trim()}". Useful for icon buttons and tooltip elements without visible text.`,
         why: 'Title attribute'
       });
@@ -542,10 +592,9 @@
       const shortText = visibleText.slice(0, 60);
       // Bounded, layout-free ambiguity probe. Reading innerText here walked the whole
       // document flushing layout per node whenever the text was in fact unique.
-      const allMatchingText = document.querySelectorAll('*');
-      const textScanLimit = Math.min(allMatchingText.length, SCAN_CAP);
+      const allMatchingText = deepQueryAll('*', document, SCAN_CAP);
       let textMatchCount = 0;
-      for (let i = 0; i < textScanLimit; i++) {
+      for (let i = 0; i < allMatchingText.length; i++) {
         if (normText(allMatchingText[i]) === visibleText) textMatchCount++;
         if (textMatchCount > 3) break;
       }
@@ -557,8 +606,7 @@
         matchedAttr: `visible text: "${shortText}"`,
         stability,
         target: { kind: 'text', value: shortText },
-        code: `page.getByText(${jsStr(shortText)})`,
-        fullCode: `await page.getByText(${jsStr(shortText)}).${suggestAction(el)};`,
+        ...withAction(`page.getByText(${jsStr(shortText)})`, el),
         explanation: `Finds by visible text content "${visibleText.slice(0, 60)}".${warning} Best used for non-interactive elements like paragraphs and labels.`,
         why: 'Visible text content'
       });
@@ -572,8 +620,7 @@
         matchedAttr: `id="${el.id}"`,
         stability: 'OK',
         target: { kind: 'id', value: el.id },
-        code: `page.locator(${jsStr('#' + cssEscape(el.id))})`,
-        fullCode: `await page.locator(${jsStr('#' + cssEscape(el.id))}).${suggestAction(el)};`,
+        ...withAction(`page.locator(${jsStr('#' + cssEscape(el.id))})`, el),
         explanation: `Uses the element's ID "${el.id}". Acceptable if the ID is hand-written and stable — avoid if IDs are auto-generated (e.g. "btn-47" or "input_1234").`,
         why: 'ID attribute'
       });
@@ -589,8 +636,7 @@
         matchedAttr: `name="${name_attr}"`,
         stability: 'OK',
         target: { kind: 'name', value: name_attr },
-        code: `page.locator(${jsStr(nameSel)})`,
-        fullCode: `await page.locator(${jsStr(nameSel)}).${suggestAction(el)};`,
+        ...withAction(`page.locator(${jsStr(nameSel)})`, el),
         explanation: `Uses the name attribute "${name_attr}". Moderately stable — name attributes are usually semantic but multiple elements can share the same name (e.g. radio groups).`,
         why: 'Name attribute'
       });
@@ -623,15 +669,13 @@
       const childLoc = locators[0];
       if (pCode && childLoc.target) {
         const chainCode = `${pCode}.${childLoc.code.replace(/^page\./, '')}`;
-        const action = suggestAction(el);
         locators.push({
           rank: locators.length + 1,
           method: 'Chained/Filtered',
           matchedAttr: `Parent: ${uParent.testId || uParent.id || uParent.name}`,
           stability: 'BEST',
           target: { kind: 'chain', parent: pTarget, child: childLoc.target },
-          code: chainCode,
-          fullCode: `await ${chainCode}.${action};`,
+          ...withAction(chainCode, el),
           explanation: `Uses a unique parent (${uParent.id || uParent.role}) to narrow down the search. This is the pro approach for elements in lists, tables, or complex dashboards where name alone is ambiguous.`,
           why: 'Context-specific uniqueness'
         });
@@ -647,8 +691,7 @@
       matchedAttr: cssSelector,
       stability: hasUnstable ? 'AVOID' : 'OK',
       target: { kind: 'css', value: cssSelector },
-      code: `page.locator(${jsStr(cssSelector)})`,
-      fullCode: `await page.locator(${jsStr(cssSelector)}).${suggestAction(el)};`,
+      ...withAction(`page.locator(${jsStr(cssSelector)})`, el),
       explanation: hasUnstable
         ? `This CSS selector contains auto-generated class names (like styled-components or MUI classes) that regenerate on every build. Using this WILL cause your tests to break regularly. Use a semantic locator instead.`
         : `CSS selector fallback. Use only when semantic locators are not available. Prefer IDs and data attributes over class-based selectors.`,
@@ -781,6 +824,7 @@
     generateLocators,
     getRole,
     getAccessibleName,
-    buildCSSSelector
+    buildCSSSelector,
+    deepQueryAll
   };
 })(typeof globalThis !== 'undefined' ? globalThis : window);

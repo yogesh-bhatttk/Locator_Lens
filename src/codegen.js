@@ -577,7 +577,8 @@
     locatorExpr: locatorExpr,
     actionStatement: actionStatement,
     wrapScript: wrapScript,
-    testScript: testScript
+    testScript: testScript,
+    q: q
   };
 
   global.LLCodegen = LLCodegen;

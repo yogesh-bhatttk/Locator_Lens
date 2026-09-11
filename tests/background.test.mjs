@@ -299,6 +299,32 @@ describe('recording across a worker eviction', () => {
     expect(rearms(second)).toHaveLength(0);
   });
 
+  // inspectTabs.delete() || recordingTabs.delete() || pausedTabs.delete() short-
+  // circuits on the first `true` — a closed tab that was both inspecting and
+  // recording used to have only inspectTabs cleaned up, leaving it stuck in
+  // recordingTabs (and pausedTabs) forever, ready to mis-arm if that tab id were
+  // ever reused later in the same browser session.
+  it('forgets a closed tab that was inspecting and recording at once', async () => {
+    const first = startWorker();
+    first.send({ type: 'START_INSPECT' });
+    await flush();
+    first.send({ type: 'START_RECORDING' });
+    await flush();
+    first.send({ type: 'PAUSE_RECORDING' });
+    await flush();
+    first.closeTab(TAB);
+    await flush();
+
+    const second = startWorker(first.session);
+    second.navigate(TAB, 'complete');
+    await flush();
+    expect(rearms(second)).toHaveLength(0);
+
+    const q = second.send({ type: 'GET_INSPECT_STATE' });
+    await flush();
+    expect(q.response).toEqual({ active: false });
+  });
+
   it('answers a reopened side panel asking whether recording is live', async () => {
     const first = startWorker();
     first.send({ type: 'START_RECORDING' });
@@ -365,6 +391,77 @@ describe('recording across a worker eviction', () => {
     const q = second.send({ type: 'GET_RECORDING_STATE' });
     await flush();
     expect(q.response).toEqual({ active: true, anyTab: true, paused: false });
+  });
+
+  // The content script re-injected after a full-page navigation is a brand-new JS
+  // context with no memory of a prior PAUSE_RECORDING message — it only learns the
+  // pause state from whatever the rearm message itself carries. Without this, a
+  // paused recording silently went live again on the very next page while the panel
+  // kept showing "paused".
+  it('carries the current pause state along with a navigation rearm', async () => {
+    const w = startWorker();
+    w.send({ type: 'START_RECORDING' });
+    await flush();
+    w.send({ type: 'PAUSE_RECORDING' });
+    await flush();
+
+    w.navigate(TAB, 'loading');
+    w.navigate(TAB, 'complete');
+    await flush();
+
+    expect(rearms(w)).toHaveLength(1);
+    expect(rearms(w)[0].msg.paused).toBe(true);
+  });
+
+  it('rearms with paused:false for a recording that is not paused', async () => {
+    const w = startWorker();
+    w.send({ type: 'START_RECORDING' });
+    await flush();
+
+    w.navigate(TAB, 'loading');
+    w.navigate(TAB, 'complete');
+    await flush();
+
+    expect(rearms(w)).toHaveLength(1);
+    expect(rearms(w)[0].msg.paused).toBe(false);
+  });
+
+  // The side panel is a per-window surface, so two windows can each have their own
+  // active recording tab at once. Pause used to be one global flag shared by the
+  // whole worker — pausing the tab in one window silently made GET_RECORDING_STATE
+  // and the navigation rearm lie about the *other* window's tab being paused too.
+  it('keeps pause state independent per recording tab across two windows', async () => {
+    const OTHER_TAB = 99;
+    const w = startWorker();
+
+    w.send({ type: 'START_RECORDING' }); // window 1, active tab = TAB
+    await flush();
+
+    w.setActiveTab({ id: OTHER_TAB, windowId: 8 });
+    w.send({ type: 'START_RECORDING' }); // window 2, active tab = OTHER_TAB
+    await flush();
+
+    w.send({ type: 'PAUSE_RECORDING' }); // pauses OTHER_TAB only
+    await flush();
+
+    w.setActiveTab({ id: TAB, windowId: WINDOW });
+    const q1 = w.send({ type: 'GET_RECORDING_STATE' });
+    await flush();
+    expect(q1.response).toEqual({ active: true, anyTab: true, paused: false });
+
+    w.setActiveTab({ id: OTHER_TAB, windowId: 8 });
+    const q2 = w.send({ type: 'GET_RECORDING_STATE' });
+    await flush();
+    expect(q2.response).toEqual({ active: true, anyTab: true, paused: true });
+
+    w.navigate(TAB, 'loading');
+    w.navigate(TAB, 'complete');
+    w.navigate(OTHER_TAB, 'loading');
+    w.navigate(OTHER_TAB, 'complete');
+    await flush();
+
+    expect(rearms(w, TAB)[0].msg.paused).toBe(false);
+    expect(rearms(w, OTHER_TAB)[0].msg.paused).toBe(true);
   });
 });
 
