@@ -87,9 +87,9 @@ describe.each(TARGETS)('%s package', (target) => {
   // a stale directory. Two versions of the same package sitting in dist/ is the
   // setup for repeating that by hand.
   it('leaves exactly one package for this target in dist/', () => {
-    const zips = readdirSync(join(ROOT, 'dist')).filter((f) => f.startsWith(`locatorlens-${target}-`));
+    const zips = readdirSync(join(ROOT, 'dist')).filter((f) => f.startsWith(`locatra-${target}-`));
     expect(zips, `found ${zips.join(', ')}`).toHaveLength(1);
-    expect(zips[0]).toBe(`locatorlens-${target}-${manifest().version}.zip`);
+    expect(zips[0]).toBe(`locatra-${target}-${manifest().version}.zip`);
   });
 
   it('declares manifest v3 and a three-part version', () => {
@@ -206,7 +206,7 @@ describe.each(TARGETS)('%s package', (target) => {
 describe('archive', () => {
   it('produces a valid, byte-identical zip on every build', () => {
     const version = JSON.parse(readFileSync(join(ROOT, 'manifest.json'), 'utf8')).version;
-    const zipPath = join(ROOT, 'dist', `locatorlens-chrome-${version}.zip`);
+    const zipPath = join(ROOT, 'dist', `locatra-chrome-${version}.zip`);
     const first = readFileSync(zipPath);
 
     execFileSync('node', [join(ROOT, 'scripts/build.mjs'), 'chrome'], { cwd: ROOT, stdio: 'pipe' });

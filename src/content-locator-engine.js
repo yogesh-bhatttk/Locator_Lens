@@ -1,4 +1,4 @@
-// LocatorLens – content-locator-engine.js
+// Locatra – content-locator-engine.js
 // Playwright-oriented locator ranking (loaded before content.js).
 (function (global) {
   'use strict';

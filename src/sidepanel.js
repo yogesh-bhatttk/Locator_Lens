@@ -219,8 +219,8 @@ function recorderFileName() {
   if (outLanguage === 'python') return 'test_recorded.py';
   const ext = outLanguage === 'typescript' ? 'ts' : 'js';
   if (outFramework === 'cypress') return `recorded.cy.${ext}`;
-  if (outFramework === 'playwright') return `locatorlens-recorded.spec.${ext}`;
-  return `locatorlens-recorded.${ext}`;
+  if (outFramework === 'playwright') return `locatra-recorded.spec.${ext}`;
+  return `locatra-recorded.${ext}`;
 }
 
 function populateLangOptions() {
@@ -974,7 +974,7 @@ function renderTimeline() {
     `;
     }).join('');
   } catch (err) {
-    console.warn('[LocatorLens] renderTimeline failed:', err);
+    console.warn('[Locatra] renderTimeline failed:', err);
     html = recordedActions.map((act, i) => `
       <div class="ll-rec-step">
         <div class="ll-rec-step-head"><span class="ll-rec-step-label">#${i + 1} ${esc(String(act.action || ''))}</span></div>

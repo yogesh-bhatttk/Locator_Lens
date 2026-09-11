@@ -1,4 +1,4 @@
-// LocatorLens – codegen.js
+// Locatra – codegen.js
 // Pure, framework/language-agnostic code generator.
 // Turns a structured locator `target` (produced by content-locator-engine.js) plus
 // an action into runnable test code for Playwright / Selenium / Cypress in

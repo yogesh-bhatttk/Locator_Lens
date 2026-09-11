@@ -1,4 +1,4 @@
-// LocatorLens – popup.js (Launcher only — results live in the Side Panel)
+// Locatra – popup.js (Launcher only — results live in the Side Panel)
 
 let isInspecting = false;
 

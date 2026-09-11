@@ -1,4 +1,4 @@
-# LocatorLens — build process and architecture
+# Locatra — build process and architecture
 
 This document describes how the extension is structured and how distribution folders relate to `src/`. The product inspects elements and records flows, generating code for **Playwright / Selenium / Cypress** in **TypeScript / JavaScript / Python** (Cypress is JS/TS only).
 

@@ -1,4 +1,4 @@
-// LocatorLens – background.js (Service Worker)
+// Locatra – background.js (Service Worker)
 // Handles communication between popup, side panel, and content script
 
 /** Load order matters: engine defines __LocatorLensEngine before content.js runs. */

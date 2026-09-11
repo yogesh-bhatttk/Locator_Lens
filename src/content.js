@@ -1,4 +1,4 @@
-// LocatorLens – content.js
+// Locatra – content.js
 // Injected into every page. Handles hover highlight + click capture + locator generation.
 
 (function () {
@@ -13,11 +13,11 @@
   function debugLog() {
     if (!llDebug) return;
     // eslint-disable-next-line no-console -- this IS the opt-in debug channel
-    console.log.apply(console, ['[LocatorLens]'].concat(Array.prototype.slice.call(arguments)));
+    console.log.apply(console, ['[Locatra]'].concat(Array.prototype.slice.call(arguments)));
   }
   function debugWarn() {
     if (!llDebug) return;
-    console.warn.apply(console, ['[LocatorLens]'].concat(Array.prototype.slice.call(arguments)));
+    console.warn.apply(console, ['[Locatra]'].concat(Array.prototype.slice.call(arguments)));
   }
 
   // ── State ──────────────────────────────────────────────────────────────────
@@ -53,7 +53,7 @@
   }
 
   // Every message out of a content script can outlive its extension: reloading or
-  // updating LocatorLens invalidates the context of every page already open, and an
+  // updating Locatra invalidates the context of every page already open, and an
   // unguarded sendMessage then throws into *the visited site's* console. Reading
   // lastError in the callback is what suppresses the "Unchecked runtime.lastError"
   // noise when nothing is listening.
@@ -1058,7 +1058,7 @@
   function generateLocators(el) {
     const E = globalThis.__LocatorLensEngine;
     if (!E) {
-      console.error('[LocatorLens] Missing __LocatorLensEngine — ensure content-locator-engine.js is listed before content.js in the manifest.');
+      console.error('[Locatra] Missing __LocatorLensEngine — ensure content-locator-engine.js is listed before content.js in the manifest.');
       return { elementData: {}, locators: [], avoidList: [], proTip: '', a11y: [] };
     }
     // Everything — picks, recording, quick-copy — routes through here, so frame
@@ -1124,7 +1124,7 @@
     // and the panel renders only the first copy it sees.
     result.pickId = nextRecordEventId();
 
-    // A failed send here means LocatorLens was reloaded or updated while this page
+    // A failed send here means Locatra was reloaded or updated while this page
     // stayed open. Nothing will ever answer again, so tear the overlay down instead
     // of leaving a dead crosshair cursor on someone's site.
     if (!safeSend({ type: 'ELEMENT_PICKED', data: result })) {

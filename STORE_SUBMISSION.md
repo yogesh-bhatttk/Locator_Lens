@@ -1,6 +1,6 @@
 # Store submission guide
 
-Everything needed to build, verify and submit LocatorLens to the Chrome Web Store
+Everything needed to build, verify and submit Locatra to the Chrome Web Store
 and addons.mozilla.org, plus the permission justifications reviewers ask for.
 
 ---
@@ -14,12 +14,12 @@ npm run verify     # version check + lint + tests + build
 
 `npm run build` writes to `dist/`:
 
-| Artifact                                 | Use                                                       |
-| ---------------------------------------- | --------------------------------------------------------- |
-| `dist/chrome/`                           | unpacked tree — `chrome://extensions` → Load unpacked     |
-| `dist/firefox/`                          | unpacked tree — `about:debugging` → Load Temporary Add-on |
-| `dist/locatorlens-chrome-<version>.zip`  | upload to the Chrome Web Store                            |
-| `dist/locatorlens-firefox-<version>.zip` | upload to AMO                                             |
+| Artifact                             | Use                                                       |
+| ------------------------------------ | --------------------------------------------------------- |
+| `dist/chrome/`                       | unpacked tree — `chrome://extensions` → Load unpacked     |
+| `dist/firefox/`                      | unpacked tree — `about:debugging` → Load Temporary Add-on |
+| `dist/locatra-chrome-<version>.zip`  | upload to the Chrome Web Store                            |
+| `dist/locatra-firefox-<version>.zip` | upload to AMO                                             |
 
 The build prints a SHA-256 for each archive. Builds are byte-reproducible, so the
 same commit always yields the same hash — record it with the submission.
@@ -91,7 +91,7 @@ maintained separately.
 
 **Single purpose**
 
-> LocatorLens inspects an element on the page the user is testing and produces a
+> Locatra inspects an element on the page the user is testing and produces a
 > ranked, uniqueness-checked locator for it, plus optional recording of a flow into
 > a runnable test script. Every feature serves that one purpose: inspecting page
 > elements to author test locators.
@@ -129,7 +129,7 @@ exercised by the feature named; there are no unused permissions.
 
 ### Broad host access
 
-> LocatorLens is a test-authoring tool for QA engineers. Its entire function is to
+> Locatra is a test-authoring tool for QA engineers. Its entire function is to
 > analyse the page the user is currently testing and generate a locator for it.
 > The user chooses that page — it may be any internal staging host, localhost port
 > or customer environment — so the set of URLs cannot be enumerated in advance.
@@ -145,7 +145,7 @@ exercised by the feature named; there are no unused permissions.
 
 ### Data handling declarations
 
-Tick **no** for every data-collection category. LocatorLens has no server, sends
+Tick **no** for every data-collection category. Locatra has no server, sends
 no telemetry and makes no network requests. The Firefox manifest declares this
 formally via `browser_specific_settings.gecko.data_collection_permissions.required = ["none"]`.
 
@@ -192,7 +192,7 @@ feature that exists.
 - [ ] `npm run smoke` passes — drives the built extension in a real browser and
       re-runs the locators it generates against the page (jsdom cannot cover this)
 - [ ] version bumped past the last **submitted** version (not just the published one)
-- [ ] upload `dist/locatorlens-chrome-<version>.zip`
+- [ ] upload `dist/locatra-chrome-<version>.zip`
 - [ ] single purpose: "generate and validate test locators for the current page"
 - [ ] permission justifications from §4 pasted in
 - [ ] privacy policy URL set and reachable
@@ -203,7 +203,7 @@ feature that exists.
 
 - [ ] `npm run verify` and `npm run smoke` pass
 - [ ] version strictly greater than the currently listed one
-- [ ] upload `dist/locatorlens-firefox-<version>.zip`
+- [ ] upload `dist/locatra-firefox-<version>.zip`
 - [ ] source code is unminified and unbundled — the package ships the same files as
       the repository, so no "source code submission" step is required
 - [ ] `browser_specific_settings.gecko.id` unchanged (`locatorlens@yogesh-bhatttk.com`);

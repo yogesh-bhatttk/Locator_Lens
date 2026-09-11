@@ -1,10 +1,10 @@
-# Privacy Policy – LocatorLens
+# Privacy Policy – Locatra
 
 **Last updated:** August 2, 2026
 
 ## Overview
 
-LocatorLens is a browser extension for test authoring. It inspects web page elements
+Locatra is a browser extension for test authoring. It inspects web page elements
 and surfaces ranked, uniqueness-checked locators, validates selectors against the live
 page (Selector Lab), and optionally records your interactions into a runnable test
 script for **Playwright**, **Selenium** or **Cypress** in TypeScript, JavaScript or
@@ -12,7 +12,7 @@ Python. Everything runs locally in your browser.
 
 ## Data collection and transmission
 
-**LocatorLens does not collect, store, or transmit your data to LocatorLens servers.** There are no LocatorLens-operated backends, analytics endpoints, or advertising SDKs.
+**Locatra does not collect, store, or transmit your data to Locatra servers.** There are no Locatra-operated backends, analytics endpoints, or advertising SDKs.
 
 Specifically, we do **not**:
 
@@ -37,9 +37,9 @@ Chrome’s `chrome.storage.local` (or the equivalent in other Chromium-based bro
 - Recorder timeline / generated script draft (if you use recording)
 - Other UI preferences
 
-This data **stays on your machine** inside the browser profile. It is **not** synced to LocatorLens by the extension itself.
+This data **stays on your machine** inside the browser profile. It is **not** synced to Locatra by the extension itself.
 
-**Export / import:** If you use **Download**, **Export session**, or copy generated code, that is **you** saving or sharing data through your OS or clipboard—not an automatic upload by LocatorLens.
+**Export / import:** If you use **Download**, **Export session**, or copy generated code, that is **you** saving or sharing data through your OS or clipboard—not an automatic upload by Locatra.
 
 ## Permissions
 
@@ -56,7 +56,7 @@ Permissions are used **only** to deliver the features below. Exact lists may var
 
 ## Third-party services
 
-**None.** LocatorLens bundles no third-party libraries, loads no code or assets from
+**None.** Locatra bundles no third-party libraries, loads no code or assets from
 any remote origin, and embeds no trackers, analytics or ads. The published package
 contains only the files listed in this repository's `src/` and `icons/` directories.
 

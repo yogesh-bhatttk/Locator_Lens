@@ -224,13 +224,13 @@ function build(target) {
   // Drop this target's earlier packages. Leaving 1.1.6, 1.2.0 and 1.2.1 side by side
   // in dist/ is how the wrong archive gets picked at upload time — which is the exact
   // failure this script exists to prevent, and the one that caused the rejection.
-  const stale = new RegExp(`^locatorlens-${target}-.*\\.zip$`);
+  const stale = new RegExp(`^locatra-${target}-.*\\.zip$`);
   for (const name of readdirSync(OUT)) {
     if (stale.test(name)) rmSync(join(OUT, name), { force: true });
   }
 
   const zip = createZip(entries);
-  const zipPath = join(OUT, `locatorlens-${target}-${version}.zip`);
+  const zipPath = join(OUT, `locatra-${target}-${version}.zip`);
   writeFileSync(zipPath, zip);
 
   const sha = createHash('sha256').update(zip).digest('hex');

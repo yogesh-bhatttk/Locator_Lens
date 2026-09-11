@@ -1,6 +1,6 @@
 # Changelog
 
-All notable changes to LocatorLens. Versions follow [semantic versioning](https://semver.org).
+All notable changes to Locatra (formerly LocatorLens). Versions follow [semantic versioning](https://semver.org).
 
 ## [1.3.0] — 2026-08-02
 

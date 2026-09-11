@@ -1,10 +1,10 @@
-# LocatorLens — locator inspector & test recorder
+# Locatra — locator inspector & test recorder
 
 [![Chrome](https://img.shields.io/badge/Chrome-Available-green?logo=google-chrome&logoColor=white)](https://chromewebstore.google.com/detail/locatorlens-%E2%80%93-smart-locat/amnagildbdfgfcjijilomhelgdbpgmeb)
 [![Firefox](https://img.shields.io/badge/Firefox-Ready-orange?logo=firefox-browser&logoColor=white)]()
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 
-**LocatorLens** is a browser extension for end-to-end test authoring: inspect any element to get **ranked, uniqueness-checked locators**, validate selectors, and **record a flow into a runnable test** — all from the side panel. Output targets **Playwright, Selenium, or Cypress** in **TypeScript, JavaScript, or Python** (Cypress is JS/TS only).
+**Locatra** is a browser extension for end-to-end test authoring: inspect any element to get **ranked, uniqueness-checked locators**, validate selectors, and **record a flow into a runnable test** — all from the side panel. Output targets **Playwright, Selenium, or Cypress** in **TypeScript, JavaScript, or Python** (Cypress is JS/TS only).
 
 Extension version is defined in `manifest.json` (currently **1.3.0**) and kept in step
 with `package.json` and both browser manifests by `node scripts/version.mjs`.
@@ -152,7 +152,7 @@ justifications), [build_process.md](build_process.md) (architecture),
 
 ## Permissions
 
-LocatorLens requests only what it needs to inspect pages and drive the side panel locally — there is no network/host call to any LocatorLens server.
+Locatra requests only what it needs to inspect pages and drive the side panel locally — there is no network/host call to any Locatra server.
 
 | Permission                                        | Why it’s needed                                                            |
 | ------------------------------------------------- | -------------------------------------------------------------------------- |
@@ -170,6 +170,6 @@ Cross-browser: the same `src/` runs on both; Chrome loads a service-worker backg
 ## Engineering notes
 
 - **Semantic-first**: prefer roles, labels, and test ids over long CSS chains or positional selectors when the DOM exposes them.
-- **Privacy**: no LocatorLens-operated cloud; see `PRIVACY_POLICY.md`.
+- **Privacy**: no Locatra-operated cloud; see `PRIVACY_POLICY.md`.
 
 **Repository:** [github.com/yogesh-bhatttk/Locator_Lens](https://github.com/yogesh-bhatttk/Locator_Lens)
