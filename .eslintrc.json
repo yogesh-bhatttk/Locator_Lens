@@ -90,7 +90,17 @@
         "formatLocator": "readonly",
         "strategyLabel": "readonly",
         "buildActionCode": "readonly",
-        "renderResults": "readonly"
+        "renderResults": "readonly",
+        "recordedActions": "writable",
+        "lastSyncedPreviewScript": "writable",
+        "updateCodePreview": "readonly",
+        "generateTestScript": "readonly",
+        "getPreviewText": "readonly",
+        "setPreviewCode": "readonly",
+        "recRedoStack": "writable",
+        "seenActionKeys": "writable",
+        "recFilter": "writable",
+        "renderTimeline": "readonly"
       },
       "rules": {
         "no-console": "off"

@@ -29,6 +29,7 @@ beforeAll(() => {
         if (cb && responders[msg.type]) cb(responders[msg.type]);
       },
       onMessage: { addListener: (fn) => messageListeners.push(fn) },
+      getManifest: () => ({ version: '1.3.0' }),
     },
   };
   vm.runInThisContext(readFileSync(join(ROOT, 'src/popup.js'), 'utf8'), { filename: 'popup.js' });
@@ -66,6 +67,16 @@ describe('markup contract', () => {
     }
     // openPanel() addresses the label as the second <span> of the button.
     expect(document.querySelectorAll('#panelBtn span').length).toBeGreaterThanOrEqual(2);
+  });
+});
+
+describe('version display', () => {
+  // The subtitle used to hardcode a version string ("v1.1.6") that nothing in the
+  // build kept in step with package.json/the manifests, and it silently fell behind.
+  // Reading it from chrome.runtime.getManifest() at open time means it can't go stale.
+  it('shows the real extension version from the manifest, not a hardcoded string', () => {
+    open();
+    expect(document.getElementById('brandSub').textContent).toBe('Smart locators · v1.3.0');
   });
 });
 

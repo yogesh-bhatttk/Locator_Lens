@@ -516,6 +516,24 @@
     return el;
   }
 
+  // document.querySelectorAll never sees into shadow roots, so the Stress Test's
+  // uniqueness count silently ignored web-component content — a uniquely-named
+  // element inside an open shadow root always "failed" the test (0 candidates found,
+  // never even itself), directly contradicting the shadow-DOM support the rest of the
+  // extension has. Bounded so a pathological page can't hang the check.
+  const DEEP_QUERY_CAP = 5000;
+  function deepElementsByTag(tag, root, out) {
+    out = out || [];
+    const kids = (root || document).children;
+    for (let i = 0; i < kids.length && out.length < DEEP_QUERY_CAP; i++) {
+      const el = kids[i];
+      if (el.tagName && el.tagName.toLowerCase() === tag) out.push(el);
+      if (el.shadowRoot) deepElementsByTag(tag, el.shadowRoot, out);
+      if (out.length < DEEP_QUERY_CAP) deepElementsByTag(tag, el, out);
+    }
+    return out;
+  }
+
   // ── Track right-clicked element (always active for context menu) ───────────
   document.addEventListener('contextmenu', (e) => {
     lastRightClickedEl = getDeepElementAt(e.clientX, e.clientY);
@@ -1457,7 +1475,7 @@
       let survived = false;
 
       if (role && name) {
-        const candidates = document.querySelectorAll(tag);
+        const candidates = deepElementsByTag(tag);
         let semanticMatches = 0;
         for (const c of candidates) {
           if (E.getRole(c) === role && E.getAccessibleName(c) === name) {

@@ -307,3 +307,141 @@ describe('panel startup', () => {
     expect(document.getElementById('btnText').textContent).toBe('Start Inspecting');
   });
 });
+
+// A reopened panel only learns "recording is live" from GET_RECORDING_STATE, which
+// used to say nothing about a pause — so it always rendered the Pause button (i.e.
+// "capture is live") even while the tab was genuinely paused, with no way back to
+// Resume short of stopping the whole recording. background.js now reports a `paused`
+// flag (see tests/background.test.mjs), and the panel must act on it.
+describe('reopening mid-paused-recording', () => {
+  function mountRealPanel() {
+    const html = readFileSync(join(ROOT, 'src/sidepanel.html'), 'utf8');
+    const body = /<body[^>]*>([\s\S]*)<\/body>/i.exec(html);
+    document.body.innerHTML = (body ? body[1] : '').replace(/<script[\s\S]*?<\/script>/gi, '');
+  }
+
+  it('shows Resume (not Pause) when the worker reports the recording as paused', () => {
+    mountRealPanel();
+    chrome.runtime.sendMessage = (msg, cb) => {
+      if (msg && msg.type === 'GET_RECORDING_STATE' && cb) {
+        cb({ active: true, anyTab: true, paused: true });
+      }
+    };
+    document.dispatchEvent(new window.Event('DOMContentLoaded'));
+
+    expect(document.getElementById('pauseRecordingBtn').style.display).toBe('none');
+    expect(document.getElementById('resumeRecordingBtn').style.display).toBe('');
+  });
+
+  it('shows Pause when the worker reports the recording as live (not paused)', () => {
+    mountRealPanel();
+    chrome.runtime.sendMessage = (msg, cb) => {
+      if (msg && msg.type === 'GET_RECORDING_STATE' && cb) {
+        cb({ active: true, anyTab: true, paused: false });
+      }
+    };
+    document.dispatchEvent(new window.Event('DOMContentLoaded'));
+
+    expect(document.getElementById('pauseRecordingBtn').style.display).toBe('');
+    expect(document.getElementById('resumeRecordingBtn').style.display).toBe('none');
+  });
+});
+
+// updateCodePreview() used to only protect a hand-edit while the editor had focus.
+// Undo, Redo, remove-step, a framework/language switch, and a newly recorded action
+// all call it too — any of them firing after the user clicked away silently discarded
+// the edit and replaced it with fresh codegen output.
+describe('preserving unsaved edits in the Generated Test Script', () => {
+  function mountRealPanel() {
+    const html = readFileSync(join(ROOT, 'src/sidepanel.html'), 'utf8');
+    const body = /<body[^>]*>([\s\S]*)<\/body>/i.exec(html);
+    document.body.innerHTML = (body ? body[1] : '').replace(/<script[\s\S]*?<\/script>/gi, '');
+  }
+
+  beforeEach(() => {
+    mountRealPanel();
+    chrome.runtime.sendMessage = (msg, cb) => {
+      if (cb) cb();
+    };
+    document.dispatchEvent(new window.Event('DOMContentLoaded'));
+    // sidepanel.js's top-level state (lastSyncedPreviewScript included) is shared
+    // across every test in this file — reset it explicitly rather than relying on
+    // whatever an earlier describe block happened to leave behind.
+    lastSyncedPreviewScript = '';
+    recordedActions = [{ action: 'click', target: { kind: 'id', value: 'go' }, code: "page.locator('#go')" }];
+    updateCodePreview();
+  });
+
+  it('keeps a hand-edited script when a later trigger fires while the editor is not focused', () => {
+    const ta = document.getElementById('codePreview');
+    // A hand edit that no longer matches the last generated output — the DOM-level
+    // equivalent of the user having typed something, regardless of focus.
+    setPreviewCode(ta, lastSyncedPreviewScript + '\n// my custom assertion');
+    expect(document.activeElement).not.toBe(ta);
+
+    updateCodePreview(); // stands in for Undo / Redo / remove-step / a new action
+
+    expect(getPreviewText(ta)).toContain('// my custom assertion');
+  });
+
+  it('still refreshes once the box matches what was last generated', () => {
+    const firstScript = lastSyncedPreviewScript;
+    recordedActions.push({
+      action: 'click',
+      target: { kind: 'id', value: 'submit' },
+      code: "page.locator('#submit')",
+    });
+
+    updateCodePreview();
+
+    expect(lastSyncedPreviewScript).not.toBe(firstScript);
+    expect(getPreviewText(document.getElementById('codePreview'))).toBe(lastSyncedPreviewScript);
+  });
+});
+
+// Undo/Redo always act on the true last action in the timeline, independent of the
+// filter — which used to mean clicking Undo while filtered silently deleted an
+// action that was never even shown, with the visible (filtered) rows unchanged, so
+// there was no way to tell anything had happened at all.
+describe('undo/redo clears an active timeline filter so the change is visible', () => {
+  function mountRealPanel() {
+    const html = readFileSync(join(ROOT, 'src/sidepanel.html'), 'utf8');
+    const body = /<body[^>]*>([\s\S]*)<\/body>/i.exec(html);
+    document.body.innerHTML = (body ? body[1] : '').replace(/<script[\s\S]*?<\/script>/gi, '');
+  }
+
+  beforeEach(() => {
+    mountRealPanel();
+    chrome.runtime.sendMessage = (msg, cb) => {
+      if (cb) cb();
+    };
+    document.dispatchEvent(new window.Event('DOMContentLoaded'));
+
+    recRedoStack = [];
+    seenActionKeys = new Set();
+    recordedActions = [
+      { action: 'click', target: { kind: 'id', value: 'a' }, code: "page.locator('#a')" },
+      { action: 'fill', value: 'x', target: { kind: 'id', value: 'b' }, code: "page.locator('#b')" },
+      { action: 'click', target: { kind: 'id', value: 'c' }, code: "page.locator('#c')" },
+    ];
+    renderTimeline();
+  });
+
+  it('removes the true last action and drops the filter that was hiding it', () => {
+    const filterInput = document.getElementById('recFilterInput');
+    filterInput.value = 'fill';
+    recFilter = 'fill';
+    renderTimeline();
+    expect(document.getElementById('recorderTimeline').textContent).not.toContain('#c');
+
+    document.getElementById('undoActionBtn').click();
+
+    // The true last action (the "c" click, never shown under the filter) is gone...
+    expect(recordedActions.map((a) => a.target.value)).toEqual(['a', 'b']);
+    // ...and the filter was cleared so the timeline actually reflects that removal
+    // instead of looking untouched.
+    expect(recFilter).toBe('');
+    expect(filterInput.value).toBe('');
+    expect(document.getElementById('recorderTimeline').textContent).toContain('#b');
+  });
+});

@@ -12,6 +12,18 @@
     return s.replace(/([!"#$%&'()*+,./:;<=>?@[\\\]^`{|}~])/g, '\\$1').replace(/^(\d)/, '\\3$1 ');
   }
 
+  // Wrap a value as the source text of a single-quoted JS string literal — i.e. what
+  // the *displayed/copyable* `code` fields need, as opposed to the live `target`
+  // matching below (which works with the real runtime string directly). Backslashes
+  // are doubled first: cssEscape()/attrSelectorValue() below embed real backslash
+  // characters (e.g. CSS.escape('md:w-1/2') === 'md\\:w-1\\/2'), and a lone backslash
+  // in JS source is either a recognised escape or silently dropped — so without this,
+  // copying the shown code into a real test file re-parses to the unescaped selector
+  // it was built to avoid. Mirrors codegen.js's q().
+  function jsStr(value) {
+    return "'" + String(value == null ? '' : value).replace(/\\/g, '\\\\').replace(/'/g, "\\'") + "'";
+  }
+
   // ── ARIA role lookup ───────────────────────────────────────────────────────
   const IMPLICIT_ROLES = {
     a: (el) => el.href ? 'link' : null,
@@ -209,7 +221,10 @@
         ? current.className.trim().split(/\s+/).filter(c => c && !isUnstableClass(c))
         : [];
       if (stableClasses.length) {
-        part += '.' + stableClasses.slice(0, 2).join('.');
+        // Utility-class frameworks (Tailwind's sm:flex, w-1/2, …) are common and
+        // pass isUnstableClass — but ':' and '/' are CSS-special and left the
+        // selector invalid without this, exactly like the unescaped id case above.
+        part += '.' + stableClasses.slice(0, 2).map(cssEscape).join('.');
       }
       // Nth-child fallback
       const siblings = current.parentElement
@@ -378,15 +393,22 @@
     for (const attr of customTestAttributes) {
       const val = el.getAttribute(attr);
       if (val) {
-        const escaped = val.replace(/'/g, "\\'");
+        // getByTestId() takes a plain string — no CSS-selector escaping needed, and
+        // it's the locator Playwright actually recommends. Attributes without a
+        // dedicated API fall back to a CSS attribute selector, which does need the
+        // value escaped for the double-quoted selector (a value containing a `"`,
+        // e.g. a testid embedding JSON, otherwise breaks the selector outright).
+        const code = attr === 'data-testid'
+          ? `page.getByTestId(${jsStr(val)})`
+          : `page.locator(${jsStr('[' + attr + '="' + attrSelectorValue(val) + '"]')})`;
         locators.push({
           rank: 1,
           method: 'getByTestId() / Custom',
           matchedAttr: `${attr}="${val}"`,
           stability: 'BEST',
           target: { kind: 'testid', attr: attr, value: val },
-          code: `page.locator('[${attr}="${escaped}"]')`,
-          fullCode: `await page.locator('[${attr}="${escaped}"]').${suggestAction(el)};`,
+          code,
+          fullCode: `await ${code}.${suggestAction(el)};`,
           explanation: `Uses the <${attr}> attribute which is purpose-built for testing or custom configuration. This is highly stable.`,
           why: 'Stable / Custom test attribute'
         });
@@ -396,13 +418,12 @@
 
     // 2. getByRole
     if (role && name) {
-      const escaped = name.replace(/'/g, "\\'");
-      let codeBase = `page.getByRole('${role}', { name: '${escaped}' })`;
+      let codeBase = `page.getByRole(${jsStr(role)}, { name: ${jsStr(name)} })`;
       let extra = '';
       if (role === 'heading') {
         const level = getHeadingLevel(el);
         if (level) {
-          codeBase = `page.getByRole('${role}', { name: '${escaped}', level: ${level} })`;
+          codeBase = `page.getByRole(${jsStr(role)}, { name: ${jsStr(name)}, level: ${level} })`;
           extra = ` at level ${level}`;
         }
       }
@@ -424,8 +445,8 @@
         matchedAttr: `role="${role}" (no accessible name found)`,
         stability: 'OK',
         target: { kind: 'role', role: role },
-        code: `page.getByRole('${role}')`,
-        fullCode: `await page.getByRole('${role}').${suggestAction(el)};`,
+        code: `page.getByRole(${jsStr(role)})`,
+        fullCode: `await page.getByRole(${jsStr(role)}).${suggestAction(el)};`,
         explanation: `Finds by role "${role}" but without a name filter — this may match multiple elements. Add an accessible name (aria-label, visible text) to make it unique.`,
         why: 'Role only — may be ambiguous'
       });
@@ -448,15 +469,14 @@
       }
       if (!labelText) labelText = el.getAttribute('aria-label') || null;
       if (labelText) {
-        const escaped = labelText.replace(/'/g, "\\'");
         locators.push({
           rank: locators.length + 1,
           method: 'getByLabel()',
           matchedAttr: `label text: "${labelText}"`,
           stability: 'BEST',
           target: { kind: 'label', value: labelText },
-          code: `page.getByLabel('${escaped}')`,
-          fullCode: `await page.getByLabel('${escaped}').${suggestAction(el)};`,
+          code: `page.getByLabel(${jsStr(labelText)})`,
+          fullCode: `await page.getByLabel(${jsStr(labelText)}).${suggestAction(el)};`,
           explanation: `Finds the ${tag} element by its associated label "${labelText}". Ideal for form inputs — directly reflects what the user sees on screen.`,
           why: 'Associated label text'
         });
@@ -466,15 +486,15 @@
     // 4. getByPlaceholder
     const placeholder = el.getAttribute('placeholder');
     if (placeholder && placeholder.trim()) {
-      const escaped = placeholder.trim().replace(/'/g, "\\'");
+      const ph = placeholder.trim();
       locators.push({
         rank: locators.length + 1,
         method: 'getByPlaceholder()',
-        matchedAttr: `placeholder="${placeholder.trim()}"`,
+        matchedAttr: `placeholder="${ph}"`,
         stability: 'GOOD',
-        target: { kind: 'placeholder', value: placeholder.trim() },
-        code: `page.getByPlaceholder('${escaped}')`,
-        fullCode: `await page.getByPlaceholder('${escaped}').${suggestAction(el)};`,
+        target: { kind: 'placeholder', value: ph },
+        code: `page.getByPlaceholder(${jsStr(ph)})`,
+        fullCode: `await page.getByPlaceholder(${jsStr(ph)}).${suggestAction(el)};`,
         explanation: `Finds the input by its placeholder text "${placeholder.trim()}". Good when no label is present — but note placeholder text can change with copy updates.`,
         why: 'Placeholder attribute'
       });
@@ -484,15 +504,15 @@
     if (tag === 'img') {
       const alt = el.getAttribute('alt');
       if (alt && alt.trim()) {
-        const escaped = alt.trim().replace(/'/g, "\\'");
+        const altText = alt.trim();
         locators.push({
           rank: locators.length + 1,
           method: 'getByAltText()',
-          matchedAttr: `alt="${alt.trim()}"`,
+          matchedAttr: `alt="${altText}"`,
           stability: 'GOOD',
-          target: { kind: 'altText', value: alt.trim() },
-          code: `page.getByAltText('${escaped}')`,
-          fullCode: `await page.getByAltText('${escaped}').${suggestAction(el)};`,
+          target: { kind: 'altText', value: altText },
+          code: `page.getByAltText(${jsStr(altText)})`,
+          fullCode: `await page.getByAltText(${jsStr(altText)}).${suggestAction(el)};`,
           explanation: `Finds the image by its alt text "${alt.trim()}". The correct semantic approach for images — also important for accessibility.`,
           why: 'Alt text attribute'
         });
@@ -502,15 +522,15 @@
     // 6. getByTitle
     const titleAttr = el.getAttribute('title');
     if (titleAttr && titleAttr.trim()) {
-      const escaped = titleAttr.trim().replace(/'/g, "\\'");
+      const titleText = titleAttr.trim();
       locators.push({
         rank: locators.length + 1,
         method: 'getByTitle()',
-        matchedAttr: `title="${titleAttr.trim()}"`,
+        matchedAttr: `title="${titleText}"`,
         stability: 'GOOD',
-        target: { kind: 'title', value: titleAttr.trim() },
-        code: `page.getByTitle('${escaped}')`,
-        fullCode: `await page.getByTitle('${escaped}').${suggestAction(el)};`,
+        target: { kind: 'title', value: titleText },
+        code: `page.getByTitle(${jsStr(titleText)})`,
+        fullCode: `await page.getByTitle(${jsStr(titleText)}).${suggestAction(el)};`,
         explanation: `Finds the element by its title attribute "${titleAttr.trim()}". Useful for icon buttons and tooltip elements without visible text.`,
         why: 'Title attribute'
       });
@@ -519,7 +539,7 @@
     // 7. getByText
     const visibleText = (el.innerText || el.textContent || '').trim();
     if (visibleText && visibleText.length <= 100 && !['input', 'select', 'textarea', 'img'].includes(tag)) {
-      const escaped = visibleText.replace(/'/g, "\\'");
+      const shortText = visibleText.slice(0, 60);
       // Bounded, layout-free ambiguity probe. Reading innerText here walked the whole
       // document flushing layout per node whenever the text was in fact unique.
       const allMatchingText = document.querySelectorAll('*');
@@ -534,11 +554,11 @@
       locators.push({
         rank: locators.length + 1,
         method: 'getByText()',
-        matchedAttr: `visible text: "${visibleText.slice(0, 60)}"`,
+        matchedAttr: `visible text: "${shortText}"`,
         stability,
-        target: { kind: 'text', value: visibleText.slice(0, 60) },
-        code: `page.getByText('${escaped.slice(0, 60)}')`,
-        fullCode: `await page.getByText('${escaped.slice(0, 60)}').${suggestAction(el)};`,
+        target: { kind: 'text', value: shortText },
+        code: `page.getByText(${jsStr(shortText)})`,
+        fullCode: `await page.getByText(${jsStr(shortText)}).${suggestAction(el)};`,
         explanation: `Finds by visible text content "${visibleText.slice(0, 60)}".${warning} Best used for non-interactive elements like paragraphs and labels.`,
         why: 'Visible text content'
       });
@@ -546,15 +566,14 @@
 
     // 8. locator() by stable ID
     if (el.id && !isUnstableId(el.id)) {
-      const escaped = el.id.replace(/'/g, "\\'");
       locators.push({
         rank: locators.length + 1,
         method: "locator('#id')",
         matchedAttr: `id="${el.id}"`,
         stability: 'OK',
         target: { kind: 'id', value: el.id },
-        code: `page.locator('#${escaped}')`,
-        fullCode: `await page.locator('#${escaped}').${suggestAction(el)};`,
+        code: `page.locator(${jsStr('#' + cssEscape(el.id))})`,
+        fullCode: `await page.locator(${jsStr('#' + cssEscape(el.id))}).${suggestAction(el)};`,
         explanation: `Uses the element's ID "${el.id}". Acceptable if the ID is hand-written and stable — avoid if IDs are auto-generated (e.g. "btn-47" or "input_1234").`,
         why: 'ID attribute'
       });
@@ -563,15 +582,15 @@
     // 9. CSS attribute selectors (name, type combos)
     const name_attr = el.getAttribute('name');
     if (name_attr && ['input', 'select', 'textarea'].includes(tag)) {
-      const escaped = name_attr.replace(/'/g, "\\'");
+      const nameSel = `[name="${attrSelectorValue(name_attr)}"]`;
       locators.push({
         rank: locators.length + 1,
         method: "locator('[name]')",
         matchedAttr: `name="${name_attr}"`,
         stability: 'OK',
         target: { kind: 'name', value: name_attr },
-        code: `page.locator('[name="${escaped}"]')`,
-        fullCode: `await page.locator('[name="${escaped}"]').${suggestAction(el)};`,
+        code: `page.locator(${jsStr(nameSel)})`,
+        fullCode: `await page.locator(${jsStr(nameSel)}).${suggestAction(el)};`,
         explanation: `Uses the name attribute "${name_attr}". Moderately stable — name attributes are usually semantic but multiple elements can share the same name (e.g. radio groups).`,
         why: 'Name attribute'
       });
@@ -590,16 +609,14 @@
       let pCode = '';
       let pTarget = null;
       if (uParent.testId) {
-        const tid = String(uParent.testId).replace(/\\/g, '\\\\').replace(/'/g, "\\'");
-        pCode = `page.getByTestId('${tid}')`;
+        pCode = `page.getByTestId(${jsStr(uParent.testId)})`;
         pTarget = { kind: 'testid', attr: 'data-testid', value: uParent.testId };
       } else if (uParent.id) {
-        const escId = String(uParent.id).replace(/\\/g, '\\\\').replace(/'/g, "\\'");
-        pCode = `page.locator('#${escId}')`;
+        pCode = `page.locator(${jsStr('#' + cssEscape(uParent.id))})`;
         pTarget = { kind: 'id', value: uParent.id };
       }
       else if (uParent.role && uParent.name) {
-        pCode = `page.getByRole('${uParent.role}', { name: '${uParent.name.replace(/'/g, "\\'")}' })`;
+        pCode = `page.getByRole(${jsStr(uParent.role)}, { name: ${jsStr(uParent.name)} })`;
         pTarget = { kind: 'role', role: uParent.role, name: uParent.name };
       }
 
@@ -630,8 +647,8 @@
       matchedAttr: cssSelector,
       stability: hasUnstable ? 'AVOID' : 'OK',
       target: { kind: 'css', value: cssSelector },
-      code: `page.locator('${cssSelector.replace(/'/g, "\\'")}')`,
-      fullCode: `await page.locator('${cssSelector.replace(/'/g, "\\'")}').${suggestAction(el)};`,
+      code: `page.locator(${jsStr(cssSelector)})`,
+      fullCode: `await page.locator(${jsStr(cssSelector)}).${suggestAction(el)};`,
       explanation: hasUnstable
         ? `This CSS selector contains auto-generated class names (like styled-components or MUI classes) that regenerate on every build. Using this WILL cause your tests to break regularly. Use a semantic locator instead.`
         : `CSS selector fallback. Use only when semantic locators are not available. Prefer IDs and data attributes over class-based selectors.`,

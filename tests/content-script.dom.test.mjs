@@ -233,6 +233,33 @@ describe('stress test', () => {
 
     expect(send({ type: 'RUN_STRESS_TEST' }).data).toMatchObject({ survived: false, name: 'Duplicate' });
   });
+
+  // document.querySelectorAll (used to count candidates) never sees into shadow
+  // roots. A uniquely-named element that happens to live inside one used to count
+  // zero candidates — not even itself — and always report "survived: false", which
+  // contradicted the extension's advertised shadow-DOM support.
+  it('passes a uniquely-identifiable element inside an open shadow root', () => {
+    document.body.innerHTML = '<div id="host"></div>';
+    const root = document.getElementById('host').attachShadow({ mode: 'open' });
+    root.innerHTML = '<button>Save Changes</button>';
+    const target = root.querySelector('button');
+    pointAt(target);
+    target.dispatchEvent(new window.MouseEvent('contextmenu', { bubbles: true, composed: true }));
+
+    const { data } = send({ type: 'RUN_STRESS_TEST' });
+    expect(data).toMatchObject({ survived: true, role: 'button', name: 'Save Changes', tag: 'button' });
+  });
+
+  it('still counts a duplicate that only exists inside a shadow root', () => {
+    document.body.innerHTML = '<div id="host"></div>';
+    const root = document.getElementById('host').attachShadow({ mode: 'open' });
+    root.innerHTML = '<button>Duplicate</button><button>Duplicate</button>';
+    const target = root.querySelectorAll('button')[0];
+    pointAt(target);
+    target.dispatchEvent(new window.MouseEvent('contextmenu', { bubbles: true, composed: true }));
+
+    expect(send({ type: 'RUN_STRESS_TEST' }).data).toMatchObject({ survived: false, name: 'Duplicate' });
+  });
 });
 
 describe('recorder capture', () => {

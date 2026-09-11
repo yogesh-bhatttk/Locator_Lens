@@ -342,6 +342,63 @@ describe('CSS fallback selector', () => {
   });
 });
 
+// `code` is the string the user actually copies into a real test file — it isn't
+// enough for it to *look* right, re-parsing it with a real JS engine has to reproduce
+// a working selector. A value embedded without CSS-selector escaping (a literal `"`
+// inside a `[attr="..."]`) or without doubling the backslashes cssEscape() inserts
+// (dropped by JS's own string-literal parsing) breaks that round trip silently —
+// the live uniqueness badge still says "unique" while the copied line throws.
+describe('displayed code survives being re-parsed as real JS source', () => {
+  function reparseLocatorArg(code) {
+    const argSource = code.replace(/^page\.(?:locator|getByTestId)\(/, '').replace(/\)$/, '');
+    // eslint-disable-next-line no-new-func -- deliberately re-parsing as a JS engine would
+    return new Function('return ' + argSource)();
+  }
+
+  it('escapes CSS-special characters in a class-based fallback selector (Tailwind, etc.)', () => {
+    document.body.innerHTML = '<div><button class="sm:flex w-1/2">Click</button></div>';
+    const btn = document.querySelector('button');
+    const css = E.generateLocators(btn, DEFAULT_ATTRS).locators.find((l) => l.method === 'locator() CSS');
+    const selector = reparseLocatorArg(css.code);
+    expect(() => document.querySelectorAll(selector)).not.toThrow();
+    expect(document.querySelectorAll(selector)).toHaveLength(1);
+  });
+
+  it('escapes CSS-special characters in the dedicated #id card, not just the CSS fallback', () => {
+    document.body.innerHTML = '<span id="md:w-1/2">t</span>';
+    const el = document.getElementById('md:w-1/2');
+    const idLoc = E.generateLocators(el, DEFAULT_ATTRS).locators.find((l) => l.method === "locator('#id')");
+    const selector = reparseLocatorArg(idLoc.code);
+    expect(() => document.querySelectorAll(selector)).not.toThrow();
+    expect(document.querySelectorAll(selector)).toHaveLength(1);
+  });
+
+  it('uses getByTestId() for the standard attribute, which needs no CSS escaping at all', () => {
+    document.body.innerHTML = '<button data-testid=\'save "primary" btn\'>Save</button>';
+    const btn = document.querySelector('button');
+    const testid = E.generateLocators(btn, DEFAULT_ATTRS).locators.find((l) => l.target.kind === 'testid');
+    expect(testid.code).toBe('page.getByTestId(\'save "primary" btn\')');
+  });
+
+  it('escapes a double quote inside a custom (non data-testid) test attribute', () => {
+    document.body.innerHTML = '<button data-qa=\'save "primary" btn\'>Save</button>';
+    const btn = document.querySelector('button');
+    const testid = E.generateLocators(btn, DEFAULT_ATTRS).locators.find((l) => l.target.kind === 'testid');
+    const selector = reparseLocatorArg(testid.code);
+    expect(() => document.querySelectorAll(selector)).not.toThrow();
+    expect(document.querySelectorAll(selector)).toHaveLength(1);
+  });
+
+  it('escapes a double quote inside a name-attribute selector', () => {
+    document.body.innerHTML = '<input name=\'field "x"\'>';
+    const input = document.querySelector('input');
+    const nameLoc = E.generateLocators(input, DEFAULT_ATTRS).locators.find((l) => l.target.kind === 'name');
+    const selector = reparseLocatorArg(nameLoc.code);
+    expect(() => document.querySelectorAll(selector)).not.toThrow();
+    expect(document.querySelectorAll(selector)).toHaveLength(1);
+  });
+});
+
 describe('shadow DOM', () => {
   /** A labelled control inside a closed-off shadow tree, as a web component ships it. */
   function shadowInput(markup) {

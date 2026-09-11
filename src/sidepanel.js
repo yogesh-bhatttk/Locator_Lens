@@ -1,5 +1,6 @@
 let isInspecting = false;
 let isRecording = false;
+let isPaused = false; // recording is live but paused; only meaningful while isRecording
 let recordedActions = [];
 let recLastPageUrl = '';
 let _recorderSaveTimer = null;
@@ -316,13 +317,13 @@ function initRecorderControls() {
   const resumeBtn = document.getElementById('resumeRecordingBtn');
   if (pauseBtn) pauseBtn.addEventListener('click', () => {
     chrome.runtime.sendMessage({ type: 'PAUSE_RECORDING' });
-    pauseBtn.style.display = 'none';
-    if (resumeBtn) resumeBtn.style.display = '';
+    isPaused = true;
+    updateRecordUI();
   });
   if (resumeBtn) resumeBtn.addEventListener('click', () => {
     chrome.runtime.sendMessage({ type: 'RESUME_RECORDING' });
-    resumeBtn.style.display = 'none';
-    if (pauseBtn) pauseBtn.style.display = '';
+    isPaused = false;
+    updateRecordUI();
   });
 
   const assertToggle = document.getElementById('assertModeToggle');
@@ -333,12 +334,27 @@ function initRecorderControls() {
   });
   if (assertType) assertType.addEventListener('change', sendAssertMode);
 
+  const filterInput = document.getElementById('recFilterInput');
+  const filterClear = document.getElementById('recFilterClear');
+
+  // Undo/Redo always act on the *true* last action, regardless of the timeline
+  // filter — but that action can be filtered out of view, so the row list wouldn't
+  // change at all and the user would have no way to tell whether the click did
+  // anything. Dropping the filter is what actually shows the effect.
+  function clearRecFilter() {
+    if (!recFilter) return;
+    if (filterInput) filterInput.value = '';
+    recFilter = '';
+    if (filterClear) filterClear.style.display = 'none';
+  }
+
   const undoBtn = document.getElementById('undoActionBtn');
   const redoBtn = document.getElementById('redoActionBtn');
   if (undoBtn) undoBtn.addEventListener('click', () => {
     if (recordedActions.length === 0) return;
     const act = recordedActions.pop();
     if (act) { seenActionKeys.delete(dedupeKeyForAction(act)); recRedoStack.push(act); }
+    clearRecFilter();
     renderTimeline();
     updateCodePreview();
     scheduleRecorderPersist();
@@ -347,13 +363,12 @@ function initRecorderControls() {
     if (recRedoStack.length === 0) return;
     const act = recRedoStack.pop();
     if (act) { recordedActions.push(act); seenActionKeys.add(dedupeKeyForAction(act)); }
+    clearRecFilter();
     renderTimeline();
     updateCodePreview();
     scheduleRecorderPersist();
   });
 
-  const filterInput = document.getElementById('recFilterInput');
-  const filterClear = document.getElementById('recFilterClear');
   if (filterInput) filterInput.addEventListener('input', () => {
     if (_recFilterTimer) clearTimeout(_recFilterTimer);
     _recFilterTimer = setTimeout(() => {
@@ -674,6 +689,7 @@ document.addEventListener('DOMContentLoaded', () => {
     if (chrome.runtime.lastError) return;
     if (res && res.active) {
       isRecording = true;
+      isPaused = !!res.paused;
       updateRecordUI();
     }
   });
@@ -757,7 +773,7 @@ document.addEventListener('DOMContentLoaded', () => {
 
   document.getElementById('exportTestBtn').addEventListener('click', (e) => {
     const script = getExportedTestScript();
-    if (!script) return alert('Record some actions first, or paste a script into the editor.');
+    if (!script) return alert('Record at least one action first — the editor stays hidden until then.');
     copyToClipboard(script, e.target);
   });
 
@@ -790,7 +806,7 @@ document.addEventListener('DOMContentLoaded', () => {
     downloadTestBtn.addEventListener('click', () => {
       const script = getExportedTestScript();
       if (!script) {
-        alert('Record some actions first, or paste a script into the editor.');
+        alert('Record at least one action first — the editor stays hidden until then.');
         return;
       }
       const blob = new Blob([script], { type: 'text/plain;charset=utf-8' });
@@ -829,6 +845,7 @@ document.addEventListener('DOMContentLoaded', () => {
 // ── Recording Toggle (hoisted) ──
 function toggleRecording() {
   isRecording = !isRecording;
+  isPaused = false;
   updateRecordUI();
   chrome.runtime.sendMessage({ type: isRecording ? 'START_RECORDING' : 'STOP_RECORDING' });
 }
@@ -851,8 +868,8 @@ function updateRecordUI() {
     txt.textContent = 'Stop Recording';
     hint.style.display = 'block';
     if (ctrls) ctrls.style.display = 'flex';
-    if (pauseBtn) pauseBtn.style.display = '';
-    if (resumeBtn) resumeBtn.style.display = 'none';
+    if (pauseBtn) pauseBtn.style.display = isPaused ? 'none' : '';
+    if (resumeBtn) resumeBtn.style.display = isPaused ? '' : 'none';
   } else {
     btn.style.background = 'var(--error)';
     btn.style.color = 'var(--bg)';
@@ -862,6 +879,7 @@ function updateRecordUI() {
     txt.textContent = 'Start Recording';
     hint.style.display = 'none';
     if (ctrls) ctrls.style.display = 'none';
+    isPaused = false;
     // Reset assert-mode UI (content script resets its own state on stop/start).
     const at = document.getElementById('assertModeToggle');
     const ats = document.getElementById('assertTypeSelect');
@@ -1046,14 +1064,12 @@ function updateCodePreview() {
   previewEl.style.display = '';
 
   const next = generateTestScript();
-  if (document.activeElement === previewEl) {
-    // user is editing — only re-highlight if they haven't changed our last output
-    if (getPreviewText(previewEl) === lastSyncedPreviewScript) {
-      setPreviewCode(previewEl, next);
-      lastSyncedPreviewScript = next;
-    }
-    return;
-  }
+  // Only refresh when the box still shows exactly what we last generated. Gating this
+  // on focus instead used to only protect an edit while the editor had focus — Undo,
+  // Redo, remove-step, a framework/language switch, and a new recorded action all call
+  // this too, and any of them firing right after the user clicked away silently threw
+  // the edit out and replaced it with fresh codegen output.
+  if (getPreviewText(previewEl) !== lastSyncedPreviewScript) return;
 
   setPreviewCode(previewEl, next);
   lastSyncedPreviewScript = next;

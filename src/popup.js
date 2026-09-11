@@ -51,6 +51,15 @@ function openPanel() {
 }
 
 document.addEventListener('DOMContentLoaded', () => {
+  // Read the version from the manifest rather than hardcoding it here: a hardcoded
+  // string is exactly what went stale (this once read "v1.1.6" long after the
+  // extension had moved past 1.3.0), and nothing else in the build re-checks it.
+  const brandSub = document.getElementById('brandSub');
+  if (brandSub && chrome.runtime && typeof chrome.runtime.getManifest === 'function') {
+    const version = chrome.runtime.getManifest().version;
+    if (version) brandSub.textContent = `Smart locators · v${version}`;
+  }
+
   document.getElementById('inspectBtn').addEventListener('click', toggleInspect);
   document.getElementById('panelBtn').addEventListener('click', openPanel);
 

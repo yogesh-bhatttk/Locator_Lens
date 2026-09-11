@@ -308,14 +308,63 @@ describe('recording across a worker eviction', () => {
     const q = second.send({ type: 'GET_RECORDING_STATE' });
     expect(q.keptOpen).toBe(true);
     await flush();
-    expect(q.response).toEqual({ active: true, anyTab: true });
+    expect(q.response).toEqual({ active: true, anyTab: true, paused: false });
   });
 
   it('reports no recording when there never was one', async () => {
     const w = startWorker();
     const q = w.send({ type: 'GET_RECORDING_STATE' });
     await flush();
-    expect(q.response).toEqual({ active: false, anyTab: false });
+    expect(q.response).toEqual({ active: false, anyTab: false, paused: false });
+  });
+
+  // Content scripts track their own pause correctly, but a reopened panel only knows
+  // what GET_RECORDING_STATE tells it. Without tracking the pause here too, the panel
+  // always rendered "Pause" (i.e. "capture is live") on reopen even while the tab was
+  // genuinely paused, with no way back to Resume short of stopping the recording.
+  it('remembers that a recording is paused across a worker restart', async () => {
+    const first = startWorker();
+    first.send({ type: 'START_RECORDING' });
+    await flush();
+    first.send({ type: 'PAUSE_RECORDING' });
+    await flush();
+
+    const second = startWorker(first.session);
+    const q = second.send({ type: 'GET_RECORDING_STATE' });
+    await flush();
+    expect(q.response).toEqual({ active: true, anyTab: true, paused: true });
+  });
+
+  it('clears the paused flag on resume', async () => {
+    const first = startWorker();
+    first.send({ type: 'START_RECORDING' });
+    await flush();
+    first.send({ type: 'PAUSE_RECORDING' });
+    await flush();
+    first.send({ type: 'RESUME_RECORDING' });
+    await flush();
+
+    const second = startWorker(first.session);
+    const q = second.send({ type: 'GET_RECORDING_STATE' });
+    await flush();
+    expect(q.response).toEqual({ active: true, anyTab: true, paused: false });
+  });
+
+  it('does not carry a stale pause into the next recording session', async () => {
+    const first = startWorker();
+    first.send({ type: 'START_RECORDING' });
+    await flush();
+    first.send({ type: 'PAUSE_RECORDING' });
+    await flush();
+    first.send({ type: 'STOP_RECORDING' });
+    await flush();
+    first.send({ type: 'START_RECORDING' });
+    await flush();
+
+    const second = startWorker(first.session);
+    const q = second.send({ type: 'GET_RECORDING_STATE' });
+    await flush();
+    expect(q.response).toEqual({ active: true, anyTab: true, paused: false });
   });
 });
 
