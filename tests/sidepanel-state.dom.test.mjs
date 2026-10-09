@@ -671,3 +671,36 @@ describe('narrow layout', () => {
     expect(html).not.toMatch(/min-width:\s*320px/);
   });
 });
+
+// The timeline save is debounced by 200 ms; an edit made just before the panel closed
+// was never written and came back on reopen (found by the real-browser smoke test).
+describe('saving when the panel goes away', () => {
+  for (const event of ['pagehide', 'beforeunload']) {
+    it(`writes a pending save immediately on ${event}`, () => {
+      boot();
+      port({ type: 'RECORDED_ACTION', windowId: WIN, data: step({ action: 'click' }) });
+      expect(h.store[`llRecorderState:${WIN}`]).toBeUndefined(); // still debounced
+      window.dispatchEvent(new Event(event));
+      expect(h.store[`llRecorderState:${WIN}`].actions).toHaveLength(1);
+    });
+  }
+
+  it('writes a pending save when the panel is hidden', () => {
+    boot();
+    port({ type: 'RECORDED_ACTION', windowId: WIN, data: step({ action: 'click' }) });
+    Object.defineProperty(document, 'visibilityState', { value: 'hidden', configurable: true });
+    try {
+      document.dispatchEvent(new Event('visibilitychange'));
+    } finally {
+      delete document.visibilityState;
+    }
+    expect(h.store[`llRecorderState:${WIN}`].actions).toHaveLength(1);
+  });
+
+  it('does nothing extra when no save is pending', () => {
+    boot();
+    const before = JSON.stringify(h.store);
+    window.dispatchEvent(new Event('pagehide'));
+    expect(JSON.stringify(h.store)).toBe(before);
+  });
+});

@@ -675,6 +675,101 @@
     .el-chip-url { max-width: 100%; overflow-wrap: anywhere; }
     #recorderTimeline:focus { outline: none; }
 
+    /* ---------- settings disclosure ---------- */
+    .ll-settings { margin: 12px 16px 0; border: 1px solid var(--border); border-radius: var(--r-md); background: var(--surface); }
+    .ll-settings > summary { cursor: pointer; padding: 7px 10px; font-size: 11px; font-weight: 700; color: var(--text-muted); list-style-position: inside; }
+    .ll-settings > summary:focus-visible { outline: 2px solid var(--focus-ring); outline-offset: 2px; }
+    .ll-settings[open] > summary { border-bottom: 1px solid var(--border); }
+    .ll-settings-body { display: flex; flex-direction: column; gap: 8px; padding: 9px 10px; }
+    .ll-setting { display: flex; align-items: flex-start; gap: 8px; font-size: 11px; color: var(--text); cursor: pointer; }
+    .ll-setting input { accent-color: var(--brand); width: 14px; height: 14px; margin-top: 1px; flex-shrink: 0; cursor: pointer; }
+    .ll-setting small { display: block; color: var(--text-muted); font-size: 10px; }
+
+    .ll-perm-notice { display: flex; flex-direction: column; align-items: flex-start; gap: 6px; padding: 8px 10px; border: 1px solid var(--warn); border-radius: var(--r-md); background: var(--warn-soft); color: var(--warn); font-size: 11px; line-height: 1.45; }
+    .ll-perm-notice small { color: var(--text-muted); font-size: 10px; }
+    .ll-perm-notice-tl { margin: 0 16px 10px; }
+    .ll-perm-notice[hidden], .ll-perm-notice small[hidden] { display: none; }
+
+    /* ---------- replay ---------- */
+    .ll-replay-bar { display: flex; flex-direction: column; gap: 8px; padding: 0 16px 10px; }
+    .ll-replay-row { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
+    .ll-replay-btn { color: var(--brand); border-color: var(--brand-soft-2); background: var(--brand-soft); }
+    .ll-replay-btn:disabled, .ll-rec-ctl:disabled { opacity: .5; cursor: not-allowed; }
+    .ll-replay-stop { color: var(--danger); border-color: var(--danger); }
+    .ll-replay-opts { display: flex; flex-wrap: wrap; gap: 12px; }
+    .ll-replay-secrets { padding: 10px; border: 1px solid var(--warn); border-radius: var(--r-md); background: var(--warn-soft); font-size: 11px; }
+    .ll-replay-secrets p { margin-bottom: 8px; color: var(--text); line-height: 1.45; }
+    .ll-secret-field { display: flex; flex-direction: column; gap: 3px; margin-bottom: 8px; }
+    .ll-secret-field span { font-weight: 700; font-size: 10px; color: var(--text-muted); font-family: 'Cascadia Code', 'Fira Code', ui-monospace, monospace; }
+    .ll-secret-field input, .ll-pom-field input, .ll-pom-name {
+      height: 28px; padding: 0 8px; min-width: 0;
+      border: 1px solid var(--border); border-radius: var(--r-md);
+      background: var(--canvas); color: var(--text); font-size: 11px;
+    }
+    .ll-replay-summary { padding: 7px 10px; border-radius: var(--r-md); font-size: 11px; line-height: 1.45; overflow-wrap: anywhere; background: var(--info-soft); color: var(--info); }
+    .ll-replay-summary.ok { background: var(--success-soft); color: var(--success); }
+    .ll-replay-summary.err { background: var(--danger-soft); color: var(--danger); }
+    .ll-replay-summary.warn { background: var(--warn-soft); color: var(--warn); }
+    .ll-replay-summary[hidden], .ll-replay-secrets[hidden], .ll-suggest-bar[hidden], .ll-modal[hidden],
+    .ll-pom-status[hidden], #pomResult[hidden], .ll-pom-err[hidden], .ll-replay-stop[hidden] { display: none; }
+    .ll-replay-badge { font-size: 9px; font-weight: 700; text-transform: uppercase; letter-spacing: .04em; padding: 2px 7px; border-radius: var(--r-pill); white-space: nowrap; background: var(--surface-2); color: var(--text-muted); }
+    .ll-replay-badge.rs-running { background: var(--info-soft); color: var(--info); }
+    .ll-replay-badge.rs-passed { background: var(--success-soft); color: var(--success); }
+    .ll-replay-badge.rs-failed { background: var(--danger-soft); color: var(--danger); }
+    .ll-replay-badge.rs-skipped { background: var(--warn-soft); color: var(--warn); }
+    #recorderTimeline .ll-rec-step.replay-failed { border-color: var(--danger); box-shadow: 0 0 0 2px var(--danger-soft); }
+    #recorderTimeline .ll-rec-step.replay-running { border-color: var(--info); }
+    #recorderTimeline .ll-replay-error { margin: 0 12px 6px; padding: 5px 8px; border-radius: var(--r-sm); font-size: 10px; background: var(--danger-soft); color: var(--danger); overflow-wrap: anywhere; }
+    #recorderTimeline .replay-skipped .ll-replay-error { background: var(--warn-soft); color: var(--warn); }
+
+    /* ---------- suggested assertions ---------- */
+    .ll-suggest-bar { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin: 0 16px 10px; padding: 7px 10px; border: 1px dashed var(--accent); border-radius: var(--r-md); background: var(--accent-soft); font-size: 11px; color: var(--accent); }
+    .ll-suggest-bar span { flex: 1 1 140px; min-width: 0; }
+    #recorderTimeline .ll-rec-step.is-suggested { border-style: dashed; border-color: var(--accent); background: var(--accent-soft); }
+    #recorderTimeline .ll-suggest-badge { font-size: 9px; font-weight: 700; text-transform: uppercase; padding: 1px 6px; margin-left: 4px; border-radius: var(--r-pill); color: var(--accent); border: 1px solid var(--accent); }
+    #recorderTimeline .ll-rec-step-reason { font-size: 10px; color: var(--accent); padding: 0 12px 6px; }
+    #recorderTimeline .ll-rec-step-actions .accept-step-btn { color: var(--success); border-color: var(--success); }
+
+    /* ---------- step thumbnails ---------- */
+    #recorderTimeline .ll-thumb-slot { padding: 0 12px 6px; }
+    #recorderTimeline .ll-thumb-slot:empty { display: none; }
+    .ll-thumb-btn { display: inline-block; padding: 0; border: 1px solid var(--border); border-radius: var(--r-sm); background: var(--surface-2); line-height: 0; overflow: hidden; }
+    .ll-thumb-btn:hover { border-color: var(--brand); }
+    .ll-thumb-frame { position: relative; display: inline-block; line-height: 0; }
+    .ll-thumb-frame img { display: block; width: 72px; height: auto; }
+    .ll-thumb-frame.ll-thumb-frame-lg img { width: 100%; max-width: 100%; }
+    .ll-thumb-frame.ll-thumb-frame-lg { display: block; }
+    .ll-thumb-rect { position: absolute; border: 2px solid #E5484D; border-radius: 2px; box-shadow: 0 0 0 1px rgba(255,255,255,.7); pointer-events: none; }
+    .ll-thumb-frame:not(.ll-thumb-frame-lg) .ll-thumb-rect { border-width: 1px; }
+    .ll-thumb-rect[hidden] { display: none; }
+    .ll-modal { position: fixed; inset: 0; z-index: 50; display: flex; align-items: center; justify-content: center; padding: 16px; }
+    .ll-modal-backdrop { position: absolute; inset: 0; background: rgba(16, 15, 12, 0.6); }
+    .ll-modal-dialog { position: relative; width: 100%; max-height: 100%; overflow: auto; background: var(--surface); border: 1px solid var(--border-strong); border-radius: var(--r-lg); box-shadow: var(--shadow); }
+    .ll-modal-dialog:focus { outline: none; }
+    .ll-modal-head { display: flex; align-items: center; justify-content: space-between; gap: 8px; padding: 8px 10px; border-bottom: 1px solid var(--border); font-size: 11px; font-weight: 700; color: var(--text-strong); }
+    .ll-modal-head button { min-width: 28px; min-height: 28px; border: 1px solid var(--border); border-radius: var(--r-md); color: var(--text-muted); }
+    .ll-modal-body { padding: 10px; }
+
+    /* ---------- page object ---------- */
+    .ll-pom { margin: 0 16px 14px; padding: 12px; background: var(--surface); border: 1px solid var(--border); border-radius: var(--r-lg); box-shadow: var(--shadow-sm); display: flex; flex-direction: column; gap: 8px; }
+    .ll-pom-actions { display: flex; flex-wrap: wrap; gap: 8px; }
+    .ll-pom-hint { font-size: 11px; color: var(--text-muted); line-height: 1.45; }
+    .ll-pom-status { font-size: 11px; line-height: 1.45; padding: 6px 8px; border-radius: var(--r-md); background: var(--info-soft); color: var(--info); overflow-wrap: anywhere; }
+    .ll-pom-status.err { background: var(--danger-soft); color: var(--danger); }
+    .ll-pom-meta { font-size: 10px; color: var(--text-muted); overflow-wrap: anywhere; }
+    .ll-pom-field { display: flex; flex-direction: column; gap: 3px; font-size: 10px; font-weight: 700; color: var(--text-muted); }
+    .ll-pom-list { display: flex; flex-direction: column; gap: 6px; max-height: 320px; overflow-y: auto; }
+    .ll-pom-row { display: grid; grid-template-columns: auto 1fr; gap: 4px 8px; align-items: center; padding: 6px 8px; border: 1px solid var(--border); border-radius: var(--r-md); background: var(--canvas); }
+    .ll-pom-row.excluded { opacity: .55; }
+    .ll-pom-row input[type="checkbox"] { accent-color: var(--brand); width: 14px; height: 14px; }
+    .ll-pom-name { width: 100%; font-family: 'Cascadia Code', 'Fira Code', ui-monospace, monospace; }
+    .ll-pom-name[aria-invalid="true"] { border-color: var(--danger); }
+    .ll-pom-info { grid-column: 2; display: flex; flex-wrap: wrap; align-items: center; gap: 6px; font-size: 10px; color: var(--text-muted); min-width: 0; }
+    .ll-pom-kind { font-weight: 700; text-transform: uppercase; font-size: 9px; letter-spacing: .04em; }
+    .ll-pom-code { font-family: 'Cascadia Code', 'Fira Code', ui-monospace, monospace; overflow-wrap: anywhere; }
+    .ll-pom-err { grid-column: 2; font-size: 10px; color: var(--danger); }
+    .ll-pom-preview { max-height: 260px; overflow: auto; padding: 8px 10px; background: var(--code-bg); color: var(--code-text); border: 1px solid var(--border); border-radius: var(--r-md); font-size: 10px; line-height: 1.5; white-space: pre-wrap; word-break: break-word; }
+
     @media (max-width: 360px) {
       .tab .tab-label { display: none; }
     }
@@ -785,6 +880,32 @@
             <button class="clear-btn" id="clearBtn">✕ Reset</button>
           </div>
         </div>
+        <!-- PAGE OBJECT EXPORT -->
+        <div class="sec-label" id="pomLabel">Page Object</div>
+        <div class="ll-pom" id="pomSection">
+          <div class="ll-pom-hint">Turn a part of the page into a Page Object class for the selected framework.</div>
+          <div class="ll-pom-actions">
+            <button type="button" id="pomPickBtn" class="ll-rec-ctl" title="Hover a container on the page and click it (Esc cancels)">▣ Pick region</button>
+            <button type="button" id="pomScanBtn" class="ll-rec-ctl" title="Use every interactive element on the page">Whole page</button>
+          </div>
+          <div id="pomStatus" class="ll-pom-status" role="status" aria-live="polite" hidden></div>
+          <div id="pomResult" hidden>
+            <div class="ll-pom-meta" id="pomMeta"></div>
+            <label class="ll-pom-field" for="pomClassName">Class name
+              <input type="text" id="pomClassName" autocomplete="off" spellcheck="false" aria-describedby="pomClassError">
+            </label>
+            <div id="pomClassError" class="ll-pom-err" hidden></div>
+            <div id="pomFileHint" class="ll-pom-meta" aria-live="polite"></div>
+            <div id="pomList" class="ll-pom-list" role="list" aria-label="Page Object elements"></div>
+            <div id="pomValidation" class="ll-pom-err" role="status" aria-live="polite" hidden></div>
+            <div class="ll-pom-actions">
+              <button type="button" id="pomCopyBtn" class="ll-rec-ctl">📋 Copy</button>
+              <button type="button" id="pomDownloadBtn" class="ll-rec-ctl">⬇ Download</button>
+              <button type="button" id="pomCloseBtn" class="ll-rec-ctl" aria-label="Close the Page Object">✕ Close</button>
+            </div>
+            <pre id="pomPreview" class="ll-pom-preview" aria-label="Generated Page Object" tabindex="0"></pre>
+          </div>
+        </div>
       </div>
 
       <div class="tab-content" id="tab-recorder">
@@ -819,6 +940,46 @@
         </div>
         <div id="recPageUrl"
           style="display: none; padding: 0 16px 8px; font-size: 10px; color: var(--muted); line-height: 1.4; word-break: break-all;">
+        </div>
+
+        <!-- Replay (excludes suggested steps) -->
+        <div id="replayBar" class="ll-replay-bar">
+          <div class="ll-replay-row">
+            <button type="button" id="replayBtn" class="ll-rec-ctl ll-replay-btn" disabled>▶ Replay</button>
+            <button type="button" id="stopReplayBtn" class="ll-rec-ctl ll-replay-stop" hidden>■ Stop replay</button>
+          </div>
+          <div class="ll-replay-opts">
+            <label class="ll-rec-assert"><input type="checkbox" id="replayStopOnFailure" checked><span>Stop at first failure</span></label>
+            <label class="ll-rec-assert"><input type="checkbox" id="replaySlowMo"><span>Slow motion</span></label>
+          </div>
+          <div id="replaySecrets" class="ll-replay-secrets" hidden>
+            <form id="replaySecretsForm" autocomplete="off" aria-labelledby="replaySecretsIntro">
+              <p id="replaySecretsIntro">Some steps type sensitive values. Enter them for this replay only — they are never saved. Leave one empty to skip its steps.</p>
+              <div id="replaySecretsFields"></div>
+              <div class="ll-replay-row">
+                <button type="submit" id="replaySecretsStart" class="ll-rec-ctl ll-replay-btn">▶ Start replay</button>
+                <button type="button" id="replaySecretsCancel" class="ll-rec-ctl">Cancel</button>
+              </div>
+            </form>
+          </div>
+          <div id="replaySummary" class="ll-replay-summary" role="status" aria-live="polite" hidden></div>
+        </div>
+
+        <!-- Screenshot permission (shown once when a recording starts without it) -->
+        <div id="shotPermTimelineNotice" class="ll-perm-notice ll-perm-notice-tl" role="status" hidden>
+          <span>Step screenshots need permission to capture pages.</span>
+          <small class="ll-perm-declined" hidden>Without it, thumbnails appear only on pages where Locatra was opened from the toolbar.</small>
+          <div class="ll-replay-row">
+            <button type="button" id="shotPermTimelineGrantBtn" class="ll-rec-ctl ll-perm-grant">Grant access</button>
+            <button type="button" id="shotPermTimelineDismiss" class="ll-rec-ctl" aria-label="Dismiss the screenshot permission notice">✕</button>
+          </div>
+        </div>
+
+        <!-- Suggested assertions waiting for review -->
+        <div id="suggestionsBar" class="ll-suggest-bar" hidden>
+          <span id="suggestionsText"></span>
+          <button type="button" id="reviewSuggestionsBtn" class="ll-rec-ctl">Review</button>
+          <button type="button" id="acceptAllSuggestionsBtn" class="ll-rec-ctl">✓ Accept all</button>
         </div>
 
         <!-- Action Timeline — collapsible -->
@@ -857,11 +1018,39 @@
           </div>
           <button class="clear-btn" id="clearTimelineBtn" style="margin-top: 8px;">✕ Clear Timeline</button>
         </div>
+
+        <details class="ll-settings" id="recSettings">
+          <summary>Settings</summary>
+          <div class="ll-settings-body">
+            <label class="ll-setting"><input type="checkbox" id="settingAutoAssertions" checked>
+              <span>Suggest assertions<small>Propose URL and feedback-message checks while recording. They wait for your review.</small></span></label>
+            <label class="ll-setting"><input type="checkbox" id="settingStepScreenshots" checked>
+              <span>Step screenshots<small>Keep a small screenshot of each step. Stored only in this browser.</small></span></label>
+            <div id="shotPermNotice" class="ll-perm-notice" role="status" hidden>
+              <span>Step screenshots need permission to capture pages.</span>
+              <small class="ll-perm-declined" hidden>Without it, thumbnails appear only on pages where Locatra was opened from the toolbar.</small>
+              <button type="button" id="shotPermGrantBtn" class="ll-rec-ctl ll-perm-grant">Grant access</button>
+            </div>
+          </div>
+        </details>
       </div>
     </div>
   </div>
 
+  <!-- Step screenshot preview -->
+  <div id="thumbModal" class="ll-modal" hidden>
+    <div class="ll-modal-backdrop" id="thumbModalBackdrop"></div>
+    <div class="ll-modal-dialog" role="dialog" aria-modal="true" aria-labelledby="thumbModalTitle" tabindex="-1">
+      <div class="ll-modal-head">
+        <span id="thumbModalTitle">Step screenshot</span>
+        <button type="button" id="thumbModalClose" aria-label="Close preview">✕</button>
+      </div>
+      <div class="ll-modal-body" id="thumbModalBody"></div>
+    </div>
+  </div>
+
   <script src="codegen.js"></script>
+  <script src="thumbs-store.js"></script>
   <script src="sidepanel.js"></script>
 </body>
 

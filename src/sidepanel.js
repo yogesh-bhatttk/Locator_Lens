@@ -4,6 +4,7 @@ let isPaused = false; // recording is live but paused; only meaningful while isR
 let recordedActions = [];
 let recLastPageUrl = '';
 let _recorderSaveTimer = null;
+let _recorderSavePending = false;
 const LL_RECORDER_STATE_KEY = 'llRecorderState';
 
 // ── Output target (framework + language) ─────────────────────────────────────
@@ -18,6 +19,37 @@ let recFilter = '';          // timeline filter text
 let recRedoStack = [];       // actions removed via undo, available to redo
 let timelineExpanded = false; // collapsible timeline (collapsed by default)
 let _recFilterTimer = null;
+
+// ── Feature state (declared up front: load-time callbacks can reach these) ────
+// Settings shared with the content script / worker (chrome.storage.local).
+const LL_SETTINGS_KEY = 'llSettings';
+let llSettings = { autoAssertions: true, stepScreenshots: true };
+// captureVisibleTab needs <all_urls> (optional, requested at runtime) or an
+// activeTab grant. null = not known yet.
+const LL_SHOT_ORIGINS = ['<all_urls>'];
+let screenshotPermission = null;
+let screenshotPermDeclined = false;
+let _shotNoticeShownOnce = false;
+let _wasRecording = false;
+
+// Replay: one run at a time. Statuses are keyed by the step object itself, so a
+// step removed or a suggestion accepted mid-run never shifts another step's badge.
+const REPLAY_STATUSES = ['pending', 'running', 'passed', 'failed', 'skipped'];
+const REPLAY_WATCHDOG_MS = 30000;
+const REPLAY_STOP_GRACE_MS = 3000;
+let replayRun = null;
+let replayStatuses = new Map();
+let replaySecretsOpen = false;
+
+// Page Object export (in-memory only).
+let pomModel = null;
+let _pomLastResultJson = '';
+
+// Step thumbnails: eventId → { url, width, height } (null = nothing stored yet).
+const thumbCache = new Map();
+const _thumbGen = new Map();
+const _thumbInFlight = new Set();
+let _thumbModalOpener = null;
 
 // ── Window scoping ───────────────────────────────────────────────────────────
 // Each browser window has its own panel, and the background keeps one recording
@@ -425,6 +457,7 @@ function applyOutputChange() {
   if (lastResultData) renderResults(lastResultData);
   renderTimeline();
   updateCodePreview();
+  renderPomPreview();
   scheduleRecorderPersist();
 }
 
@@ -497,6 +530,7 @@ function initOutputSelectors() {
       if (lastResultData) renderResults(lastResultData);
       renderTimeline();
       updateCodePreview();
+      renderPomPreview();
       markOutputReady();
     });
   } else {
@@ -610,6 +644,8 @@ function initRecorderControls() {
 
   const undoBtn = document.getElementById('undoActionBtn');
   const redoBtn = document.getElementById('redoActionBtn');
+  // An undone step stays restorable through Redo, so its screenshot is kept until
+  // the redo history is dropped (see appendToRecorder / discardThumbs).
   if (undoBtn) undoBtn.addEventListener('click', () => {
     if (recordedActions.length === 0) return;
     const act = recordedActions.pop();
@@ -933,6 +969,11 @@ function handleRuntimeMessage(msg) {
   if (msg.type === 'RECORDED_ACTION_SUPERSEDE') {
     receiveSupersede(supersedeIdsOf(msg));
   }
+  if (msg.type === 'REPLAY_PROGRESS') handleReplayProgress(msg);
+  if (msg.type === 'REPLAY_DONE') handleReplayDone(msg);
+  if (msg.type === 'POM_RESULT' && msg.data) handlePomResult(msg.data);
+  if (msg.type === 'POM_PICK_CANCELLED') handlePomPickCancelled();
+  if (msg.type === 'STEP_THUMBNAIL') onStepThumbnail(msg.eventId);
 }
 
 // Steps that arrive before the persisted timeline has been restored are held here
@@ -980,10 +1021,51 @@ function isFromContentScript(sender) {
 // tag and would reach every window's panel. The background relays everything the
 // panel needs over the port, tagged with its window, so direct ones are ignored.
 chrome.runtime.onMessage.addListener((msg, sender) => {
-  if (isFromContentScript(sender)) return;
+  if (isFromContentScript(sender)) {
+    // Exception: the region picker's Esc. It is idempotent, and sender.tab tells us
+    // whether it came from one of this window's tabs.
+    if (msg && msg.type === 'POM_PICK_CANCELLED' && sender.tab) {
+      whenWindowId((windowId) => {
+        if (typeof windowId !== 'number' || sender.tab.windowId === windowId) handlePomPickCancelled();
+      });
+    }
+    return;
+  }
   if (!msg) return;
   whenWindowId(() => handleRuntimeMessage(msg));
 });
+
+// While the screenshot preview is open, focus that wanders out of it is pulled back.
+document.addEventListener('focusin', (e) => {
+  if (!isThumbModalOpen()) return;
+  const modal = document.getElementById('thumbModal');
+  const close = document.getElementById('thumbModalClose');
+  if (modal && close && !modal.contains(e.target)) close.focus();
+});
+
+// A grant/revoke made elsewhere (another panel, the browser's extension page).
+try {
+  if (chrome.permissions) {
+    ['onAdded', 'onRemoved'].forEach((ev) => {
+      const e = chrome.permissions[ev];
+      if (e && typeof e.addListener === 'function') e.addListener(() => checkScreenshotPermission());
+    });
+  }
+} catch (e) {}
+
+// Settings can change from another window's panel; keep this one's toggles honest.
+try {
+  if (chrome.storage && chrome.storage.onChanged && typeof chrome.storage.onChanged.addListener === 'function') {
+    chrome.storage.onChanged.addListener((changes, area) => {
+      if (area && area !== 'local') return;
+      if (changes && changes[LL_SETTINGS_KEY]) {
+        llSettings = normalizeSettings(changes[LL_SETTINGS_KEY].newValue);
+        applySettingsUI();
+        updateScreenshotNotices();
+      }
+    });
+  }
+} catch (e) {}
 
 // C7: the background buffers RECORDED_ACTIONs per window while no panel is open
 // and replays them after PANEL_HELLO. It may drop the buffer once we acknowledge,
@@ -1022,6 +1104,8 @@ function connectSidePanelBridge() {
     port.onDisconnect.addListener(() => {
       void chrome.runtime.lastError;
       if (sidePanelPort === port) sidePanelPort = null;
+      // The worker aborts a window's replay when its panel port goes away.
+      if (replayRun) finishReplay('interrupted', 'the connection to the extension was lost');
       setTimeout(connectSidePanelBridge, 400);
     });
     whenWindowId((windowId) => {
@@ -1167,15 +1251,32 @@ document.addEventListener('DOMContentLoaded', () => {
     sendPanelHeartbeat();
     refreshRecordingState();
   }, 4000);
-  window.addEventListener('beforeunload', () => clearInterval(panelHeartbeatId));
+  window.addEventListener('beforeunload', () => {
+    clearInterval(panelHeartbeatId);
+    flushRecorderPersist();
+    // The redo history dies with the panel, so its screenshots can go (best effort;
+    // anything missed is pruned by age in the worker).
+    discardThumbs(recRedoStack);
+  });
+  window.addEventListener('pagehide', flushRecorderPersist);
   document.addEventListener('visibilitychange', () => {
     if (document.visibilityState === 'visible') refreshRecordingState();
+    else flushRecorderPersist();
   });
 
   // ── Recorder Controls ──
   document.getElementById('recordBtn').addEventListener('click', toggleRecording);
 
   document.getElementById('clearTimelineBtn').addEventListener('click', () => {
+    if (replayRun) stopReplay(true);
+    // Screenshots go with the timeline. THUMBS_CLEAR covers this window; the explicit
+    // ids also cover a timeline adopted from a window that no longer exists.
+    const thumbIds = eventIdsOf(recordedActions.concat(recRedoStack));
+    if (thumbIds.length) sendToBackground({ type: 'THUMBS_DELETE', eventIds: thumbIds });
+    sendToBackground({ type: 'THUMBS_CLEAR' });
+    releaseAllThumbs();
+    replayStatuses = new Map();
+    setReplaySummary('', '');
     recordedActions = [];
     recRedoStack = [];
     seenActionKeys.clear();
@@ -1238,12 +1339,29 @@ document.addEventListener('DOMContentLoaded', () => {
   }
 
   document.getElementById('recorderTimeline').addEventListener('click', (e) => {
+    const thumbBtn = e.target.closest ? e.target.closest('.ll-thumb-btn') : null;
+    if (thumbBtn) {
+      openThumbPreview(thumbBtn.getAttribute('data-eid'), thumbBtn);
+      return;
+    }
+    if (e.target.classList.contains('accept-step-btn')) {
+      acceptSuggestion(parseInt(e.target.getAttribute('data-index'), 10));
+      return;
+    }
+    if (e.target.classList.contains('dismiss-step-btn')) {
+      dismissSuggestion(parseInt(e.target.getAttribute('data-index'), 10));
+      return;
+    }
     // 1. Handle step removal
     if (e.target.classList.contains('remove-step-btn')) {
       const idx = parseInt(e.target.getAttribute('data-index'), 10);
       if (isNaN(idx) || idx < 0 || idx >= recordedActions.length) return;
       const removed = recordedActions.splice(idx, 1)[0];
-      if (removed) forgetActionKey(removed);
+      if (removed) {
+        forgetActionKey(removed);
+        // Removed with ✕ (not Undo): nothing can bring it back, so neither can its screenshot.
+        discardThumbs([removed]);
+      }
 
       renderTimeline();
       updateCodePreview();
@@ -1257,6 +1375,12 @@ document.addEventListener('DOMContentLoaded', () => {
         handleCopy(e.target);
     }
   });
+
+  initSettings();
+  initReplayControls();
+  initSuggestionControls();
+  initPomControls();
+  initThumbModal();
 
   loadRecorderState();
 });
@@ -1311,7 +1435,15 @@ function updateRecordUI() {
   const pauseBtn = document.getElementById('pauseRecordingBtn');
   const resumeBtn = document.getElementById('resumeRecordingBtn');
 
-  if (btn && !_recToggleBusy) btn.disabled = false;
+  // A replay drives the page; starting/stopping a recording underneath it would
+  // fight the worker's own pause-and-restore around the run.
+  if (btn && !_recToggleBusy) btn.disabled = !!replayRun;
+  if (isRecording && !_wasRecording) { _wasRecording = true; onRecordingStarted(); }
+  else if (!isRecording && _wasRecording) {
+    _wasRecording = false;
+    const tl = document.getElementById('shotPermTimelineNotice');
+    if (tl) tl.hidden = true;
+  }
 
   if (isRecording) {
     btn.style.background = 'var(--surf2)';
@@ -1341,6 +1473,7 @@ function updateRecordUI() {
     if (ats) ats.style.display = 'none';
     if (recordedActions.length > 0) updateCodePreview();
   }
+  updateReplayUI();
 }
 
 // ── Recorder timeline UI helpers ──
@@ -1372,6 +1505,9 @@ function renderTimeline() {
 
   const countEl = document.getElementById('recCount');
   updateUndoRedoButtons();
+  updateSuggestionsBar();
+  updateReplayUI();
+  pruneThumbCache();
 
   if (recordedActions.length === 0) {
     safeRender(timelineList, `<div class="ll-rec-empty">🎬 Hit <strong style="color: var(--primary);">Start Recording</strong> then use the page. Clicks, typing, hovers (Alt+click), and assertions are captured.</div>`);
@@ -1395,9 +1531,11 @@ function renderTimeline() {
   try {
     html = recordedActions.map((act, i) => {
       const isAssert = act.action === 'assert';
+      const isSuggested = !!act.suggested;
       let codeStr = '';
       try {
-        codeStr = buildActionCode(act);
+        // A suggestion previews the line it would add once accepted.
+        codeStr = buildActionCode(isSuggested ? Object.assign({}, act, { suggested: false }) : act);
       } catch (err) {
         codeStr = String(act.fullCode || '// (unavailable)').slice(0, 500);
       }
@@ -1417,16 +1555,40 @@ function renderTimeline() {
         : esc(String(act.action || 'step').toUpperCase());
       const valuePreview = valueStr.slice(0, 80);
       const actionName = String(act.action || 'step') + (isAssert ? ' ' + String(act.assertType || 'toBeVisible') : '');
+      const rs = replayStatuses.get(act);
+      const rsName = rs && REPLAY_STATUSES.indexOf(rs.status) !== -1 ? rs.status : '';
+      const classes = 'll-rec-step' + (isAssert ? ' is-assert' : '') + (isSuggested ? ' is-suggested' : '') +
+        (rsName ? ' replay-' + rsName : '');
+      // Suggestions are not part of the script yet, so they offer Accept/Dismiss
+      // rather than Copy/Remove.
+      const buttons = isSuggested
+        ? `<button type="button" class="clear-btn accept-step-btn" data-index="${i}" aria-label="Accept suggested step ${i + 1}: ${esc(actionName)}" title="Add this check to the test">✓ Accept</button>
+             <button type="button" class="clear-btn dismiss-step-btn" data-index="${i}" aria-label="Dismiss suggested step ${i + 1}: ${esc(actionName)}" title="Discard this suggestion">✕ Dismiss</button>`
+        : `<button type="button" class="clear-btn copy-btn" data-code="${esc(codeStr)}" aria-label="Copy code for step ${i + 1}: ${esc(actionName)}">Copy</button>
+             <button type="button" class="clear-btn remove-step-btn" data-index="${i}" aria-label="Remove step ${i + 1}: ${esc(actionName)}" title="Remove step ${i + 1}">✕</button>`;
+      const badge = rsName
+        ? `<span class="ll-replay-badge rs-${rsName}" title="Replay: ${rsName}">${esc(REPLAY_BADGE_TEXT[rsName])}</span>`
+        : '';
+      const reason = isSuggested && act.reason ? `<div class="ll-rec-step-reason">💡 ${esc(String(act.reason).slice(0, 200))}</div>` : '';
+      const replayErr = rs && rs.error && (rsName === 'failed' || rsName === 'skipped')
+        ? `<div class="ll-replay-error">${esc(String(rs.error).slice(0, 500))}</div>`
+        : '';
+      const thumbSlot = !isSuggested && typeof act.eventId === 'string' && act.eventId
+        ? `<div class="ll-thumb-slot" data-eid="${esc(act.eventId)}"></div>`
+        : '';
 
       return `
-      <div class="ll-rec-step${isAssert ? ' is-assert' : ''}">
+      <div class="${classes}" data-step-index="${i}">
         <div class="ll-rec-step-head">
-           <span class="ll-rec-step-label">${icon} #${i + 1} ${label}</span>
+           <span class="ll-rec-step-label">${icon} #${i + 1} ${label}${isSuggested ? ' <span class="ll-suggest-badge">Suggested</span>' : ''}</span>
+           ${badge}
            <div class="ll-rec-step-actions">
-             <button type="button" class="clear-btn copy-btn" data-code="${esc(codeStr)}" aria-label="Copy code for step ${i + 1}: ${esc(actionName)}">Copy</button>
-             <button type="button" class="clear-btn remove-step-btn" data-index="${i}" aria-label="Remove step ${i + 1}: ${esc(actionName)}" title="Remove step ${i + 1}">✕</button>
+             ${buttons}
            </div>
         </div>
+        ${reason}
+        ${replayErr}
+        ${thumbSlot}
         ${act.sensitive
           ? `<div class="ll-rec-step-value">value: ${esc(valuePreview)}</div>`
           : (valueStr ? `<div class="ll-rec-step-value">value: "${esc(valuePreview)}"</div>` : '')}
@@ -1449,6 +1611,7 @@ function renderTimeline() {
   }
 
   safeRender(timelineList, html);
+  hydrateThumbs(timelineList);
 }
 
 
@@ -1482,7 +1645,8 @@ function buildActionCode(act) {
   // which is correct for all cases. (locators[0] is always a top semantic locator,
   // so codegen reproduces the Playwright line identically.)
   if (typeof LLCodegen !== 'undefined') {
-    const needsLoc = ['click', 'dblclick', 'check', 'uncheck', 'fill', 'selectOption', 'hover', 'assert', 'upload'].indexOf(act.action) !== -1;
+    const needsLoc = ['click', 'dblclick', 'check', 'uncheck', 'fill', 'selectOption', 'hover', 'assert', 'upload'].indexOf(act.action) !== -1 &&
+      !isUrlAssert(act);
     if (needsLoc && !act.target) {
       // Older recording captured before structured targets existed. Its fullCode is
       // Playwright JS/TS, so it is only usable verbatim there.
@@ -1509,6 +1673,9 @@ function buildActionCode(act) {
     case 'selectOption': return `await ${locator}.selectOption('${valStr.replace(/'/g, "\\'")}');`;
     case 'uncheck': return `await ${locator}.uncheck();`;
     case 'press': return `await page.keyboard.press(${JSON.stringify(valStr)});`;
+    case 'assert':
+      if (isUrlAssert(act)) return `await expect(page).toHaveURL(${JSON.stringify(valStr)});`;
+      return act.fullCode || `await expect(${locator}).toBeVisible();`;
     default: return act.fullCode || `await ${locator}.click();`;
   }
 }
@@ -1517,9 +1684,10 @@ function generateTestScript() {
   if (typeof LLCodegen !== 'undefined') {
     // buildActionCode() controls per-line fidelity; wrapScript() supplies the
     // framework/language-correct file scaffold (imports, harness, indentation).
-    return LLCodegen.wrapScript(recordedActions.map(buildActionCode), outFramework, outLanguage, recordedActions);
+    const steps = committedActions();
+    return LLCodegen.wrapScript(steps.map(buildActionCode), outFramework, outLanguage, steps);
   }
-  const lines = recordedActions.map(act => `  ${buildActionCode(act)}`).join('\n');
+  const lines = committedActions().map(act => `  ${buildActionCode(act)}`).join('\n');
   return `import { test, expect } from '@playwright/test';
 
 test('recorded test', async ({ page }) => {
@@ -1531,11 +1699,12 @@ ${lines}
 /** Text shown in the editor, or generated from the timeline if the editor is empty. */
 function getExportedTestScript() {
   const ta = document.getElementById('codePreview');
+  const hasSteps = committedActions().length > 0;
   if (!ta || ta.style.display === 'none') {
-    return recordedActions.length ? generateTestScript() : '';
+    return hasSteps ? generateTestScript() : '';
   }
   const v = getPreviewText(ta).trim();
-  return v || (recordedActions.length ? generateTestScript() : '');
+  return v || (hasSteps ? generateTestScript() : '');
 }
 
 /** Last script we pushed into the editor (so we can tell a hand edit from our own output). */
@@ -1545,7 +1714,7 @@ let lastSyncedStepKeys = [];
 
 function markEditorSynced(script) {
   lastSyncedPreviewScript = script;
-  lastSyncedStepKeys = recordedActions.map(dedupeKeyForAction);
+  lastSyncedStepKeys = committedActions().map(dedupeKeyForAction);
   updateScriptStaleNotice();
 }
 
@@ -1559,7 +1728,7 @@ function editorHasUserEdits() {
 
 /** Replace the editor with freshly generated code (discarding hand edits). */
 function regenerateEditorFromTimeline(focus) {
-  if (recordedActions.length === 0) return;
+  if (committedActions().length === 0) return;
   const ta = document.getElementById('codePreview');
   if (!ta) return;
   const next = generateTestScript();
@@ -1579,7 +1748,7 @@ function updateScriptStaleNotice() {
   const txt = document.getElementById('scriptStaleText');
   if (!editorHasUserEdits()) { box.hidden = true; return; }
   const synced = new Set(lastSyncedStepKeys);
-  const current = recordedActions.map(dedupeKeyForAction);
+  const current = committedActions().map(dedupeKeyForAction);
   const currentSet = new Set(current);
   const fresh = current.filter(k => !synced.has(k)).length;
   const gone = lastSyncedStepKeys.filter(k => !currentSet.has(k)).length;
@@ -1600,7 +1769,8 @@ function updateCodePreview() {
   const labelEl = document.getElementById('codePreviewLabel');
   if (!previewEl || !labelEl) return;
 
-  if (recordedActions.length === 0) {
+  // Suggestions alone don't make a script: they are excluded until accepted.
+  if (committedActions().length === 0) {
     previewEl.style.display = 'none';
     labelEl.style.display = 'none';
     previewEl.textContent = '';
@@ -1677,7 +1847,17 @@ function scheduleRecorderPersist() {
     return;
   }
   clearTimeout(_recorderSaveTimer);
+  _recorderSavePending = true;
   _recorderSaveTimer = setTimeout(persistRecorderState, 200);
+}
+
+// The save above is debounced, so an edit made in the last 200 ms before the panel
+// closes (a dismissed suggestion, a removed step) was never written and came back on
+// reopen. Write it now instead when the panel is going away.
+function flushRecorderPersist() {
+  if (!_recorderSavePending) return;
+  clearTimeout(_recorderSaveTimer);
+  persistRecorderState();
 }
 
 // chrome.storage.local is a 10 MB budget shared with everything else the extension
@@ -1699,6 +1879,7 @@ function removePersistedRecorderState() {
 }
 
 function persistRecorderState() {
+  _recorderSavePending = false;
   if (!chrome.storage || !chrome.storage.local) return;
   // Until the saved timeline is restored, memory holds only part of it — saving
   // now would overwrite the stored timeline with that fragment.
@@ -1841,7 +2022,7 @@ function applyRestoredState(s) {
 
   const ta = document.getElementById('codePreview');
   const label = document.getElementById('codePreviewLabel');
-  if (ta && recordedActions.length > 0) {
+  if (ta && committedActions().length > 0) {
     const generated = generateTestScript();
     if (savedCode.trim() !== '' && savedCode !== generated) {
       // A hand-edited script: show it, and remember what it was generated from so
@@ -1850,7 +2031,7 @@ function applyRestoredState(s) {
       lastSyncedPreviewScript = generated;
       lastSyncedStepKeys = Array.isArray(s.syncedStepKeys) && s.syncedStepKeys.length
         ? s.syncedStepKeys.slice()
-        : recordedActions.map(dedupeKeyForAction);
+        : committedActions().map(dedupeKeyForAction);
       ta.style.display = '';
       if (label) label.style.display = '';
     } else {
@@ -1939,9 +2120,11 @@ function removeSupersededSteps(ids) {
   if (!set.size) return 0;
   // A superseded click that arrives after its dblclick must stay out too.
   set.forEach(id => seenActionKeys.add('eid:' + id));
-  const before = recordedActions.length;
-  recordedActions = recordedActions.filter(a => !(a && a.eventId != null && set.has(String(a.eventId))));
-  return before - recordedActions.length;
+  const removed = recordedActions.filter(a => a && a.eventId != null && set.has(String(a.eventId)));
+  if (!removed.length) return 0;
+  recordedActions = recordedActions.filter(a => removed.indexOf(a) === -1);
+  discardThumbs(removed);
+  return removed.length;
 }
 
 function appendToRecorder(actionData) {
@@ -1964,7 +2147,10 @@ function appendToRecorder(actionData) {
 
   if (Array.isArray(act.supersedes) && act.supersedes.length) removeSupersededSteps(act.supersedes);
 
-  recRedoStack = []; // a newly captured action invalidates the redo history
+  // A newly captured action invalidates the redo history — and with it the last
+  // chance to bring those steps (and their screenshots) back.
+  if (recRedoStack.length) discardThumbs(recRedoStack);
+  recRedoStack = [];
   recordedActions.push(act);
   if (act.url && typeof act.url === 'string') {
     recLastPageUrl = act.url;
@@ -1977,4 +2163,1254 @@ function appendToRecorder(actionData) {
   // Auto-scroll timeline to bottom
   const timelineList = document.getElementById('recorderTimeline');
   if (timelineList) timelineList.scrollTop = timelineList.scrollHeight;
+}
+
+// ══ Settings (llSettings) ═════════════════════════════════════════════════════
+// { autoAssertions, stepScreenshots } — both default on; a missing key or field
+// means the default. The content script and worker read the same key.
+function normalizeSettings(raw) {
+  const s = raw && typeof raw === 'object' ? raw : {};
+  return {
+    autoAssertions: s.autoAssertions !== false,
+    stepScreenshots: s.stepScreenshots !== false
+  };
+}
+
+function applySettingsUI() {
+  const a = document.getElementById('settingAutoAssertions');
+  const s = document.getElementById('settingStepScreenshots');
+  if (a) a.checked = llSettings.autoAssertions;
+  if (s) s.checked = llSettings.stepScreenshots;
+}
+
+function saveSettingsFromUI() {
+  const a = document.getElementById('settingAutoAssertions');
+  const s = document.getElementById('settingStepScreenshots');
+  llSettings = normalizeSettings({
+    autoAssertions: a ? a.checked : llSettings.autoAssertions,
+    stepScreenshots: s ? s.checked : llSettings.stepScreenshots
+  });
+  if (chrome.storage && chrome.storage.local) {
+    chrome.storage.local.set({ [LL_SETTINGS_KEY]: Object.assign({}, llSettings) }, () => { void chrome.runtime.lastError; });
+  }
+}
+
+function initSettings() {
+  const auto = document.getElementById('settingAutoAssertions');
+  if (auto) auto.addEventListener('change', saveSettingsFromUI);
+  const shots = document.getElementById('settingStepScreenshots');
+  if (shots) shots.addEventListener('change', () => {
+    // The permission prompt needs this user gesture: ask before anything async.
+    if (shots.checked && screenshotPermission !== true) requestScreenshotPermission();
+    saveSettingsFromUI();
+    updateScreenshotNotices();
+  });
+  ['shotPermGrantBtn', 'shotPermTimelineGrantBtn'].forEach((id) => {
+    const b = document.getElementById(id);
+    if (b) b.addEventListener('click', () => requestScreenshotPermission());
+  });
+  const dismiss = document.getElementById('shotPermTimelineDismiss');
+  if (dismiss) dismiss.addEventListener('click', () => {
+    const n = document.getElementById('shotPermTimelineNotice');
+    if (n) n.hidden = true;
+  });
+  applySettingsUI();
+  if (chrome.storage && chrome.storage.local) {
+    chrome.storage.local.get(LL_SETTINGS_KEY, (res) => {
+      void chrome.runtime.lastError;
+      llSettings = normalizeSettings(res && res[LL_SETTINGS_KEY]);
+      applySettingsUI();
+      updateScreenshotNotices();
+    });
+  }
+  checkScreenshotPermission();
+}
+
+// ── Screenshot permission ────────────────────────────────────────────────────
+function permissionsApi() {
+  return chrome.permissions && typeof chrome.permissions.contains === 'function' ? chrome.permissions : null;
+}
+
+/** Re-read whether <all_urls> is granted; `cb(granted|null)` after the notices update. */
+function checkScreenshotPermission(cb) {
+  const done = (granted) => {
+    if (typeof granted === 'boolean') {
+      screenshotPermission = granted;
+      if (granted) screenshotPermDeclined = false;
+    }
+    updateScreenshotNotices();
+    if (typeof cb === 'function') cb(screenshotPermission);
+  };
+  const api = permissionsApi();
+  if (api) {
+    try {
+      api.contains({ origins: LL_SHOT_ORIGINS }, (granted) => {
+        void chrome.runtime.lastError;
+        done(typeof granted === 'boolean' ? granted : null);
+      });
+      return;
+    } catch (e) {}
+  }
+  sendToBackground({ type: 'GET_SCREENSHOT_PERMISSION' }, (res) => {
+    done(res && typeof res.granted === 'boolean' ? res.granted : null);
+  });
+}
+
+/**
+ * Ask for <all_urls>. Must run synchronously inside a click/change handler —
+ * browsers only show the prompt for a user gesture.
+ */
+function requestScreenshotPermission() {
+  const api = chrome.permissions && typeof chrome.permissions.request === 'function' ? chrome.permissions : null;
+  if (!api) return;
+  let settled = false;
+  const after = (granted) => {
+    if (settled) return;
+    settled = true;
+    void chrome.runtime.lastError;
+    screenshotPermDeclined = granted !== true;
+    if (granted === true) screenshotPermission = true;
+    checkScreenshotPermission();
+  };
+  try {
+    const p = api.request({ origins: LL_SHOT_ORIGINS }, after);
+    // Promise-style implementations (Firefox's) may ignore the callback.
+    if (p && typeof p.then === 'function') p.then(after, () => after(false));
+  } catch (e) {
+    after(false);
+  }
+}
+
+function screenshotNoticeNeeded() {
+  return llSettings.stepScreenshots && screenshotPermission === false;
+}
+
+function updateScreenshotNotices() {
+  const need = screenshotNoticeNeeded();
+  const settingsNotice = document.getElementById('shotPermNotice');
+  if (settingsNotice) settingsNotice.hidden = !need;
+  const tl = document.getElementById('shotPermTimelineNotice');
+  if (tl && !need) tl.hidden = true;
+  document.querySelectorAll('.ll-perm-declined').forEach((el) => { el.hidden = !(need && screenshotPermDeclined); });
+}
+
+/** A recording just started: point out missing screenshot access once per panel session. */
+function onRecordingStarted() {
+  if (_shotNoticeShownOnce || !llSettings.stepScreenshots) return;
+  checkScreenshotPermission(() => {
+    if (_shotNoticeShownOnce || !screenshotNoticeNeeded()) return;
+    _shotNoticeShownOnce = true;
+    const tl = document.getElementById('shotPermTimelineNotice');
+    if (tl) tl.hidden = false;
+  });
+}
+
+// ══ F3: suggested assertions ══════════════════════════════════════════════════
+// The content script proposes checks (suggested:true). They show in the timeline
+// but stay out of the script, replay, copy and download until accepted.
+function committedActions() {
+  return recordedActions.filter(a => a && !a.suggested);
+}
+
+function isUrlAssert(act) {
+  return !!act && act.action === 'assert' && act.assertType === 'toHaveURL';
+}
+
+function afterTimelineEdit() {
+  renderTimeline();
+  updateCodePreview();
+  scheduleRecorderPersist();
+}
+
+function acceptSuggestion(idx) {
+  const act = recordedActions[idx];
+  if (!act || !act.suggested) return;
+  act.suggested = false;
+  afterTimelineEdit();
+  focusStepControl(idx, '.copy-btn');
+}
+
+function dismissSuggestion(idx) {
+  const act = recordedActions[idx];
+  if (!act || !act.suggested) return;
+  recordedActions.splice(idx, 1);
+  // Stays "seen": a re-delivery of the same event must not bring it back.
+  seenActionKeys.add(dedupeKeyForAction(act));
+  afterTimelineEdit();
+  // Keep keyboard users in the list: the row that took its place, else the last one.
+  const tl = document.getElementById('recorderTimeline');
+  const rows = tl ? tl.querySelectorAll('.ll-rec-step') : [];
+  const row = rows[Math.min(idx, rows.length - 1)];
+  const btn = row && row.querySelector('.ll-rec-step-actions button');
+  if (btn) btn.focus();
+  else if (tl) tl.focus();
+}
+
+function acceptAllSuggestions() {
+  let n = 0;
+  recordedActions.forEach((a) => {
+    if (a && a.suggested) { a.suggested = false; n++; }
+  });
+  if (n) afterTimelineEdit();
+}
+
+function focusStepControl(idx, selector) {
+  const tl = document.getElementById('recorderTimeline');
+  if (!tl) return;
+  const row = tl.querySelector(`.ll-rec-step[data-step-index="${idx}"]`);
+  const ctl = row && row.querySelector(selector);
+  if (ctl) ctl.focus();
+}
+
+function updateSuggestionsBar() {
+  const bar = document.getElementById('suggestionsBar');
+  if (!bar) return;
+  const n = recordedActions.filter(a => a && a.suggested).length;
+  bar.hidden = n === 0;
+  const txt = document.getElementById('suggestionsText');
+  if (txt) {
+    txt.textContent = n === 1
+      ? '1 suggested assertion — not in the test until you accept it.'
+      : `${n} suggested assertions — not in the test until you accept them.`;
+  }
+}
+
+function initSuggestionControls() {
+  const all = document.getElementById('acceptAllSuggestionsBtn');
+  if (all) all.addEventListener('click', acceptAllSuggestions);
+  const review = document.getElementById('reviewSuggestionsBtn');
+  if (review) review.addEventListener('click', () => {
+    if (recFilter) {
+      recFilter = '';
+      const fi = document.getElementById('recFilterInput');
+      if (fi) fi.value = '';
+      const fc = document.getElementById('recFilterClear');
+      if (fc) fc.style.display = 'none';
+      renderTimeline();
+    }
+    setTimelineExpanded(true);
+    const first = document.querySelector('#recorderTimeline .ll-rec-step.is-suggested');
+    if (first) {
+      if (typeof first.scrollIntoView === 'function') first.scrollIntoView({ block: 'nearest' });
+      const btn = first.querySelector('.accept-step-btn');
+      if (btn) btn.focus();
+    }
+  });
+}
+
+// ══ F1: replay ════════════════════════════════════════════════════════════════
+const REPLAY_BADGE_TEXT = {
+  pending: '• pending', running: '⟳ running', passed: '✓ passed', failed: '✗ failed', skipped: '↷ skipped'
+};
+
+function setReplaySummary(text, kind) {
+  const el = document.getElementById('replaySummary');
+  if (!el) return;
+  el.textContent = String(text || '');
+  el.className = 'll-replay-summary' + (kind ? ' ' + kind : '');
+  el.hidden = !text;
+}
+
+function updateReplayUI() {
+  const btn = document.getElementById('replayBtn');
+  const stop = document.getElementById('stopReplayBtn');
+  const active = !!replayRun;
+  const n = committedActions().length;
+  if (btn) {
+    btn.disabled = active || replaySecretsOpen || n === 0;
+    btn.textContent = active ? '⟳ Replaying…' : '▶ Replay';
+    btn.title = n === 0
+      ? 'Record at least one step to replay it'
+      : (isRecording && !isPaused
+        ? 'Pauses recording, replays the steps in this tab, then resumes recording'
+        : 'Replay the recorded steps in this tab');
+  }
+  if (stop) {
+    stop.hidden = !active;
+    stop.disabled = !!(replayRun && replayRun.stopping);
+  }
+  // The worker pauses the session for the run; manual pause/resume would fight it.
+  ['pauseRecordingBtn', 'resumeRecordingBtn'].forEach((id) => {
+    const b = document.getElementById(id);
+    if (b) b.disabled = active;
+  });
+}
+
+/** Unique env-var names of the sensitive steps, in order of first use. */
+function secretNamesFor(steps) {
+  const out = [];
+  steps.forEach((a) => {
+    if (!a || !a.sensitive) return;
+    const name = secretNameOf(a);
+    if (out.indexOf(name) === -1) out.push(name);
+  });
+  return out;
+}
+
+function onReplayClick() {
+  if (replayRun || replaySecretsOpen) return;
+  const steps = committedActions();
+  if (!steps.length) return;
+  setReplaySummary('', '');
+  const names = secretNamesFor(steps);
+  if (names.length) {
+    openReplaySecrets(names);
+    return;
+  }
+  startReplay(steps, {});
+}
+
+function openReplaySecrets(names) {
+  const box = document.getElementById('replaySecrets');
+  const fields = document.getElementById('replaySecretsFields');
+  if (!box || !fields) {
+    startReplay(committedActions(), {});
+    return;
+  }
+  fields.textContent = '';
+  names.forEach((name, i) => {
+    const label = document.createElement('label');
+    label.className = 'll-secret-field';
+    const id = 'replaySecret-' + i;
+    label.setAttribute('for', id);
+    const span = document.createElement('span');
+    span.textContent = name;
+    const input = document.createElement('input');
+    input.type = 'password';
+    input.id = id;
+    input.autocomplete = 'off';
+    input.setAttribute('autocomplete', 'off');
+    input.setAttribute('data-secret-name', name);
+    input.setAttribute('aria-label', 'Value for ' + name + ' (used for this replay only)');
+    label.appendChild(span);
+    label.appendChild(input);
+    fields.appendChild(label);
+  });
+  box.hidden = false;
+  replaySecretsOpen = true;
+  updateReplayUI();
+  const first = fields.querySelector('input');
+  if (first) first.focus();
+}
+
+/** Hide the form and wipe every value typed into it. */
+function closeReplaySecrets() {
+  const box = document.getElementById('replaySecrets');
+  const fields = document.getElementById('replaySecretsFields');
+  if (fields) {
+    fields.querySelectorAll('input').forEach((i) => { i.value = ''; });
+    fields.textContent = '';
+  }
+  if (box) box.hidden = true;
+  replaySecretsOpen = false;
+  updateReplayUI();
+}
+
+function submitReplaySecrets() {
+  const fields = document.getElementById('replaySecretsFields');
+  const secrets = {};
+  if (fields) {
+    fields.querySelectorAll('input[data-secret-name]').forEach((i) => {
+      // Empty means "skip those steps" — the page reports them as skipped.
+      if (i.value !== '') secrets[i.getAttribute('data-secret-name')] = i.value;
+    });
+  }
+  closeReplaySecrets();
+  const btn = document.getElementById('replayBtn');
+  if (btn) btn.focus();
+  const steps = committedActions();
+  if (steps.length) startReplay(steps, secrets);
+}
+
+function replayOptions() {
+  const sof = document.getElementById('replayStopOnFailure');
+  const slow = document.getElementById('replaySlowMo');
+  return {
+    stopOnFailure: sof ? !!sof.checked : true,
+    slowMoMs: slow && slow.checked ? 400 : 0,
+    stepTimeoutMs: 5000
+  };
+}
+
+/**
+ * Start a run. `secrets` only rides along in the REPLAY_START message — nothing
+ * here keeps a reference to it afterwards, and it is never persisted.
+ */
+function startReplay(steps, secrets) {
+  if (replayRun) return;
+  const run = {
+    runId: null,
+    steps: steps.slice(),
+    pausedRecording: false,
+    stopping: false,
+    watchdog: null,
+    stopTimer: null
+  };
+  replayRun = run;
+  replayStatuses = new Map();
+  run.steps.forEach(s => replayStatuses.set(s, { status: 'pending', error: '' }));
+  setTimelineExpanded(true);
+  setReplaySummary(`Replaying ${run.steps.length} step${run.steps.length === 1 ? '' : 's'}…`, 'info');
+  renderTimeline();
+  updateRecordUI();
+  armReplayWatchdog(run);
+
+  let payloadSecrets = secrets && typeof secrets === 'object' ? secrets : {};
+  const go = () => {
+    if (replayRun !== run) return; // stopped before it began
+    const msg = {
+      type: 'REPLAY_START',
+      steps: run.steps.map(s => Object.assign({}, s)),
+      secrets: payloadSecrets,
+      options: replayOptions()
+    };
+    payloadSecrets = null;
+    sendToBackground(msg, (res, err) => {
+      if (replayRun !== run) return;
+      if (!res || res.ok === false) {
+        const why = (res && res.error) ||
+          (err ? "the extension's background worker didn't answer — reload the page and try again" : 'it could not start');
+        finishReplay('error', why);
+        return;
+      }
+      if (run.runId == null && res.runId != null) run.runId = res.runId;
+      armReplayWatchdog(run);
+    });
+  };
+
+  // A live recording would capture the replayed actions: pause it first and
+  // resume once the run is over (the worker also guards this on its side).
+  if (isRecording && !isPaused) {
+    run.pausedRecording = true;
+    isPaused = true;
+    updateRecordUI();
+    sendRecorderCommand({ type: 'PAUSE_RECORDING' }, () => go());
+  } else {
+    go();
+  }
+}
+
+function armReplayWatchdog(run) {
+  if (run.watchdog) clearTimeout(run.watchdog);
+  run.watchdog = setTimeout(() => {
+    run.watchdog = null;
+    if (replayRun !== run) return;
+    sendToBackground({ type: 'REPLAY_STOP' });
+    finishReplay('interrupted', 'no progress from the page for 30 s');
+  }, REPLAY_WATCHDOG_MS);
+}
+
+/** True when a progress/done message belongs to the current run (adopting its id if unknown yet). */
+function replayMessageMatches(run, msg) {
+  if (msg.runId == null) return true;
+  if (run.runId == null) {
+    // Progress can overtake the REPLAY_START response.
+    run.runId = msg.runId;
+    return true;
+  }
+  return msg.runId === run.runId;
+}
+
+function handleReplayProgress(msg) {
+  const run = replayRun;
+  if (!run || !replayMessageMatches(run, msg)) return;
+  const idx = msg.index;
+  if (typeof idx !== 'number' || idx < 0 || idx >= run.steps.length || Math.floor(idx) !== idx) return;
+  if (REPLAY_STATUSES.indexOf(msg.status) === -1) return;
+  const stepObj = run.steps[idx];
+  replayStatuses.set(stepObj, {
+    status: msg.status,
+    error: msg.error ? String(msg.error) : '',
+    matchCount: msg.matchCount,
+    durationMs: msg.durationMs
+  });
+  armReplayWatchdog(run);
+  renderTimeline();
+  if (msg.status === 'failed') revealReplayStep(stepObj, true);
+  else if (msg.status === 'running') revealReplayStep(stepObj, false);
+}
+
+function handleReplayDone(msg) {
+  const run = replayRun;
+  if (!run || !replayMessageMatches(run, msg)) return;
+  const result = ['passed', 'failed', 'stopped', 'error'].indexOf(msg.result) !== -1 ? msg.result : 'error';
+  finishReplay(result, msg.error ? String(msg.error) : '', msg.failedIndex);
+}
+
+/** Display number (#N in the timeline) of a replayed step. */
+function timelineNumberOf(stepObj, fallbackIndex) {
+  const i = recordedActions.indexOf(stepObj);
+  return i !== -1 ? i + 1 : fallbackIndex + 1;
+}
+
+function finishReplay(result, error, failedIndex) {
+  const run = replayRun;
+  if (!run) return;
+  replayRun = null;
+  if (run.watchdog) clearTimeout(run.watchdog);
+  if (run.stopTimer) clearTimeout(run.stopTimer);
+  // Steps that never ran keep no badge once the run is over.
+  replayStatuses.forEach((v, k) => {
+    if (v.status === 'pending' || v.status === 'running') replayStatuses.delete(k);
+  });
+
+  let failedStep = null;
+  const n = run.steps.length;
+  if (result === 'passed') {
+    setReplaySummary(`Replay passed (${n} step${n === 1 ? '' : 's'})`, 'ok');
+  } else if (result === 'failed') {
+    let fi = typeof failedIndex === 'number' && failedIndex >= 0 && failedIndex < n ? failedIndex : -1;
+    if (fi === -1) {
+      fi = run.steps.findIndex(s => { const st = replayStatuses.get(s); return st && st.status === 'failed'; });
+    }
+    let why = error;
+    if (fi !== -1) {
+      failedStep = run.steps[fi];
+      const st = replayStatuses.get(failedStep);
+      if (!why && st && st.error) why = st.error;
+      if (!st || st.status !== 'failed') replayStatuses.set(failedStep, { status: 'failed', error: why || '' });
+      setReplaySummary(`Replay failed at step ${timelineNumberOf(failedStep, fi)}: ${why || 'unknown error'}`, 'err');
+    } else {
+      setReplaySummary(`Replay failed: ${why || 'unknown error'}`, 'err');
+    }
+  } else if (result === 'stopped') {
+    setReplaySummary('Replay stopped', 'warn');
+  } else if (result === 'interrupted') {
+    setReplaySummary(`Replay interrupted — ${error || 'no answer from the page'}`, 'err');
+  } else {
+    setReplaySummary(`Replay couldn't run: ${error || 'unknown error'}`, 'err');
+  }
+
+  renderTimeline();
+  updateRecordUI();
+  if (failedStep) revealReplayStep(failedStep, true);
+
+  if (run.pausedRecording && isRecording && isPaused) {
+    isPaused = false;
+    updateRecordUI();
+    sendRecorderCommand({ type: 'RESUME_RECORDING' });
+  }
+}
+
+/** Scroll a replayed step into view; a failed one also drops the filter hiding it. */
+function revealReplayStep(stepObj, isFailure) {
+  const idx = recordedActions.indexOf(stepObj);
+  if (idx === -1) return;
+  const tl = document.getElementById('recorderTimeline');
+  if (!tl) return;
+  let row = tl.querySelector(`.ll-rec-step[data-step-index="${idx}"]`);
+  if (!row && isFailure && recFilter) {
+    recFilter = '';
+    const fi = document.getElementById('recFilterInput');
+    if (fi) fi.value = '';
+    const fc = document.getElementById('recFilterClear');
+    if (fc) fc.style.display = 'none';
+    renderTimeline();
+    row = tl.querySelector(`.ll-rec-step[data-step-index="${idx}"]`);
+  }
+  if (isFailure) setTimelineExpanded(true);
+  if (row && typeof row.scrollIntoView === 'function') {
+    row.scrollIntoView({ block: isFailure ? 'center' : 'nearest' });
+  }
+}
+
+/** Ask the worker to stop; `immediate` ends the run here without waiting for REPLAY_DONE. */
+function stopReplay(immediate) {
+  const run = replayRun;
+  if (!run) return;
+  if (immediate) {
+    sendToBackground({ type: 'REPLAY_STOP' });
+    finishReplay('stopped');
+    return;
+  }
+  if (run.stopping) return;
+  run.stopping = true;
+  setReplaySummary('Stopping replay…', 'info');
+  updateReplayUI();
+  sendToBackground({ type: 'REPLAY_STOP' }, () => {
+    if (replayRun !== run) return;
+    // REPLAY_DONE normally follows; don't hang if it never does.
+    run.stopTimer = setTimeout(() => {
+      if (replayRun === run) finishReplay('stopped');
+    }, REPLAY_STOP_GRACE_MS);
+  });
+}
+
+function initReplayControls() {
+  const btn = document.getElementById('replayBtn');
+  if (btn) btn.addEventListener('click', onReplayClick);
+  const stop = document.getElementById('stopReplayBtn');
+  if (stop) stop.addEventListener('click', () => stopReplay(false));
+  const form = document.getElementById('replaySecretsForm');
+  if (form) form.addEventListener('submit', (e) => {
+    e.preventDefault();
+    submitReplaySecrets();
+  });
+  const cancel = document.getElementById('replaySecretsCancel');
+  if (cancel) cancel.addEventListener('click', () => {
+    closeReplaySecrets();
+    if (btn) btn.focus();
+  });
+  const box = document.getElementById('replaySecrets');
+  if (box) box.addEventListener('keydown', (e) => {
+    if (e.key === 'Escape') {
+      e.preventDefault();
+      closeReplaySecrets();
+      if (btn) btn.focus();
+    }
+  });
+  // A fresh DOM (panel reload) starts with no form open.
+  replaySecretsOpen = false;
+  updateReplayUI();
+}
+
+// ══ F2: Page Object export ════════════════════════════════════════════════════
+// Names become class members in JS/TS and (snake_cased) Python, so they must be
+// identifiers in both, avoid keywords, and not clash with the class's own members.
+const POM_RESERVED = new Set((
+  'break case catch class const continue debugger default delete do else enum export extends false finally for ' +
+  'function if import in instanceof new null return super switch this throw true try typeof var void while with ' +
+  'yield let static implements interface package private protected public await async arguments eval undefined ' +
+  'nan infinity none and as assert def del elif except from global is lambda nonlocal not or pass raise self ' +
+  'page driver goto visit constructor prototype match case type hasownproperty isprototypeof ' +
+  'propertyisenumerable tolocalestring tostring valueof'
+).split(' '));
+const POM_IDENT_RE = /^[A-Za-z_][A-Za-z0-9_]*$/;
+
+function pomNameError(name) {
+  if (!name) return 'A name is required.';
+  if (!POM_IDENT_RE.test(name)) return 'Use letters, digits and _ only, not starting with a digit.';
+  if (POM_RESERVED.has(name.toLowerCase())) return `"${name}" is a reserved word or a built-in member.`;
+  return '';
+}
+
+function setPomStatus(text, kind) {
+  const el = document.getElementById('pomStatus');
+  if (!el) return;
+  el.textContent = String(text || '');
+  el.className = 'll-pom-status' + (kind ? ' ' + kind : '');
+  el.hidden = !text;
+}
+
+function hasPageObjectCodegen() {
+  return typeof LLCodegen !== 'undefined' && typeof LLCodegen.pageObject === 'function';
+}
+
+function startPomPick(type) {
+  const pick = type === 'POM_PICK_START';
+  setPomStatus(pick
+    ? 'Hover a container on the page and click it to pick it — Esc on the page cancels.'
+    : 'Scanning the page…', 'info');
+  sendToBackground({ type: type }, (res, err) => {
+    if (res && res.ok === false) {
+      setPomStatus(res.error || "Locatra can't run on this page.", 'err');
+    } else if (err && !res) {
+      setPomStatus("Couldn't reach the page. Reload it and try again.", 'err');
+    }
+  });
+}
+
+function handlePomPickCancelled() {
+  setPomStatus('Region pick cancelled.', 'info');
+}
+
+function handlePomResult(data) {
+  if (!data || typeof data !== 'object') return;
+  // The same result can arrive twice (port relay + fallback broadcast); rebuilding
+  // the list would throw away names the user already edited.
+  let json = '';
+  try { json = JSON.stringify(data); } catch (e) {}
+  if (json && json === _pomLastResultJson && pomModel) return;
+  _pomLastResultJson = json;
+
+  const elements = (Array.isArray(data.elements) ? data.elements : [])
+    .filter(e => e && typeof e === 'object')
+    .map(e => Object.assign({}, e, { name: String(e.name || ''), include: true }));
+  if (!elements.length) {
+    pomModel = null;
+    const res = document.getElementById('pomResult');
+    if (res) res.hidden = true;
+    setPomStatus('No interactive elements found there. Try a larger region or Whole page.', 'info');
+    return;
+  }
+  pomModel = {
+    pageUrl: typeof data.pageUrl === 'string' ? data.pageUrl : '',
+    title: typeof data.title === 'string' ? data.title : '',
+    region: data.region && typeof data.region === 'object' ? data.region : null,
+    truncated: !!data.truncated,
+    className: '',
+    elements: elements
+  };
+  const cls = document.getElementById('pomClassName');
+  if (cls) cls.value = '';
+  setPomStatus(data.truncated
+    ? `Found ${elements.length} elements (the list was capped — pick a smaller region for the rest).`
+    : `Found ${elements.length} element${elements.length === 1 ? '' : 's'}.`, 'info');
+  renderPomResult();
+}
+
+function renderPomResult() {
+  const box = document.getElementById('pomResult');
+  if (!box) return;
+  if (!pomModel) { box.hidden = true; return; }
+  box.hidden = false;
+
+  const meta = document.getElementById('pomMeta');
+  if (meta) {
+    const parts = [];
+    if (pomModel.region && pomModel.region.locator) parts.push('Region: ' + String(pomModel.region.locator));
+    else if (pomModel.region && pomModel.region.tag) parts.push('Region: <' + String(pomModel.region.tag) + '>');
+    else parts.push('Region: whole page');
+    if (pomModel.pageUrl) parts.push('Page: ' + pomModel.pageUrl);
+    meta.textContent = parts.join(' · ');
+  }
+
+  const list = document.getElementById('pomList');
+  if (list) {
+    list.textContent = '';
+    pomModel.elements.forEach((el, i) => list.appendChild(buildPomRow(el, i)));
+  }
+  updatePomValidation();
+}
+
+function buildPomRow(el, i) {
+  const row = document.createElement('div');
+  row.className = 'll-pom-row' + (el.include ? '' : ' excluded');
+  row.setAttribute('role', 'listitem');
+
+  const kind = String(el.kind || 'other');
+  const inc = document.createElement('input');
+  inc.type = 'checkbox';
+  inc.className = 'll-pom-include';
+  inc.checked = !!el.include;
+  inc.setAttribute('data-index', String(i));
+  inc.setAttribute('aria-label', `Include element ${i + 1} (${kind}) in the Page Object`);
+
+  const name = document.createElement('input');
+  name.type = 'text';
+  name.className = 'll-pom-name';
+  name.value = el.name;
+  name.spellcheck = false;
+  name.setAttribute('autocomplete', 'off');
+  name.setAttribute('data-index', String(i));
+  name.setAttribute('aria-label', `Name for element ${i + 1} (${kind})`);
+  name.setAttribute('aria-describedby', 'pomErr-' + i);
+
+  const info = document.createElement('div');
+  info.className = 'll-pom-info';
+  const kindEl = document.createElement('span');
+  kindEl.className = 'll-pom-kind';
+  kindEl.textContent = kind;
+  info.appendChild(kindEl);
+  const uniq = document.createElement('span');
+  if (el.unique) {
+    uniq.className = 'uniq uniq-ok';
+    uniq.textContent = '✓ unique';
+    uniq.title = 'The locator matches exactly one element';
+  } else {
+    const mc = typeof el.matchCount === 'number' ? el.matchCount : 0;
+    uniq.className = 'uniq uniq-warn';
+    uniq.textContent = mc > 1 ? `⚠ ${mc >= 10 ? '10+' : mc} matches` : '⚠ not unique';
+    uniq.title = 'The locator is ambiguous — check it before relying on it';
+  }
+  info.appendChild(uniq);
+  if (el.code) {
+    const code = document.createElement('span');
+    code.className = 'll-pom-code';
+    const c = String(el.code);
+    code.textContent = c.length > 120 ? c.slice(0, 117) + '…' : c;
+    code.title = c;
+    info.appendChild(code);
+  }
+
+  const err = document.createElement('div');
+  err.className = 'll-pom-err';
+  err.id = 'pomErr-' + i;
+  err.hidden = true;
+
+  row.appendChild(inc);
+  row.appendChild(name);
+  row.appendChild(info);
+  row.appendChild(err);
+  return row;
+}
+
+/** Per-row errors (invalid / duplicate names among included rows). */
+function pomValidationErrors() {
+  const errors = pomModel.elements.map(() => '');
+  const seen = new Map();
+  pomModel.elements.forEach((el, i) => {
+    if (!el.include) return;
+    const name = String(el.name || '').trim();
+    const e = pomNameError(name);
+    if (e) { errors[i] = e; return; }
+    // emailInput and email_input collide once Python snake_cases them.
+    const key = name.toLowerCase().replace(/_/g, '');
+    if (seen.has(key)) {
+      // Both rows are flagged, so the one being edited shows the problem whichever
+      // comes first in the list.
+      const first = seen.get(key);
+      errors[i] = `Duplicate of "${pomModel.elements[first].name.trim()}".`;
+      if (!errors[first]) errors[first] = `Duplicate of "${name}".`;
+    } else seen.set(key, i);
+  });
+  return errors;
+}
+
+function pomClassNameError(v) {
+  if (!v) return '';
+  if (!POM_IDENT_RE.test(v)) return 'Use letters, digits and _ only, not starting with a digit.';
+  if (POM_RESERVED.has(v.toLowerCase())) return `"${v}" is a reserved word.`;
+  return '';
+}
+
+/** Refresh error markers + button state, then the preview. Returns true when exportable. */
+function updatePomValidation() {
+  if (!pomModel) return false;
+  const errors = pomValidationErrors();
+  const list = document.getElementById('pomList');
+  errors.forEach((msg, i) => {
+    const input = list && list.querySelector(`.ll-pom-name[data-index="${i}"]`);
+    if (input) input.setAttribute('aria-invalid', msg ? 'true' : 'false');
+    const errEl = document.getElementById('pomErr-' + i);
+    if (errEl) { errEl.textContent = msg; errEl.hidden = !msg; }
+    const row = input && input.closest('.ll-pom-row');
+    if (row) row.classList.toggle('excluded', !pomModel.elements[i].include);
+  });
+
+  const clsInput = document.getElementById('pomClassName');
+  const clsErr = pomClassNameError(pomModel.className);
+  const clsErrEl = document.getElementById('pomClassError');
+  if (clsErrEl) { clsErrEl.textContent = clsErr; clsErrEl.hidden = !clsErr; }
+  if (clsInput) clsInput.setAttribute('aria-invalid', clsErr ? 'true' : 'false');
+
+  const bad = errors.filter(Boolean).length;
+  const included = pomModel.elements.filter(e => e.include).length;
+  let problem = '';
+  if (!hasPageObjectCodegen()) problem = "This build can't generate Page Objects (codegen is out of date).";
+  else if (!included) problem = 'Include at least one element.';
+  else if (bad) problem = `Fix ${bad} name${bad === 1 ? '' : 's'} before exporting.`;
+  else if (clsErr) problem = 'Fix the class name before exporting.';
+
+  const v = document.getElementById('pomValidation');
+  if (v) { v.textContent = problem; v.hidden = !problem; }
+  ['pomCopyBtn', 'pomDownloadBtn'].forEach((id) => {
+    const b = document.getElementById(id);
+    if (b) b.disabled = !!problem;
+  });
+  renderPomPreview(problem);
+  return !problem;
+}
+
+/** The model handed to LLCodegen.pageObject (included rows, trimmed names). */
+function pomExportModel() {
+  return {
+    className: pomModel.className || undefined,
+    pageUrl: pomModel.pageUrl,
+    title: pomModel.title,
+    elements: pomModel.elements
+      .filter(e => e.include)
+      .map((e) => {
+        const out = Object.assign({}, e, { name: String(e.name).trim() });
+        delete out.include;
+        return out;
+      })
+  };
+}
+
+/** Generated file text, or '' when it can't be generated. */
+function pomCode() {
+  if (!pomModel || !hasPageObjectCodegen()) return '';
+  try {
+    return String(LLCodegen.pageObject(pomExportModel(), outFramework, outLanguage) || '');
+  } catch (e) {
+    console.warn('[Locatra] pageObject codegen failed:', e);
+    return '';
+  }
+}
+
+/**
+ * The class name the generated file actually declares. Codegen normalises what the
+ * user typed (e.g. appends "Page"), so this asks codegen — or reads the output —
+ * rather than echoing the field, keeping the file name and the class in step.
+ */
+function pomClassNameFor(code, model) {
+  const m = /\bclass\s+([A-Za-z_$][\w$]*)/.exec(code || '');
+  if (m) return m[1];
+  if (typeof LLCodegen !== 'undefined' && typeof LLCodegen.pageObjectClassName === 'function') {
+    try { return String(LLCodegen.pageObjectClassName(model || pomExportModel())); } catch (e) {}
+  }
+  return (pomModel && pomModel.className) || 'PageObject';
+}
+
+function pomFileName(code) {
+  const ext = outLanguage === 'python' ? 'py' : (outLanguage === 'typescript' ? 'ts' : 'js');
+  return pomClassNameFor(code) + '.' + ext;
+}
+
+function renderPomPreview(problem) {
+  const pre = document.getElementById('pomPreview');
+  if (!pre || !pomModel) return;
+  if (problem === undefined) {
+    updatePomValidation(); // recomputes the problem, then calls back here
+    return;
+  }
+  if (problem) {
+    pre.textContent = '';
+    return;
+  }
+  const code = pomCode();
+  if (!code) {
+    pre.textContent = '';
+    const v = document.getElementById('pomValidation');
+    if (v) { v.textContent = "Couldn't generate the Page Object for this framework."; v.hidden = false; }
+    ['pomCopyBtn', 'pomDownloadBtn'].forEach((id) => {
+      const b = document.getElementById(id);
+      if (b) b.disabled = true;
+    });
+    return;
+  }
+  safeRender(pre, hl(code));
+  const cls = document.getElementById('pomClassName');
+  if (cls && !pomModel.className) cls.placeholder = pomClassNameFor(code);
+  const out = document.getElementById('pomFileHint');
+  if (out) out.textContent = 'Saves as ' + pomFileName(code);
+}
+
+function downloadText(text, fileName) {
+  const blob = new Blob([text], { type: 'text/plain;charset=utf-8' });
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(blob);
+  a.download = fileName;
+  a.click();
+  setTimeout(() => URL.revokeObjectURL(a.href), 2000);
+}
+
+function initPomControls() {
+  const pickBtn = document.getElementById('pomPickBtn');
+  if (pickBtn) pickBtn.addEventListener('click', () => startPomPick('POM_PICK_START'));
+  const scanBtn = document.getElementById('pomScanBtn');
+  if (scanBtn) scanBtn.addEventListener('click', () => startPomPick('POM_SCAN'));
+
+  const list = document.getElementById('pomList');
+  if (list) {
+    list.addEventListener('input', (e) => {
+      if (!pomModel || !e.target.classList.contains('ll-pom-name')) return;
+      const i = parseInt(e.target.getAttribute('data-index'), 10);
+      if (!pomModel.elements[i]) return;
+      pomModel.elements[i].name = e.target.value;
+      updatePomValidation();
+    });
+    list.addEventListener('change', (e) => {
+      if (!pomModel || !e.target.classList.contains('ll-pom-include')) return;
+      const i = parseInt(e.target.getAttribute('data-index'), 10);
+      if (!pomModel.elements[i]) return;
+      pomModel.elements[i].include = !!e.target.checked;
+      updatePomValidation();
+    });
+  }
+  const cls = document.getElementById('pomClassName');
+  if (cls) cls.addEventListener('input', () => {
+    if (!pomModel) return;
+    pomModel.className = cls.value.trim();
+    updatePomValidation();
+  });
+
+  const copyBtn = document.getElementById('pomCopyBtn');
+  if (copyBtn) copyBtn.addEventListener('click', () => {
+    if (!updatePomValidation()) return;
+    const code = pomCode();
+    if (code) copyToClipboard(code, copyBtn);
+  });
+  const dlBtn = document.getElementById('pomDownloadBtn');
+  if (dlBtn) dlBtn.addEventListener('click', () => {
+    if (!updatePomValidation()) return;
+    const code = pomCode();
+    if (code) downloadText(code, pomFileName(code));
+  });
+  const closeBtn = document.getElementById('pomCloseBtn');
+  if (closeBtn) closeBtn.addEventListener('click', () => {
+    pomModel = null;
+    _pomLastResultJson = '';
+    renderPomResult();
+    setPomStatus('', '');
+    if (pickBtn) pickBtn.focus();
+  });
+  renderPomResult();
+}
+
+// ══ F4: step thumbnails ═══════════════════════════════════════════════════════
+// The worker stores a small JPEG per step in IndexedDB (thumbs-store.js) and says
+// STEP_THUMBNAIL when one is ready. The panel only ever holds object URLs for the
+// steps on screen; llRecorderState never carries image data.
+function thumbsApi() {
+  const t = typeof globalThis !== 'undefined' ? globalThis.LLThumbs : undefined;
+  return t && typeof t.get === 'function' ? t : null;
+}
+
+function canMakeObjectUrl() {
+  return typeof URL !== 'undefined' && typeof URL.createObjectURL === 'function';
+}
+
+function eventIdsOf(steps) {
+  const out = [];
+  (steps || []).forEach((a) => {
+    if (a && typeof a.eventId === 'string' && a.eventId && out.indexOf(a.eventId) === -1) out.push(a.eventId);
+  });
+  return out;
+}
+
+function stepByEventId(id) {
+  return recordedActions.find(a => a && a.eventId === id) || null;
+}
+
+function revokeThumb(id) {
+  const entry = thumbCache.get(id);
+  if (entry && entry.url) {
+    try { URL.revokeObjectURL(entry.url); } catch (e) {}
+  }
+  thumbCache.delete(id);
+}
+
+function releaseAllThumbs() {
+  closeThumbPreview();
+  Array.from(thumbCache.keys()).forEach(revokeThumb);
+  _thumbGen.clear();
+  _thumbInFlight.clear();
+}
+
+/** Steps removed for good: drop their object URLs and their stored screenshots. */
+function discardThumbs(steps) {
+  const ids = eventIdsOf((steps || []).filter(a => a && !a.suggested));
+  if (!ids.length) return;
+  ids.forEach((id) => { revokeThumb(id); _thumbGen.delete(id); _thumbInFlight.delete(id); });
+  sendToBackground({ type: 'THUMBS_DELETE', eventIds: ids });
+}
+
+/** Revoke the URLs of steps no longer in the timeline (undo keeps the stored image). */
+function pruneThumbCache() {
+  if (!thumbCache.size) return;
+  const live = new Set(eventIdsOf(recordedActions));
+  Array.from(thumbCache.keys()).forEach((id) => {
+    if (!live.has(id)) revokeThumb(id);
+  });
+}
+
+/** getMany may answer with an array (aligned or keyed by eventId), a Map or an object. */
+function normalizeThumbRecords(ids, res) {
+  const map = new Map();
+  if (!res) return map;
+  if (typeof Map !== 'undefined' && res instanceof Map) {
+    res.forEach((v, k) => map.set(k, v));
+  } else if (Array.isArray(res)) {
+    res.forEach((rec, i) => {
+      if (!rec) return;
+      map.set(typeof rec.eventId === 'string' ? rec.eventId : ids[i], rec);
+    });
+  } else if (typeof res === 'object') {
+    ids.forEach((id) => { if (res[id]) map.set(id, res[id]); });
+  }
+  return map;
+}
+
+function loadThumbs(ids) {
+  const api = thumbsApi();
+  if (!api || !canMakeObjectUrl() || !ids.length) return;
+  const gens = ids.map((id) => {
+    const g = (_thumbGen.get(id) || 0) + 1;
+    _thumbGen.set(id, g);
+    _thumbInFlight.add(id);
+    return g;
+  });
+  let p;
+  try {
+    p = typeof api.getMany === 'function' ? api.getMany(ids) : Promise.all(ids.map(id => api.get(id)));
+  } catch (e) {
+    p = Promise.reject(e);
+  }
+  Promise.resolve(p).then((res) => {
+    const recs = normalizeThumbRecords(ids, res);
+    ids.forEach((id, i) => {
+      if (_thumbGen.get(id) !== gens[i]) return; // superseded by a newer load
+      _thumbInFlight.delete(id);
+      setThumbFromRecord(id, recs.get(id));
+    });
+  }, () => {
+    ids.forEach((id, i) => {
+      if (_thumbGen.get(id) !== gens[i]) return;
+      _thumbInFlight.delete(id);
+      if (stepByEventId(id)) thumbCache.set(id, null);
+    });
+  });
+}
+
+function setThumbFromRecord(id, rec) {
+  if (!stepByEventId(id)) return; // removed while loading
+  revokeThumb(id);
+  if (!rec || !rec.blob) {
+    thumbCache.set(id, null);
+    return;
+  }
+  let url = '';
+  try { url = URL.createObjectURL(rec.blob); } catch (e) { url = ''; }
+  if (!url) { thumbCache.set(id, null); return; }
+  thumbCache.set(id, { url: url, width: Number(rec.width) || 0, height: Number(rec.height) || 0 });
+  document.querySelectorAll('#recorderTimeline .ll-thumb-slot').forEach((slot) => {
+    if (slot.getAttribute('data-eid') === id) fillThumbSlot(slot, id);
+  });
+}
+
+/** Fill the rendered slots from the cache; fetch the ones not loaded yet. */
+function hydrateThumbs(root) {
+  if (!root || !thumbsApi() || !canMakeObjectUrl()) return;
+  const missing = [];
+  root.querySelectorAll('.ll-thumb-slot').forEach((slot) => {
+    const id = slot.getAttribute('data-eid');
+    if (!id) return;
+    if (thumbCache.has(id)) fillThumbSlot(slot, id);
+    else if (!_thumbInFlight.has(id) && missing.indexOf(id) === -1) missing.push(id);
+  });
+  if (missing.length) loadThumbs(missing);
+}
+
+/** The step's rect as percentages of its viewport (clipped), or null. */
+function thumbRectPercent(act) {
+  const r = act && act.rect;
+  const vp = act && act.viewport;
+  if (!r || !vp) return null;
+  const vw = Number(vp.width), vh = Number(vp.height);
+  const x = Number(r.x), y = Number(r.y), w = Number(r.width), h = Number(r.height);
+  if (![vw, vh, x, y, w, h].every(Number.isFinite) || vw <= 0 || vh <= 0 || w <= 0 || h <= 0) return null;
+  const left = Math.max(0, x), top = Math.max(0, y);
+  const right = Math.min(vw, x + w), bottom = Math.min(vh, y + h);
+  if (right <= left || bottom <= top) return null; // entirely off-screen
+  return {
+    left: left / vw * 100, top: top / vh * 100,
+    width: (right - left) / vw * 100, height: (bottom - top) / vh * 100
+  };
+}
+
+function buildThumbFrame(entry, act, large) {
+  const frame = document.createElement('div');
+  frame.className = 'll-thumb-frame' + (large ? ' ll-thumb-frame-lg' : '');
+  const img = document.createElement('img');
+  img.src = entry.url;
+  img.alt = large ? 'Screenshot taken when this step was recorded' : '';
+  if (entry.width && entry.height) {
+    img.width = large ? entry.width : 72;
+    img.height = large ? entry.height : Math.round(72 * entry.height / entry.width);
+  }
+  frame.appendChild(img);
+  const pct = thumbRectPercent(act);
+  if (pct) {
+    const box = document.createElement('div');
+    box.className = 'll-thumb-rect';
+    box.style.left = pct.left.toFixed(2) + '%';
+    box.style.top = pct.top.toFixed(2) + '%';
+    box.style.width = pct.width.toFixed(2) + '%';
+    box.style.height = pct.height.toFixed(2) + '%';
+    frame.appendChild(box);
+  }
+  return frame;
+}
+
+function stepCaption(act) {
+  const i = recordedActions.indexOf(act);
+  const what = act.action === 'assert'
+    ? 'assert ' + String(act.assertType || 'toBeVisible')
+    : String(act.action || 'step');
+  return `Step ${i + 1}: ${what}`;
+}
+
+function fillThumbSlot(slot, id) {
+  slot.textContent = '';
+  const entry = thumbCache.get(id);
+  const act = stepByEventId(id);
+  if (!entry || !act) return;
+  const btn = document.createElement('button');
+  btn.type = 'button';
+  btn.className = 'll-thumb-btn';
+  btn.setAttribute('data-eid', id);
+  btn.setAttribute('aria-label', 'Preview screenshot — ' + stepCaption(act));
+  btn.title = 'Preview screenshot';
+  btn.appendChild(buildThumbFrame(entry, act, false));
+  slot.appendChild(btn);
+}
+
+function onStepThumbnail(eventId) {
+  if (typeof eventId !== 'string' || !eventId) return;
+  if (!stepByEventId(eventId)) return; // not (or no longer) in this timeline
+  revokeThumb(eventId);
+  loadThumbs([eventId]);
+}
+
+function isThumbModalOpen() {
+  const m = document.getElementById('thumbModal');
+  return !!m && !m.hidden;
+}
+
+function openThumbPreview(id, opener) {
+  const entry = thumbCache.get(id);
+  const act = stepByEventId(id);
+  const modal = document.getElementById('thumbModal');
+  const body = document.getElementById('thumbModalBody');
+  if (!entry || !act || !modal || !body) return;
+  body.textContent = '';
+  body.appendChild(buildThumbFrame(entry, act, true));
+  const title = document.getElementById('thumbModalTitle');
+  if (title) title.textContent = stepCaption(act);
+  _thumbModalOpener = { el: opener || document.activeElement, eventId: id };
+  modal.hidden = false;
+  const close = document.getElementById('thumbModalClose');
+  if (close) close.focus();
+}
+
+function closeThumbPreview() {
+  const modal = document.getElementById('thumbModal');
+  if (!modal || modal.hidden) return;
+  modal.hidden = true;
+  const body = document.getElementById('thumbModalBody');
+  if (body) body.textContent = '';
+  const back = _thumbModalOpener;
+  _thumbModalOpener = null;
+  if (!back) return;
+  // The opener may have been re-rendered while the preview was open.
+  let target = back.el && back.el.isConnected ? back.el : null;
+  if (!target) {
+    target = Array.prototype.find.call(
+      document.querySelectorAll('#recorderTimeline .ll-thumb-btn'),
+      b => b.getAttribute('data-eid') === back.eventId
+    ) || document.getElementById('recorderTimeline');
+  }
+  if (target && typeof target.focus === 'function') target.focus();
+}
+
+function initThumbModal() {
+  const modal = document.getElementById('thumbModal');
+  if (!modal) return;
+  const close = document.getElementById('thumbModalClose');
+  if (close) close.addEventListener('click', closeThumbPreview);
+  const backdrop = document.getElementById('thumbModalBackdrop');
+  if (backdrop) backdrop.addEventListener('click', closeThumbPreview);
+  modal.addEventListener('keydown', (e) => {
+    if (e.key === 'Escape') {
+      e.preventDefault();
+      closeThumbPreview();
+      return;
+    }
+    if (e.key === 'Tab') {
+      // Keep focus inside the dialog.
+      const focusables = Array.prototype.filter.call(
+        modal.querySelectorAll('button, [href], input, select, textarea, [tabindex]:not([tabindex="-1"])'),
+        el => !el.disabled
+      );
+      if (!focusables.length) { e.preventDefault(); return; }
+      const first = focusables[0];
+      const last = focusables[focusables.length - 1];
+      if (e.shiftKey && document.activeElement === first) { e.preventDefault(); last.focus(); }
+      else if (!e.shiftKey && document.activeElement === last) { e.preventDefault(); first.focus(); }
+      else if (!modal.contains(document.activeElement)) { e.preventDefault(); first.focus(); }
+    }
+  });
+  modal.hidden = true;
 }
