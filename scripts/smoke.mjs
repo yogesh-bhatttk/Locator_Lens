@@ -45,8 +45,15 @@ async function main() {
 
   const html = readFileSync(DEMO_HTML);
   const frameHtml = readFileSync(FRAME_HTML);
+  // "The app changed under the test": the same page without its Last name field,
+  // served while `demoChanged` is set, so a replay that reloads the page meets it.
+  const changedHtml = Buffer.from(
+    html.toString('utf8').replace(/<div class="field">\s*<label for="last-name">[\s\S]*?<\/div>/, '')
+  );
+  if (changedHtml.includes('id="last-name"')) throw new Error('could not derive the changed demo page');
+  let demoChanged = false;
   const server = createServer((req, res) => {
-    const body = (req.url || '').startsWith('/payment-frame') ? frameHtml : html;
+    const body = (req.url || '').startsWith('/payment-frame') ? frameHtml : demoChanged ? changedHtml : html;
     res.writeHead(200, { 'content-type': 'text/html; charset=utf-8' });
     res.end(body);
   });
@@ -553,6 +560,16 @@ async function main() {
     await page.keyboard.press('Escape');
     await page.waitForTimeout(300);
 
+    await suggestionsAndReplay({
+      page,
+      panel,
+      worker,
+      windowId,
+      contentScriptReady,
+      preview,
+      setDemoChanged: (on) => (demoChanged = on),
+    });
+
     console.log('\nhygiene');
     check(
       'the content script logged nothing to the page console',
@@ -576,6 +593,399 @@ async function main() {
   const passed = results.length - failures;
   console.log(`\n${failures ? '✗' : '✓'} ${passed}/${results.length} checks passed`);
   if (failures) process.exit(1);
+}
+
+// ── Suggested assertions and Replay, driven through the side panel's own UI ──────
+//
+// One recorded checkout feeds both: the order submit is what makes the content script
+// suggest assertions, and once they are accepted the same steps are replayed — so the
+// replay also proves the suggested checks hold on a fresh run of the page.
+
+/* global recordedActions, getComputedStyle, location, innerHeight -- page-context bodies below:
+   recordedActions is the side panel's timeline (a top-level binding of sidepanel.js) */
+
+const REPLAY_SECRET = 'replay-S3cret!';
+const RECORDED_SECRET = 'recorded-S3cret!';
+
+async function suggestionsAndReplay({
+  page,
+  panel,
+  worker,
+  windowId,
+  contentScriptReady,
+  preview,
+  setDemoChanged,
+}) {
+  /** The panel's in-memory timeline, reduced to what the checks look at. */
+  const steps = () =>
+    panel.evaluate(() =>
+      recordedActions.map((a) => ({
+        action: a.action,
+        assertType: a.assertType || '',
+        value: a.sensitive ? '' : String(a.value ?? ''),
+        sensitive: !!a.sensitive,
+        suggested: !!a.suggested,
+        code: String(a.code || ''),
+      }))
+    );
+  /** What the timeline shows: one entry per rendered step row. */
+  const rows = () =>
+    panel.evaluate(() =>
+      [...document.querySelectorAll('#recorderTimeline .ll-rec-step')].map((r) => ({
+        index: Number(r.getAttribute('data-step-index')),
+        cls: r.className,
+        label: r.querySelector('.ll-rec-step-label')?.textContent ?? '',
+        badge: r.querySelector('.ll-replay-badge')?.className.replace(/.*\brs-(\w+).*/, '$1') ?? '',
+        error: r.querySelector('.ll-replay-error')?.textContent ?? '',
+        reason: r.querySelector('.ll-rec-step-reason')?.textContent ?? '',
+        hasAccept: Boolean(r.querySelector('.accept-step-btn')),
+        hasDismiss: Boolean(r.querySelector('.dismiss-step-btn')),
+        border: getComputedStyle(r).borderTopStyle,
+      }))
+    );
+  const recordingState = () =>
+    panel.evaluate((w) => chrome.runtime.sendMessage({ type: 'GET_RECORDING_STATE', windowId: w }), windowId);
+  const summary = () => panel.evaluate(() => document.getElementById('replaySummary')?.textContent ?? '');
+  const stored = () =>
+    panel.evaluate(() => new Promise((r) => chrome.storage.local.get(null, (all) => r(JSON.stringify(all)))));
+  const expandTimeline = async () => {
+    const header = panel.locator('#timelineToggleHeader');
+    if ((await header.getAttribute('aria-expanded')) !== 'true') await header.click();
+  };
+  const waitForStep = (what, pred, timeout = 6000) =>
+    until(async () => (await steps()).some(pred), { timeout, what }).catch(() => {});
+
+  // The worker starts, pauses and replays in the window's ACTIVE tab, as it does for
+  // a real side panel. The panel here is a tab of that window, so the demo tab is
+  // brought to the front and the panel's buttons are clicked while it stays behind.
+  const clickInPanel = async (selector) => {
+    await page.bringToFront();
+    await panel.click(selector);
+  };
+  const setRecording = async (on) => {
+    await clickInPanel('#recordBtn');
+    await until(async () => (await recordingState())?.active === on, {
+      timeout: 5000,
+      what: `recording ${on ? 'on' : 'off'}`,
+    }).catch(() => {});
+  };
+  /** Click ▶ Replay; fill the secrets form when it opens; wait for the run to end. */
+  const replay = async (secret) => {
+    await clickInPanel('#replayBtn');
+    const field = panel.locator('#replaySecretsFields input[data-secret-name="LOCATRA_PASSWORD"]');
+    await field.waitFor({ state: 'visible', timeout: 3000 });
+    const isPassword = (await field.getAttribute('type')) === 'password';
+    if (secret) await field.fill(secret);
+    await clickInPanel('#replaySecretsStart');
+    await until(async () => /^Replay (passed|failed|stopped|couldn|interrupted)/.test(await summary()), {
+      timeout: 45_000,
+      what: 'the replay to finish',
+    }).catch(() => {});
+    return { isPassword, summary: await summary(), rows: await rows() };
+  };
+  const pageState = () =>
+    page.evaluate(() => ({
+      href: location.href,
+      first: document.getElementById('first-name')?.value ?? null,
+      last: document.getElementById('last-name')?.value ?? null,
+      password: document.getElementById('password')?.value ?? null,
+      createAccount: document.getElementById('create-account')?.checked ?? null,
+      giftWrap: document.getElementById('gift-wrap')?.checked ?? null,
+      country: document.getElementById('country')?.value ?? null,
+      confirmed: document.getElementById('order-confirmation')?.hidden === false,
+      confirmation: document.getElementById('order-confirmation')?.innerText ?? '',
+    }));
+
+  console.log('\nsuggested assertions');
+  await page.goto(DEMO, { waitUntil: 'load' });
+  await contentScriptReady();
+  await panel.click('[data-target="tab-recorder"]');
+  await panel.click('#clearTimelineBtn');
+  await until(async () => (await steps()).length === 0, { what: 'an empty timeline' }).catch(() => {});
+
+  await setRecording(true);
+  // The top frame opens every recording with goto + viewport: capture is armed.
+  await waitForStep('the opening goto', (s) => s.action === 'viewport');
+
+  await page.click('#first-name');
+  await page.fill('#first-name', 'Grace');
+  await waitForStep('the first-name fill', (s) => s.action === 'fill' && s.value === 'Grace');
+  await page.click('#last-name');
+  await page.fill('#last-name', 'Hopper');
+  await waitForStep('the last-name fill', (s) => s.action === 'fill' && s.value === 'Hopper');
+  await page.check('#create-account');
+  await waitForStep('the create-account check', (s) => s.action === 'check');
+  await page.click('#password');
+  await page.fill('#password', RECORDED_SECRET);
+  await waitForStep('the password fill', (s) => s.action === 'fill' && s.sensitive);
+  await page.focus('#country');
+  await page.keyboard.press('ArrowDown'); // a trusted change (see the recorder section)
+  await waitForStep('the country select', (s) => s.action === 'selectOption');
+  await page.check('#gift-wrap');
+  await waitForStep('the gift-wrap check', (s) => s.action === 'check' && /gift/i.test(s.code));
+
+  // Submitting pushes /checkout/confirmed and reveals a role=status confirmation.
+  await page.click('[data-testid="place-order"]');
+  const isUrlSuggestion = (s, re) => s.suggested && s.assertType === 'toHaveURL' && re.test(s.value);
+  const isConfirmSuggestion = (s) =>
+    s.suggested && s.assertType === 'toContainText' && /Order confirmed/.test(s.value);
+  await waitForStep('the suggested assertions', (s) => isUrlSuggestion(s, /\/checkout\/confirmed$/), 8000);
+  await waitForStep('the suggested confirmation check', isConfirmSuggestion, 8000);
+  // One more URL change (a hash link) gives a third suggestion, to dismiss.
+  await page.click('nav a[href="#orders"]');
+  await waitForStep('the #orders URL suggestion', (s) => isUrlSuggestion(s, /#orders$/), 8000);
+  await setRecording(false);
+
+  let all = await steps();
+  check(
+    'submitting the order suggests toHaveURL for the SPA navigation',
+    all.some((s) => isUrlSuggestion(s, /^http:\/\/localhost:4174\/checkout\/confirmed$/)),
+    JSON.stringify(all.filter((s) => s.suggested))
+  );
+  check(
+    'and toContainText for the "Order confirmed" status',
+    all.some(isConfirmSuggestion),
+    JSON.stringify(all.filter((s) => s.suggested))
+  );
+  check(
+    'suggestions never carry the typed password',
+    !JSON.stringify(all).includes(RECORDED_SECRET) && !(await stored()).includes(RECORDED_SECRET)
+  );
+
+  await panel.click('#reviewSuggestionsBtn'); // expands the timeline at the first suggestion
+  let shown = await rows();
+  const suggestedRows = shown.filter((r) => /\bis-suggested\b/.test(r.cls));
+  check(
+    'suggested steps render with the Suggested style, badge and Accept/Dismiss',
+    suggestedRows.length === all.filter((s) => s.suggested).length &&
+      suggestedRows.length >= 3 &&
+      suggestedRows.every(
+        (r) => /Suggested/.test(r.label) && r.hasAccept && r.hasDismiss && r.border === 'dashed' && r.reason
+      ) &&
+      shown.filter((r) => !/\bis-suggested\b/.test(r.cls)).every((r) => r.border !== 'dashed'),
+    JSON.stringify(suggestedRows)
+  );
+  check(
+    'the suggestions bar counts them',
+    await panel.evaluate(
+      (n) =>
+        !document.getElementById('suggestionsBar').hidden &&
+        document.getElementById('suggestionsText').textContent.startsWith(`${n} suggested`),
+      suggestedRows.length
+    )
+  );
+  let script = await preview();
+  check(
+    'suggestions stay out of the script until accepted',
+    /Grace/.test(script) && !/toHaveURL|toContainText/.test(script),
+    script.slice(-500)
+  );
+
+  // Dismiss the #orders one; it must not come back — not on a re-render, and not
+  // when the panel is reopened and the worker re-delivers what it buffered.
+  const ordersIndex = all.findIndex((s) => isUrlSuggestion(s, /#orders$/));
+  await panel.click(`#recorderTimeline .dismiss-step-btn[data-index="${ordersIndex}"]`);
+  await until(async () => !(await steps()).some((s) => isUrlSuggestion(s, /#orders$/)), {
+    what: 'the dismissed suggestion to go',
+  }).catch(() => {});
+  const afterDismiss = await steps();
+  check(
+    'Dismiss removes that suggestion and nothing else',
+    afterDismiss.length === all.length - 1 &&
+      !afterDismiss.some((s) => isUrlSuggestion(s, /#orders$/)) &&
+      afterDismiss.some((s) => isUrlSuggestion(s, /\/checkout\/confirmed$/)) &&
+      afterDismiss.some(isConfirmSuggestion),
+    JSON.stringify(afterDismiss.filter((s) => s.suggested))
+  );
+
+  // The panel saves its timeline 200 ms after an edit; reopen it once that is done.
+  const storedState = () =>
+    panel.evaluate(
+      (key) => new Promise((r) => chrome.storage.local.get(key, (all) => r(all[key] ?? null))),
+      `llRecorderState:${windowId}`
+    );
+  await until(async () => (await storedState())?.actions?.length === afterDismiss.length, {
+    what: 'the dismissal to be saved',
+  }).catch(() => {});
+  await panel.reload({ waitUntil: 'load' });
+  await until(async () => (await steps()).length >= afterDismiss.length, {
+    what: 'the timeline to be restored',
+  }).catch(() => {});
+  // Give a re-delivery of the worker's buffered steps (on the panel's hello) time to land.
+  await new Promise((r) => setTimeout(r, 1000));
+  const restored = await steps();
+  check(
+    'a dismissed suggestion does not come back when the panel is reopened',
+    restored.length === afterDismiss.length && !restored.some((s) => isUrlSuggestion(s, /#orders$/)),
+    `${restored.length} steps (expected ${afterDismiss.length})`
+  );
+
+  await panel.click('[data-target="tab-recorder"]');
+  await expandTimeline();
+  await panel.click('#acceptAllSuggestionsBtn');
+  await until(async () => !(await steps()).some((s) => s.suggested), { what: 'Accept all' }).catch(() => {});
+  await until(async () => /toHaveURL/.test(await preview()), {
+    what: 'the accepted checks in the script',
+  }).catch(() => {});
+  all = await steps();
+  script = await preview();
+  check(
+    'Accept all turns every suggestion into a step',
+    !all.some((s) => s.suggested) &&
+      (await panel.evaluate(() => document.getElementById('suggestionsBar').hidden)) &&
+      !(await rows()).some((r) => /\bis-suggested\b/.test(r.cls))
+  );
+  check(
+    'accepted checks reach the script',
+    /expect\(page\)\.toHaveURL\('http:\/\/localhost:4174\/checkout\/confirmed'\)/.test(script) &&
+      /\.toContainText\('Order confirmed/.test(script) &&
+      !/#orders'\)/.test(script.match(/toHaveURL\([^)]*\)/g)?.join('') ?? ''),
+    script.slice(-700)
+  );
+
+  console.log('\nreplay');
+  // Recording stays on through the replay: the replayed actions must not be captured.
+  await page.goto(DEMO, { waitUntil: 'load' });
+  await contentScriptReady();
+  const before = (await steps()).length;
+  await setRecording(true);
+  // Starting appends goto + viewport for this page; drop them so the replay ends on
+  // the order flow rather than on a fresh /checkout.
+  await until(async () => (await steps()).length === before + 2, { what: 'the new goto + viewport' }).catch(
+    () => {}
+  );
+  for (let i = 0; i < 2; i++) {
+    const last = (await steps()).length - 1;
+    await panel.click(`#recorderTimeline .remove-step-btn[data-index="${last}"]`);
+  }
+  await until(async () => (await steps()).length === before, { what: 'the extra steps removed' }).catch(
+    () => {}
+  );
+  const flow = await steps();
+  const passwordIndex = flow.findIndex((s) => s.action === 'fill' && s.sensitive);
+  // The first step that touches the Last name field (the click into it, before the fill).
+  const lastNameIndex = flow.findIndex((s) => /Last name|last-name/.test(s.code));
+
+  check(
+    'Replay is enabled with steps recorded and recording live',
+    await panel.evaluate(() => !document.getElementById('replayBtn').disabled)
+  );
+  const ok = await replay(REPLAY_SECRET);
+  check('a sensitive step asks for its value in a password field first', ok.isPassword);
+  check(
+    'the summary says the replay passed',
+    ok.summary === `Replay passed (${flow.length} steps)`,
+    `got ${JSON.stringify(ok.summary)}`
+  );
+  const unexpected = ok.rows.filter((r) =>
+    flow[r.index]?.action === 'viewport' ? r.badge !== 'skipped' : r.badge !== 'passed'
+  );
+  check(
+    'every step is badged passed (the viewport step skipped)',
+    ok.rows.length === flow.length && unexpected.length === 0,
+    JSON.stringify(unexpected.slice(0, 3))
+  );
+  const after = await pageState();
+  check(
+    'the replay filled and submitted the form on the page',
+    after.first === 'Grace' &&
+      after.last === 'Hopper' &&
+      after.createAccount &&
+      after.giftWrap &&
+      after.country === 'Ireland' &&
+      after.confirmed &&
+      /Grace Hopper/.test(after.confirmation) &&
+      /\/checkout\/confirmed#orders$/.test(after.href),
+    JSON.stringify(after)
+  );
+  check('the secret typed into the replay form reached the page', after.password === REPLAY_SECRET);
+  check(
+    'the replay secret is not kept anywhere',
+    !(await stored()).includes(REPLAY_SECRET) &&
+      (await panel.evaluate(() => document.getElementById('replaySecretsFields').childElementCount === 0))
+  );
+
+  // The worker pauses the session for the run and resumes it after.
+  await until(async () => (await recordingState())?.paused === false, { what: 'recording to resume' }).catch(
+    () => {}
+  );
+  const resumed = await recordingState();
+  check('recording is live again after the replay', resumed?.active === true && resumed?.paused === false);
+  // Anything the replay leaked would land within the recorder's debounce windows once
+  // capture resumes (fill 700 ms; a toHaveURL for the URL the replay left, 500 ms).
+  await new Promise((r) => setTimeout(r, 1500));
+  const afterReplay = await steps();
+  check(
+    'replayed actions are not recorded as new steps',
+    afterReplay.length === flow.length,
+    JSON.stringify(afterReplay.slice(flow.length))
+  );
+  await setRecording(false);
+
+  console.log('\nreplay without a secret');
+  const skipped = await replay('');
+  const pwRow = skipped.rows.find((r) => r.index === passwordIndex);
+  check(
+    'leaving the secret empty skips that step',
+    pwRow?.badge === 'skipped' && /no value provided/.test(pwRow?.error ?? ''),
+    JSON.stringify(pwRow)
+  );
+  const noSecret = await pageState();
+  check(
+    'the rest of the flow still ran, and the field was left empty',
+    /^Replay passed/.test(skipped.summary) && noSecret.password === '' && noSecret.confirmed,
+    `${skipped.summary} — ${JSON.stringify(noSecret)}`
+  );
+
+  console.log('\nreplay against a changed page');
+  // The page's goto step reloads it from the server, which now serves it without
+  // the Last name field: the locator recorded for it can no longer match.
+  setDemoChanged(true);
+  let failed;
+  try {
+    failed = await replay(REPLAY_SECRET);
+  } finally {
+    setDemoChanged(false);
+  }
+  const failedRow = failed.rows.find((r) => r.index === lastNameIndex);
+  check(
+    `the summary names the failing step (#${lastNameIndex + 1}) and the error`,
+    new RegExp(`^Replay failed at step ${lastNameIndex + 1}: no element matches`).test(failed.summary),
+    `got ${JSON.stringify(failed.summary)}`
+  );
+  check(
+    'the failed step is badged, highlighted and shows the error',
+    failedRow?.badge === 'failed' &&
+      /\breplay-failed\b/.test(failedRow.cls) &&
+      /no element matches/.test(failedRow.error),
+    JSON.stringify(failedRow)
+  );
+  check(
+    'steps before it passed and none after it ran (stop at first failure)',
+    failed.rows.every((r) =>
+      r.index < lastNameIndex
+        ? r.badge === (flow[r.index].action === 'viewport' ? 'skipped' : 'passed')
+        : r.index > lastNameIndex
+          ? r.badge === ''
+          : true
+    ),
+    JSON.stringify(failed.rows.map((r) => r.badge))
+  );
+  check(
+    'the failed step is scrolled into view',
+    await panel.evaluate((i) => {
+      const row = document.querySelector(`#recorderTimeline .ll-rec-step[data-step-index="${i}"]`);
+      const tl = document.getElementById('recorderTimeline').getBoundingClientRect();
+      const r = row?.getBoundingClientRect();
+      return Boolean(r && r.bottom > Math.max(0, tl.top) && r.top < Math.min(innerHeight, tl.bottom));
+    }, lastNameIndex)
+  );
+  const broken = await pageState();
+  check(
+    'the order was not placed',
+    !broken.confirmed && /\/checkout$/.test(broken.href),
+    JSON.stringify(broken)
+  );
 }
 
 /**
