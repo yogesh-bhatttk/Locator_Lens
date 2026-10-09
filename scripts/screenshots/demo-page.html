@@ -49,7 +49,7 @@
       .row { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
       .field { margin-bottom: 16px; }
       label { display: block; font-size: 13px; font-weight: 600; margin-bottom: 6px; }
-      input[type='text'], input[type='email'], input[type='tel'], select, textarea {
+      input[type='text'], input[type='email'], input[type='tel'], input[type='password'], select, textarea {
         width: 100%;
         padding: 9px 11px;
         border: 1px solid #cfd4dc;
@@ -81,6 +81,17 @@
       th, td { text-align: left; padding: 9px 0; border-bottom: 1px solid var(--line); }
       th { font-size: 12px; text-transform: uppercase; letter-spacing: 0.04em; color: var(--muted); }
       tbody tr:last-child td { border-bottom: 0; }
+      .confirmation {
+        margin-top: 18px;
+        padding: 14px 16px;
+        border-radius: 8px;
+        background: #ecfdf3;
+        border: 1px solid #abefc6;
+        color: #05603a;
+        font-size: 14px;
+      }
+      .confirmation h3 { margin: 0 0 6px; font-size: 15px; }
+      .confirmation p { margin: 0 0 4px; }
     </style>
   </head>
   <body>
@@ -99,6 +110,11 @@
       <section>
         <h1>Checkout</h1>
         <p class="sub">Step 2 of 3 — delivery and payment details</p>
+
+        <!-- A real <form>: Enter in a field submits it (implicit submission), the way
+             recorded keyboard flows expect. "Place order" sits outside it, in the
+             summary, and joins it through its form attribute. -->
+        <form id="checkout-form" novalidate>
 
         <div class="card">
           <h2>Contact details</h2>
@@ -119,6 +135,14 @@
           <div class="field">
             <label for="phone">Phone number</label>
             <input type="tel" id="phone" name="phone" placeholder="+44 20 7946 0000" />
+          </div>
+          <div class="check">
+            <input type="checkbox" id="create-account" name="createAccount" />
+            <label for="create-account">Create an account for faster checkout</label>
+          </div>
+          <div class="field" id="account-fields" hidden>
+            <label for="password">Password</label>
+            <input type="password" id="password" name="password" autocomplete="new-password" />
           </div>
         </div>
 
@@ -174,6 +198,7 @@
             </tbody>
           </table>
         </div>
+        </form>
       </section>
 
       <aside>
@@ -184,11 +209,80 @@
           <div class="line"><span class="muted">VAT</span><span>£29.90</span></div>
           <div class="line total"><span>Total</span><span>£179.39</span></div>
           <div class="actions">
-            <button type="submit" class="primary" data-testid="place-order">Place order</button>
+            <button type="submit" class="primary" data-testid="place-order" form="checkout-form">Place order</button>
             <button type="button" class="ghost">Back</button>
+          </div>
+          <!-- Shown once the order is placed: echoes what was submitted, so a test
+               that drove the form can prove it did its job. -->
+          <div class="confirmation" id="order-confirmation" role="status" hidden>
+            <h3>Order confirmed</h3>
+            <p data-testid="confirmation-name"></p>
+            <p data-testid="confirmation-details"></p>
           </div>
         </div>
       </aside>
     </main>
+    <script>
+      // Demo behaviour only — nothing here is part of the extension.
+      (function () {
+        var form = document.getElementById('checkout-form');
+        var account = document.getElementById('create-account');
+        var accountFields = document.getElementById('account-fields');
+        account.addEventListener('change', function () {
+          accountFields.hidden = !account.checked;
+        });
+
+        // The payment frame is same-origin, so its field can be read at submit time.
+        function cardDigits() {
+          try {
+            var doc = document.getElementById('payment-frame').contentDocument;
+            var card = doc && doc.getElementById('card');
+            return card ? card.value.replace(/\D/g, '') : '';
+          } catch (e) {
+            return '';
+          }
+        }
+
+        form.addEventListener('submit', function (event) {
+          event.preventDefault();
+          var f = form.elements;
+          var focused = document.activeElement;
+          var order = {
+            firstName: f.firstName.value,
+            lastName: f.lastName.value,
+            email: f.email.value,
+            phone: f.phone.value,
+            country: f.country.value,
+            notes: f.notes.value,
+            giftWrap: f.giftWrap.checked,
+            saveDetails: f.saveDetails.checked,
+            createAccount: f.createAccount.checked,
+            password: f.createAccount.checked ? f.password.value : '',
+            card: cardDigits(),
+            // Which control had focus when the form was submitted: proves keyboard
+            // steps (Tab, Shift+Tab, Enter) moved focus where they were meant to.
+            submittedFrom: (focused && (focused.id || focused.getAttribute('data-testid'))) || ''
+          };
+          var card = order.card;
+          document.querySelector('[data-testid="confirmation-name"]').textContent =
+            (order.firstName + ' ' + order.lastName).trim();
+          document.querySelector('[data-testid="confirmation-details"]').textContent = [
+            'Confirmation sent to ' + (order.email || 'no email'),
+            'Delivery to ' + order.country,
+            order.giftWrap ? 'Gift wrapped' : 'No gift wrap',
+            card ? 'Card ending ' + card.slice(-4) : 'No card'
+          ].join(' · ');
+          document.getElementById('order-confirmation').hidden = false;
+          // A single-page-app style URL change, as most checkouts do.
+          history.pushState({ order: true }, '', '/checkout/confirmed');
+          // The local demo server keeps the submitted orders so the export tests can
+          // check each run end to end (npm run test:exports). Other servers that
+          // serve this page ignore it.
+          try {
+            navigator.sendBeacon('/__orders', new Blob([JSON.stringify(order)], { type: 'text/plain' }));
+          } catch (e) {}
+        });
+      })();
+    </script>
   </body>
 </html>

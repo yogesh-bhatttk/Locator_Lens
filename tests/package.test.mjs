@@ -18,14 +18,16 @@ import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
 
-import { build, TARGET_NAMES } from '../scripts/build.mjs';
+import { build, SHIP, TARGET_NAMES } from '../scripts/build.mjs';
 import {
   htmlReferences,
+  importedScripts,
   injectedFiles,
   manifestReferences,
   PERMISSION_EVIDENCE,
   HOST_ACCESS_PERMISSIONS,
   BANNED_PERMISSIONS,
+  requestsAllUrls,
   scanSource,
   stripJsComments,
   verifyPackage,
@@ -56,7 +58,11 @@ describe('source rules', () => {
     'CSS url() in a JS string': "el.style.background = 'url(//img.example.com/a.png)';",
     'eval()': 'eval(code);',
     'new Function()': "const f = new Function('return 1');",
-    'importScripts()': "importScripts('x.js');",
+    'importScripts() of a computed path': 'importScripts(base + "x.js");',
+    'importScripts() of a variable': 'importScripts(url);',
+    'importScripts() of a remote URL': "importScripts('https://cdn.example.com/x.js');",
+    'importScripts() of a protocol-relative URL': "importScripts('//cdn.example.com/x.js');",
+    'importScripts() mixing a local file and a variable': "importScripts('a.js', other);",
     'setTimeout with a string': "setTimeout('doThing()', 10);",
     'setInterval with a template string': 'setInterval(`tick()`, 10);',
     'fetch()': 'fetch(url).then(r => r.json());',
@@ -93,6 +99,9 @@ describe('source rules', () => {
     'a regex with a URL scheme': 'const re = /https?:\\/\\//;',
     'a string that looks like a comment': "const s = '// not a comment'; const t = '/* nor this */';",
     'an apostrophe in HTML prose': "<p>Don't worry</p><script>const a = 1;</script>",
+    'importScripts() of packaged files': 'importScripts(\'thumbs-store.js\', "lib/a.js");',
+    'a guarded importScripts()':
+      "if (typeof importScripts === 'function' && !self.LLThumbs) importScripts('thumbs-store.js');",
   };
   for (const [label, code] of Object.entries(mustPass)) {
     const file = /^\s*</.test(code) ? 'x.html' : 'x.js';
@@ -170,6 +179,33 @@ describe('permission checks', () => {
     }
   });
 
+  it('accepts <all_urls> only as an optional host permission that the code requests', () => {
+    const m = { optional_host_permissions: ['<all_urls>'] };
+    const request = "chrome.permissions.request({ origins: ['<all_urls>'] }, cb);";
+    expect(verifyPermissions(m, request)).toEqual([]);
+    // Through a feature-tested alias and a named origins constant, as the panel does.
+    const aliased =
+      "const ORIGINS = ['<all_urls>'];\n" +
+      "const api = typeof chrome.permissions.request === 'function' ? chrome.permissions : null;\n" +
+      'api.request({ origins: ORIGINS }, cb);';
+    expect(verifyPermissions(m, aliased)).toEqual([]);
+    // Requesting something else is no evidence for this grant.
+    expect(
+      verifyPermissions(m, "chrome.permissions.request({ permissions: ['downloads'] });").join()
+    ).toMatch(/<all_urls>/);
+    expect(verifyPermissions(m, 'chrome.tabs.captureVisibleTab();').join()).toMatch(/permissions\.request/);
+    // Never as a required grant, a content-script match or a resource match.
+    for (const bad of [
+      { host_permissions: ['<all_urls>'] },
+      { content_scripts: [{ matches: ['<all_urls>'], js: [] }] },
+      { web_accessible_resources: [{ resources: ['a.png'], matches: ['<all_urls>'] }] },
+    ]) {
+      expect(verifyPermissions(bad, request), JSON.stringify(bad)).not.toEqual([]);
+    }
+    // And no other wildcard sneaks in through the optional list.
+    expect(verifyPermissions({ optional_host_permissions: ['*://*/*'] }, request)).not.toEqual([]);
+  });
+
   it('accepts a sensible minimum_chrome_version and rejects nonsense', () => {
     const sp = { permissions: ['sidePanel'] };
     const code = 'chrome.sidePanel.open({})';
@@ -203,6 +239,17 @@ describe('reference checks', () => {
       "chrome.scripting.executeScript({ target, files: ['src/c.js'] });\n" +
       "// chrome.scripting.executeScript({ files: ['src/commented.js'] });";
     expect(injectedFiles(js).sort()).toEqual(['src/a.js', 'src/b.js', 'src/c.js']);
+  });
+
+  it('resolves importScripts() files relative to the importing worker', () => {
+    const js =
+      "importScripts('thumbs-store.js');\n" +
+      "importScripts('/icons/x.js', './lib/a.js', '../top.js');\n" +
+      "// importScripts('commented.js');\n" +
+      'importScripts(dynamic);';
+    expect(importedScripts('src/background.js', js).sort()).toEqual(
+      ['icons/x.js', 'src/lib/a.js', 'src/thumbs-store.js', 'top.js'].sort()
+    );
   });
 
   it('collects every manifest key that names a file', () => {
@@ -259,6 +306,16 @@ describe('reference checks', () => {
     expect(problems).toMatch(/missing-content\.js/);
     expect(problems).toMatch(/missing-page\.js/);
     expect(problems).toMatch(/w\/\*\.png/);
+  });
+
+  it('flags a worker that importScripts() a file the package does not contain', () => {
+    const manifest = { permissions: [], background: { service_worker: 'src/bg.js' } };
+    const missing = verifyPackage(pkg({ 'src/bg.js': "importScripts('store.js');" }, manifest)).join('\n');
+    expect(missing).toMatch(/src\/bg\.js loads "src\/store\.js" with importScripts\(\)/);
+    // The same call passes once the file ships next to the worker.
+    expect(
+      verifyPackage(pkg({ 'src/bg.js': "importScripts('store.js');", 'src/store.js': '1' }, manifest))
+    ).toEqual([]);
   });
 });
 
@@ -368,6 +425,30 @@ describe.each(TARGET_NAMES)('%s package', (target) => {
     expect(verifyPackage(entries)).toEqual([]);
   });
 
+  it('ships every extension source file — a new src/ file cannot be forgotten', () => {
+    const shipped = new Set(filesIn(dir()));
+    for (const name of readdirSync(join(ROOT, 'src'))) {
+      if (!/\.(?:js|html)$/.test(name)) continue;
+      expect(shipped.has(`src/${name}`), `src/${name} is missing from SHIP in scripts/build.mjs`).toBe(true);
+    }
+  });
+
+  it('ships the screenshot store, and both background flavours can load it', () => {
+    expect(SHIP).toContain('src/thumbs-store.js');
+    // Chrome: a classic service worker pulls it in with importScripts(); Firefox: an
+    // event page lists it in background.scripts (importScripts does not exist there).
+    // Either way the build's reference checks prove the file is in the package.
+    const bg = read('src/background.js');
+    const viaImport = importedScripts('src/background.js', bg).includes('src/thumbs-store.js');
+    const viaManifest = (manifest().background?.scripts ?? []).includes('src/thumbs-store.js');
+    const sidepanel = htmlReferences('src/sidepanel.html', read('src/sidepanel.html'));
+    // Feature-detected while the screenshot feature is being wired up: once anything
+    // loads the store, every loader must resolve to the shipped file.
+    if (viaImport || viaManifest || sidepanel.includes('src/thumbs-store.js')) {
+      expect(filesIn(dir())).toContain('src/thumbs-store.js');
+    }
+  });
+
   it('ships only extension files — no docs, tests, tooling or VCS metadata', () => {
     const allowed = /^(manifest\.json|icons\/[\w.-]+\.png|src\/[\w.-]+\.(js|html))$/;
     for (const rel of filesIn(dir())) expect(rel, `${rel} should not be in the package`).toMatch(allowed);
@@ -403,7 +484,20 @@ describe.each(TARGET_NAMES)('%s package', (target) => {
     const m = manifest();
     expect(m.host_permissions).toEqual(['http://*/*', 'https://*/*']);
     expect(m.content_scripts[0].matches).toEqual(['http://*/*', 'https://*/*']);
-    expect(m.optional_host_permissions ?? []).toEqual([]);
+    // The one optional grant: <all_urls>, requested at run time for step
+    // screenshots (captureVisibleTab), never at install.
+    expect((m.optional_host_permissions ?? []).filter((p) => p !== '<all_urls>')).toEqual([]);
+  });
+
+  it('asks for <all_urls> only at run time, from the code that enables screenshots', () => {
+    const optional = manifest().optional_host_permissions ?? [];
+    if (!optional.includes('<all_urls>')) return; // not declared: nothing to request
+    const code = filesIn(dir())
+      .filter((f) => /\.(?:js|html)$/.test(f))
+      .map((f) => stripJsComments(read(f)))
+      .join('\n');
+    expect(requestsAllUrls(code), 'no permissions.request() for <all_urls> in the package').toBe(true);
+    expect(manifest().host_permissions).not.toContain('<all_urls>');
   });
 
   it('never reads a tab property that would require the tabs permission', () => {
@@ -565,20 +659,39 @@ describe('documentation matches the manifests', () => {
       expect(named, `${file}: permission table disagrees with the manifests`).toEqual(union);
     });
 
-    it('states the host patterns the manifest asks for, and never <all_urls>', () => {
-      const rows = tableRows(doc(file), heading).join('\n');
+    it('states the host patterns the manifest asks for, and <all_urls> only as optional', () => {
+      const rows = tableRows(doc(file), heading);
       for (const pattern of chrome().host_permissions) {
-        expect(rows, `${file}: host row omits ${pattern}`).toContain(pattern);
+        expect(rows.join('\n'), `${file}: host row omits ${pattern}`).toContain(pattern);
       }
-      expect(rows, `${file}: the permission table still promises <all_urls>`).not.toContain('<all_urls>');
+      // <all_urls> may appear only in a row about the optional, run-time grant.
+      for (const row of rows.filter((r) => r.includes('<all_urls>'))) {
+        expect(row, `${file}: a permission row promises <all_urls> as a required grant`).toMatch(
+          /optional_host_permissions/
+        );
+        expect(row, `${file}: the <all_urls> row must say it is optional`).toMatch(/optional/i);
+      }
+      const declared = [
+        ...(chrome().optional_host_permissions ?? []),
+        ...(firefox().optional_host_permissions ?? []),
+      ];
+      if (declared.includes('<all_urls>')) {
+        expect(
+          rows.some((r) => r.includes('<all_urls>')),
+          `${file}: the optional <all_urls> grant needs its own row`
+        ).toBe(true);
+      }
     });
   });
 
   it('gives host access exactly one justification row in the store guide', () => {
-    const rows = tableRows(doc('STORE_SUBMISSION.md'), /Permission justifications/).filter((r) =>
-      r.includes('host_permissions')
-    );
-    expect(rows).toHaveLength(1);
+    const rows = tableRows(doc('STORE_SUBMISSION.md'), /Permission justifications/);
+    const required = rows.filter((r) => /(?<!optional_)host_permissions/.test(r));
+    expect(required).toHaveLength(1);
+    // The optional run-time grant, when declared, gets exactly one row of its own.
+    const optional = rows.filter((r) => r.includes('optional_host_permissions'));
+    const declared = (chrome().optional_host_permissions ?? []).length > 0;
+    expect(optional).toHaveLength(declared ? 1 : 0);
   });
 
   it('quotes the description the manifests ship', () => {

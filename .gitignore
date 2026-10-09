@@ -42,3 +42,8 @@ MISSION_SELECTOR_LAB.md
 # Throwaway browser profiles created by `npm run screenshots` / `npm run smoke`.
 /.tmp-screenshot-profile/
 /.tmp-smoke-profile/
+/.tmp-smoke-pom-profile/
+/.tmp-smoke-shots-*/
+
+# Generated scripts and logs from `npm run test:exports`.
+/.tmp-exports/

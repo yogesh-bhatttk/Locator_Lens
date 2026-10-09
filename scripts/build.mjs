@@ -26,7 +26,7 @@ const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const DEFAULT_OUT = join(ROOT, 'dist');
 
 /** Everything that ships, relative to the repo root. Directories are copied recursively. */
-const SHIP = [
+export const SHIP = [
   'src/background.js',
   'src/codegen.js',
   'src/content-locator-engine.js',
@@ -35,6 +35,9 @@ const SHIP = [
   'src/popup.js',
   'src/sidepanel.html',
   'src/sidepanel.js',
+  // IndexedDB store for step screenshots: loaded by the service worker with
+  // importScripts() (Chrome) / background.scripts (Firefox), and by sidepanel.html.
+  'src/thumbs-store.js',
   'icons',
 ];
 

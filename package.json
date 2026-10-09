@@ -31,18 +31,26 @@
     "prepare": "husky",
     "screenshots": "node scripts/screenshots/capture.mjs",
     "promo": "node scripts/screenshots/promo.mjs",
-    "smoke": "node scripts/smoke.mjs"
+    "smoke": "node scripts/smoke.mjs",
+    "smoke:pom": "node scripts/e2e/smoke-pom.mjs",
+    "smoke:screenshots": "node scripts/e2e/smoke-screenshots.mjs",
+    "smoke:all": "npm run smoke && npm run smoke:pom && npm run smoke:screenshots",
+    "test:exports": "node scripts/e2e/run-exports.mjs",
+    "test:exports:setup-python": "python3 -m pip install --target node_modules/.cache/locatra-e2e/pylib -r tests/e2e/requirements.txt",
+    "test:exports:setup-cypress": "npm install --no-save cypress@15.21.1 cypress-real-events@1.15.1 typescript@5.9.3"
   },
   "devDependencies": {
     "@eslint/js": "^9.39.5",
+    "@playwright/test": "1.59.1",
     "@vitest/coverage-v8": "^4.1.5",
     "eslint": "^9.39.5",
     "globals": "^17.13.0",
     "husky": "^9.1.7",
     "jsdom": "^29.1.1",
     "lint-staged": "^15.5.2",
-    "playwright": "^1.59.1",
+    "playwright": "1.59.1",
     "prettier": "^3.6.2",
+    "selenium-webdriver": "4.50.0",
     "vitest": "^4.1.5"
   },
   "lint-staged": {

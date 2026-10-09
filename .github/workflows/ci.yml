@@ -83,3 +83,116 @@ jobs:
 
       - name: Smoke test the built extension
         run: xvfb-run -a npm run smoke
+
+      - name: Smoke test Page Object export
+        run: xvfb-run -a npm run smoke:pom
+
+      - name: Smoke test step screenshots
+        run: xvfb-run -a npm run smoke:screenshots
+
+  # The exported tests, run for real. Unit suites only prove generated code parses;
+  # these run every Playwright and Selenium export (TypeScript, JavaScript, Python)
+  # in its own real runner against the demo checkout, for a canonical stored flow
+  # and for a flow recorded through the built extension, and check that the demo
+  # server received the order each flow places. --require makes a runner that could
+  # not start a failure here rather than a silent skip.
+  exports:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-node@v5
+        with:
+          node-version-file: .nvmrc
+          cache: npm
+
+      - uses: actions/setup-python@v6
+        with:
+          python-version: '3.12'
+          cache: pip
+          cache-dependency-path: tests/e2e/requirements.txt
+
+      - run: npm ci
+
+      - name: Install the Python packages the Python exports import
+        run: python -m pip install -r tests/e2e/requirements.txt
+
+      - name: Cache Playwright browsers
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/ms-playwright
+          key: ms-playwright-${{ runner.os }}-${{ hashFiles('package-lock.json') }}
+
+      # Every framework drives this one Chromium (Selenium Manager fetches the
+      # matching chromedriver; pytest-playwright is pointed at it by a conftest).
+      - name: Install Chromium for Playwright
+        run: npx playwright install --with-deps chromium
+
+      - run: npm run build
+
+      # Recording through the extension needs a headed browser, hence xvfb.
+      - name: Run every Playwright and Selenium export for real
+        run: >-
+          xvfb-run -a npm run test:exports --
+          --only playwright-typescript,playwright-javascript,playwright-python,selenium-typescript,selenium-javascript,selenium-python
+          --require playwright-typescript,playwright-javascript,playwright-python,selenium-typescript,selenium-javascript,selenium-python
+
+      - name: Upload generated scripts and runner logs
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: exports-playwright-selenium
+          path: .tmp-exports/
+          if-no-files-found: ignore
+
+  # Cypress gets its own job: its binary is large, so it is not a devDependency and
+  # every other job stays fast. Installed here (with cypress-real-events, which
+  # exported Shift+Tab/combo key presses import, and typescript for the .ts spec).
+  exports-cypress:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-node@v5
+        with:
+          node-version-file: .nvmrc
+          cache: npm
+
+      - run: npm ci
+
+      - name: Cache the Cypress binary
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/Cypress
+          key: cypress-${{ runner.os }}-${{ hashFiles('package.json') }}
+
+      - name: Install Cypress, cypress-real-events and TypeScript
+        run: npm run test:exports:setup-cypress
+
+      - run: npx cypress verify
+
+      - name: Cache Playwright browsers
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/ms-playwright
+          key: ms-playwright-${{ runner.os }}-${{ hashFiles('package-lock.json') }}
+
+      # Only used to record the second flow through the extension.
+      - name: Install Chromium for Playwright
+        run: npx playwright install --with-deps chromium
+
+      - run: npm run build
+
+      - name: Run the Cypress exports for real (Electron)
+        run: >-
+          xvfb-run -a npm run test:exports --
+          --only cypress-typescript,cypress-javascript
+          --require cypress-typescript,cypress-javascript
+
+      - name: Upload generated specs and runner logs
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: exports-cypress
+          path: .tmp-exports/
+          if-no-files-found: ignore

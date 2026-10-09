@@ -7,7 +7,10 @@ package-lock.json
 /coverage/
 /.tmp-screenshot-profile/
 /.tmp-smoke-profile/
+/.tmp-smoke-pom-profile/
+/.tmp-smoke-shots-*/
 
 # The extension sources predate Prettier and are reviewed by hand at store
 # submission; reformatting them would bury real diffs in whitespace churn.
 /src/
+/.tmp-exports/

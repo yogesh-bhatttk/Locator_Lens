@@ -20,6 +20,8 @@ export default [
       'screenshots/',
       'coverage/',
       '.tmp-smoke-profile/',
+      '.tmp-smoke-pom-profile/',
+      '.tmp-smoke-shots-*/',
       '.tmp-screenshot-profile/',
       '**/.*/',
     ],

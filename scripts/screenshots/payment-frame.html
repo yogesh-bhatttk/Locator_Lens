@@ -38,11 +38,25 @@
         font-weight: 600;
         cursor: pointer;
       }
+      .status {
+        margin-left: 10px;
+        color: #05603a;
+        font-weight: 600;
+      }
     </style>
   </head>
   <body>
     <label for="card">Card number</label>
     <input id="card" name="card" inputmode="numeric" placeholder="4242 4242 4242 4242" />
     <button type="button" data-testid="pay-now">Pay now</button>
+    <span class="status" data-testid="pay-status" role="status"></span>
+    <script>
+      document.querySelector('[data-testid="pay-now"]').addEventListener('click', function () {
+        var digits = document.getElementById('card').value.replace(/\D/g, '');
+        document.querySelector('[data-testid="pay-status"]').textContent = digits
+          ? 'Card ending ' + digits.slice(-4) + ' saved'
+          : 'Enter a card number';
+      });
+    </script>
   </body>
 </html>

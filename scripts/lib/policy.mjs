@@ -194,6 +194,12 @@ export function stripComments(name, text) {
 /** A URL that leaves the package: http(s) or protocol-relative. */
 const REMOTE = String.raw`(?:https?:)?\/\/`;
 
+/** One local script path literal: no scheme, not protocol-relative, no expression. */
+const LOCAL_SCRIPT_LITERAL = String.raw`\s*(?:'(?!\/\/)[\w./-]+'|"(?!\/\/)[\w./-]+")\s*`;
+/** The argument list of an importScripts() call that loads only local files. */
+const LOCAL_SCRIPT_LIST = String.raw`${LOCAL_SCRIPT_LITERAL}(?:,${LOCAL_SCRIPT_LITERAL})*`;
+const IMPORT_SCRIPTS_LOCAL_ARGS = String.raw`${LOCAL_SCRIPT_LIST}\)`;
+
 /**
  * Each rule is a pattern that must not appear in shipped code (after comments are
  * stripped). `label` is what the build prints. These are the rules a store
@@ -234,7 +240,16 @@ export const SOURCE_RULES = [
   // Dynamic code execution: both stores treat these as remote/obfuscated code.
   { id: 'eval', label: 'uses eval()', pattern: /\beval\s*\(/ },
   { id: 'new-function', label: 'uses new Function()', pattern: /\bnew\s+Function\s*\(/ },
-  { id: 'import-scripts', label: 'uses importScripts()', pattern: /\bimportScripts\s*\(/ },
+  // importScripts() of a file shipped in the package is how a classic MV3 service
+  // worker splits its code (background.js loads thumbs-store.js) — that is not remote
+  // code. Anything else is: a URL, a computed argument, a variable. So only a call
+  // whose every argument is a plain relative-path string literal passes, and
+  // importedScripts() below makes the build prove each of those files ships.
+  {
+    id: 'import-scripts',
+    label: 'uses importScripts() with something other than a packaged file',
+    pattern: new RegExp(String.raw`\bimportScripts\s*\((?!${IMPORT_SCRIPTS_LOCAL_ARGS})`),
+  },
   {
     id: 'string-timer',
     label: 'passes a string to setTimeout/setInterval (implicit eval)',
@@ -318,6 +333,31 @@ export const BANNED_PERMISSIONS = new Map([
  */
 export const ALLOWED_HOST_PATTERNS = new Set(['http://*/*', 'https://*/*']);
 
+/**
+ * `<all_urls>` is accepted in exactly one place: optional_host_permissions, for step
+ * screenshots. chrome.tabs.captureVisibleTab needs `<all_urls>` or an activeTab grant
+ * (http/https host permissions are not enough), so the panel asks for it at run time
+ * — chrome.permissions.request({ origins: ['<all_urls>'] }) — when the user turns
+ * step screenshots on, never at install. It stays forbidden in host_permissions,
+ * content_scripts.matches and web_accessible_resources.
+ */
+export const OPTIONAL_ONLY_HOST_PATTERNS = new Set(['<all_urls>']);
+
+/**
+ * The code uses permissions.request — called directly, or through an alias after a
+ * feature test (`const api = chrome.permissions; … api.request(…)`).
+ */
+export const PERMISSIONS_REQUEST = /\b(?:chrome|browser)\.permissions\.request\b/;
+
+/**
+ * Evidence that the code asks for the `<all_urls>` grant at run time: it uses
+ * permissions.request and builds an origins list holding exactly `<all_urls>`
+ * (inline, `{ origins: ['<all_urls>'] }`, or as a named constant).
+ */
+export function requestsAllUrls(code) {
+  return PERMISSIONS_REQUEST.test(code) && /\[\s*["'`]<all_urls>["'`]\s*\]/.test(code);
+}
+
 /** Lowest Chrome that has chrome.sidePanel. */
 const SIDE_PANEL_MIN_CHROME = 114;
 
@@ -347,9 +387,9 @@ function checkPermissionList(list, kind, code, problems) {
   }
 }
 
-function checkHostPatterns(list, kind, problems) {
+function checkHostPatterns(list, kind, problems, extra = new Set()) {
   for (const pattern of list ?? []) {
-    if (!ALLOWED_HOST_PATTERNS.has(pattern)) {
+    if (!ALLOWED_HOST_PATTERNS.has(pattern) && !extra.has(pattern)) {
       problems.push(
         `manifest ${kind} names "${pattern}", outside the reviewed host set (${[...ALLOWED_HOST_PATTERNS].join(', ')})`
       );
@@ -369,7 +409,18 @@ export function verifyPermissions(manifest, code) {
   checkPermissionList(manifest.optional_permissions, 'optional_permissions', code, problems);
 
   checkHostPatterns(manifest.host_permissions, 'host_permissions', problems);
-  checkHostPatterns(manifest.optional_host_permissions, 'optional_host_permissions', problems);
+  checkHostPatterns(
+    manifest.optional_host_permissions,
+    'optional_host_permissions',
+    problems,
+    OPTIONAL_ONLY_HOST_PATTERNS
+  );
+  if ((manifest.optional_host_permissions ?? []).includes('<all_urls>') && !requestsAllUrls(code)) {
+    problems.push(
+      'manifest optional_host_permissions includes "<all_urls>" but no packaged file calls ' +
+        "permissions.request({ origins: ['<all_urls>'] })"
+    );
+  }
   for (const cs of manifest.content_scripts ?? [])
     checkHostPatterns(cs.matches, 'content_scripts.matches', problems);
   for (const war of manifest.web_accessible_resources ?? []) {
@@ -380,7 +431,7 @@ export function verifyPermissions(manifest, code) {
   // An optional grant that is never requested is dead weight in the install prompt.
   const hasOptional =
     (manifest.optional_permissions ?? []).length || (manifest.optional_host_permissions ?? []).length;
-  if (hasOptional && !/\b(?:chrome|browser)\.permissions\.request\s*\(/.test(code)) {
+  if (hasOptional && !PERMISSIONS_REQUEST.test(code)) {
     problems.push('manifest declares optional permissions but no packaged file calls permissions.request()');
   }
 
@@ -471,6 +522,26 @@ export function injectedFiles(js) {
   return [...new Set(out)];
 }
 
+/**
+ * Package paths a worker script loads with importScripts('a.js', ...), resolved the
+ * way the browser does: relative to the importing script's own location, or to the
+ * package root for a leading "/". Only string-literal arguments are collected —
+ * anything else already fails the import-scripts source rule.
+ * @param {string} name package-relative path of the importing script
+ * @param {string} js its source
+ */
+export function importedScripts(name, js) {
+  const code = stripJsComments(js);
+  const out = [];
+  for (const m of code.matchAll(new RegExp(String.raw`\bimportScripts\s*\((${LOCAL_SCRIPT_LIST})\)`, 'g'))) {
+    for (const lit of m[1].matchAll(/["']([^"']+)["']/g)) {
+      const url = lit[1];
+      out.push(url.startsWith('/') ? strip(url) : posix.normalize(posix.join(posix.dirname(name), url)));
+    }
+  }
+  return [...new Set(out)];
+}
+
 const globToRegExp = (glob) =>
   new RegExp(
     '^' +
@@ -517,6 +588,11 @@ export function verifyPackage(entries) {
     if (/\.m?js$/i.test(entry.name)) {
       for (const ref of injectedFiles(src)) {
         if (!names.has(ref)) problems.push(`${entry.name} injects "${ref}", which is not in the package`);
+      }
+      for (const ref of importedScripts(entry.name, src)) {
+        if (!names.has(ref)) {
+          problems.push(`${entry.name} loads "${ref}" with importScripts(), which is not in the package`);
+        }
       }
     }
   }

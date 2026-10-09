@@ -1,4 +1,5 @@
-// Vitest setup file: make the classic-script suites visible to V8 coverage.
+// Vitest setup file: make the classic-script suites visible — and accurately
+// measured — by V8 coverage.
 //
 // background.js, content.js, sidepanel.js and popup.js are classic scripts, so the
 // suites run the real shipping file through node:vm rather than importing it. V8
@@ -6,22 +7,25 @@
 // the suite passed — 'sidepanel.js', 'src/background.js' — which the coverage
 // provider cannot map back to a file on disk, so those files used to report 0%.
 //
-// This rewrites the filename to the file's absolute file:// URL whenever the code
-// being compiled is byte-identical to a file in src/. Nothing else changes: same
-// code, same context, and any other vm call passes through untouched.
+// This rewrites the filename to the file's absolute file:// URL plus a marker
+// (see classic-scripts.mjs) whenever the code being compiled is byte-identical to a
+// file in src/. The marker tells tests/support/coverage-provider.mjs that the
+// offsets index the raw file, not Vite's transformed copy. Nothing else changes:
+// same code, same context, and any other vm call passes through untouched.
 
 import { readdirSync, readFileSync } from 'node:fs';
-import { dirname, join, resolve } from 'node:path';
-import { fileURLToPath, pathToFileURL } from 'node:url';
+import { join } from 'node:path';
 import vm from 'node:vm';
 
-const SRC = resolve(dirname(fileURLToPath(import.meta.url)), '../../src');
+import { classicDir, vmFilename } from './classic-scripts.mjs';
+
+const SRC = classicDir();
 
 const bySource = new Map();
 for (const name of readdirSync(SRC)) {
   if (!name.endsWith('.js')) continue;
   const abs = join(SRC, name);
-  bySource.set(readFileSync(abs, 'utf8'), pathToFileURL(abs).href);
+  bySource.set(readFileSync(abs, 'utf8'), vmFilename(abs));
 }
 
 function withRealFilename(code, options) {

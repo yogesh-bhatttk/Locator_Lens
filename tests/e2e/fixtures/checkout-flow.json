@@ -1,0 +1,521 @@
+{
+  "actions": [
+    {
+      "eventId": "e2e-01",
+      "sequence": 1,
+      "timestamp": 1791580000900,
+      "url": "{{BASE}}/checkout",
+      "action": "goto",
+      "value": "{{BASE}}/checkout",
+      "code": "",
+      "fullCode": "",
+      "target": null,
+      "assertType": null
+    },
+    {
+      "eventId": "e2e-02",
+      "sequence": 2,
+      "timestamp": 1791580001800,
+      "url": "{{BASE}}/checkout",
+      "action": "viewport",
+      "value": "1280x800",
+      "code": "",
+      "fullCode": "",
+      "target": null,
+      "assertType": null
+    },
+    {
+      "eventId": "e2e-03",
+      "sequence": 3,
+      "timestamp": 1791580002700,
+      "url": "{{BASE}}/checkout",
+      "action": "hover",
+      "value": "",
+      "code": "page.getByTestId('account-menu')",
+      "fullCode": "",
+      "target": {
+        "kind": "testid",
+        "attr": "data-testid",
+        "value": "account-menu"
+      },
+      "assertType": null
+    },
+    {
+      "eventId": "e2e-04",
+      "sequence": 4,
+      "timestamp": 1791580003600,
+      "url": "{{BASE}}/checkout",
+      "action": "fill",
+      "value": "Ada",
+      "code": "page.getByLabel('First name')",
+      "fullCode": "",
+      "target": {
+        "kind": "label",
+        "value": "First name"
+      },
+      "assertType": null,
+      "inputType": "text"
+    },
+    {
+      "eventId": "e2e-05",
+      "sequence": 5,
+      "timestamp": 1791580004500,
+      "url": "{{BASE}}/checkout",
+      "action": "fill",
+      "value": "Lovelace",
+      "code": "page.getByRole('textbox', { name: 'Last name' })",
+      "fullCode": "",
+      "target": {
+        "kind": "role",
+        "role": "textbox",
+        "name": "Last name"
+      },
+      "assertType": null,
+      "inputType": "text"
+    },
+    {
+      "eventId": "e2e-06",
+      "sequence": 6,
+      "timestamp": 1791580005400,
+      "url": "{{BASE}}/checkout",
+      "action": "fill",
+      "value": "ada@example.com",
+      "code": "page.getByTestId('checkout-email')",
+      "fullCode": "",
+      "target": {
+        "kind": "testid",
+        "attr": "data-testid",
+        "value": "checkout-email"
+      },
+      "assertType": null,
+      "inputType": "email"
+    },
+    {
+      "eventId": "e2e-07",
+      "sequence": 7,
+      "timestamp": 1791580006300,
+      "url": "{{BASE}}/checkout",
+      "action": "fill",
+      "value": "+44 20 7946 0001",
+      "code": "page.getByPlaceholder('+44 20 7946 0000')",
+      "fullCode": "",
+      "target": {
+        "kind": "placeholder",
+        "value": "+44 20 7946 0000"
+      },
+      "assertType": null,
+      "inputType": "tel"
+    },
+    {
+      "eventId": "e2e-08",
+      "sequence": 8,
+      "timestamp": 1791580007200,
+      "url": "{{BASE}}/checkout",
+      "action": "check",
+      "value": "",
+      "code": "page.getByRole('checkbox', { name: 'Create an account for faster checkout' })",
+      "fullCode": "",
+      "target": {
+        "kind": "role",
+        "role": "checkbox",
+        "name": "Create an account for faster checkout"
+      },
+      "assertType": null
+    },
+    {
+      "eventId": "e2e-09",
+      "sequence": 9,
+      "timestamp": 1791580008100,
+      "url": "{{BASE}}/checkout",
+      "action": "fill",
+      "value": "",
+      "code": "page.getByLabel('Password', { exact: true })",
+      "fullCode": "",
+      "target": {
+        "kind": "label",
+        "value": "Password",
+        "exact": true
+      },
+      "assertType": null,
+      "sensitive": true,
+      "secretName": "LOCATRA_PASSWORD",
+      "inputType": "password"
+    },
+    {
+      "eventId": "e2e-10",
+      "sequence": 10,
+      "timestamp": 1791580009000,
+      "url": "{{BASE}}/checkout",
+      "action": "selectOption",
+      "value": "Ireland",
+      "code": "page.getByRole('combobox', { name: 'Country' })",
+      "fullCode": "",
+      "target": {
+        "kind": "role",
+        "role": "combobox",
+        "name": "Country"
+      },
+      "assertType": null
+    },
+    {
+      "eventId": "e2e-11",
+      "sequence": 11,
+      "timestamp": 1791580009900,
+      "url": "{{BASE}}/checkout",
+      "action": "fill",
+      "value": "Ring the bell twice",
+      "code": "page.locator('[name=\"notes\"]')",
+      "fullCode": "",
+      "target": {
+        "kind": "name",
+        "value": "notes"
+      },
+      "assertType": null,
+      "inputType": "textarea"
+    },
+    {
+      "eventId": "e2e-12",
+      "sequence": 12,
+      "timestamp": 1791580010800,
+      "url": "{{BASE}}/checkout",
+      "action": "check",
+      "value": "",
+      "code": "page.getByLabel('Gift wrap this order (+ £3.50)')",
+      "fullCode": "",
+      "target": {
+        "kind": "label",
+        "value": "Gift wrap this order (+ £3.50)"
+      },
+      "assertType": null
+    },
+    {
+      "eventId": "e2e-13",
+      "sequence": 13,
+      "timestamp": 1791580011700,
+      "url": "{{BASE}}/checkout",
+      "action": "uncheck",
+      "value": "",
+      "code": "page.getByRole('checkbox', { name: 'Save these details for next time' })",
+      "fullCode": "",
+      "target": {
+        "kind": "role",
+        "role": "checkbox",
+        "name": "Save these details for next time"
+      },
+      "assertType": null
+    },
+    {
+      "eventId": "e2e-14",
+      "sequence": 14,
+      "timestamp": 1791580012600,
+      "url": "{{BASE}}/payment-frame",
+      "action": "fill",
+      "value": "4242 4242 4242 4242",
+      "code": "page.frameLocator('#payment-frame').getByLabel('Card number')",
+      "fullCode": "",
+      "target": {
+        "kind": "frame",
+        "selector": "#payment-frame",
+        "index": 0,
+        "child": {
+          "kind": "label",
+          "value": "Card number"
+        }
+      },
+      "assertType": null,
+      "inputType": "text"
+    },
+    {
+      "eventId": "e2e-15",
+      "sequence": 15,
+      "timestamp": 1791580013500,
+      "url": "{{BASE}}/payment-frame",
+      "action": "click",
+      "value": "",
+      "code": "page.frameLocator('#payment-frame').getByRole('button', { name: 'Pay now' })",
+      "fullCode": "",
+      "target": {
+        "kind": "frame",
+        "selector": "#payment-frame",
+        "index": 0,
+        "child": {
+          "kind": "role",
+          "role": "button",
+          "name": "Pay now"
+        }
+      },
+      "assertType": null
+    },
+    {
+      "eventId": "e2e-16",
+      "sequence": 16,
+      "timestamp": 1791580014400,
+      "url": "{{BASE}}/payment-frame",
+      "action": "assert",
+      "value": "Card ending 4242 saved",
+      "code": "page.frameLocator('#payment-frame').getByTestId('pay-status')",
+      "fullCode": "",
+      "target": {
+        "kind": "frame",
+        "selector": "#payment-frame",
+        "index": 0,
+        "child": {
+          "kind": "testid",
+          "attr": "data-testid",
+          "value": "pay-status"
+        }
+      },
+      "assertType": "toHaveText"
+    },
+    {
+      "eventId": "e2e-17",
+      "sequence": 17,
+      "timestamp": 1791580015300,
+      "url": "{{BASE}}/checkout",
+      "action": "click",
+      "value": "",
+      "code": "page.getByTestId('checkout-email')",
+      "fullCode": "",
+      "target": {
+        "kind": "testid",
+        "attr": "data-testid",
+        "value": "checkout-email"
+      },
+      "assertType": null
+    },
+    {
+      "eventId": "e2e-18",
+      "sequence": 18,
+      "timestamp": 1791580016200,
+      "url": "{{BASE}}/checkout",
+      "action": "press",
+      "value": "Tab",
+      "code": "",
+      "fullCode": "",
+      "target": null,
+      "assertType": null
+    },
+    {
+      "eventId": "e2e-19",
+      "sequence": 19,
+      "timestamp": 1791580017100,
+      "url": "{{BASE}}/checkout",
+      "action": "press",
+      "value": "Tab",
+      "code": "",
+      "fullCode": "",
+      "target": null,
+      "assertType": null
+    },
+    {
+      "eventId": "e2e-20",
+      "sequence": 20,
+      "timestamp": 1791580018000,
+      "url": "{{BASE}}/checkout",
+      "action": "press",
+      "value": "Shift+Tab",
+      "code": "",
+      "fullCode": "",
+      "target": null,
+      "assertType": null
+    },
+    {
+      "eventId": "e2e-21",
+      "sequence": 21,
+      "timestamp": 1791580018900,
+      "url": "{{BASE}}/checkout",
+      "action": "press",
+      "value": "Enter",
+      "code": "",
+      "fullCode": "",
+      "target": null,
+      "assertType": null
+    },
+    {
+      "eventId": "e2e-22",
+      "sequence": 22,
+      "timestamp": 1791580019800,
+      "url": "{{BASE}}/checkout/confirmed",
+      "action": "assert",
+      "value": "",
+      "code": "page.getByRole('heading', { name: 'Order confirmed' })",
+      "fullCode": "",
+      "target": {
+        "kind": "role",
+        "role": "heading",
+        "name": "Order confirmed"
+      },
+      "assertType": "toBeVisible"
+    },
+    {
+      "eventId": "e2e-23",
+      "sequence": 23,
+      "timestamp": 1791580020700,
+      "url": "{{BASE}}/checkout/confirmed",
+      "action": "assert",
+      "value": "Ada Lovelace",
+      "code": "page.getByTestId('confirmation-name')",
+      "fullCode": "",
+      "target": {
+        "kind": "testid",
+        "attr": "data-testid",
+        "value": "confirmation-name"
+      },
+      "assertType": "toHaveText"
+    },
+    {
+      "eventId": "e2e-24",
+      "sequence": 24,
+      "timestamp": 1791580021600,
+      "url": "{{BASE}}/checkout/confirmed",
+      "action": "assert",
+      "value": "Confirmation sent to ada@example.com",
+      "code": "page.getByTestId('confirmation-details')",
+      "fullCode": "",
+      "target": {
+        "kind": "testid",
+        "attr": "data-testid",
+        "value": "confirmation-details"
+      },
+      "assertType": "toContainText"
+    },
+    {
+      "eventId": "e2e-25",
+      "sequence": 25,
+      "timestamp": 1791580022500,
+      "url": "{{BASE}}/checkout/confirmed",
+      "action": "assert",
+      "value": "Card ending 4242",
+      "code": "page.getByTestId('confirmation-details')",
+      "fullCode": "",
+      "target": {
+        "kind": "testid",
+        "attr": "data-testid",
+        "value": "confirmation-details"
+      },
+      "assertType": "toContainText"
+    },
+    {
+      "eventId": "e2e-26",
+      "sequence": 26,
+      "timestamp": 1791580023400,
+      "url": "{{BASE}}/checkout/confirmed",
+      "action": "assert",
+      "value": "true",
+      "code": "page.locator('#gift-wrap')",
+      "fullCode": "",
+      "target": {
+        "kind": "id",
+        "value": "gift-wrap"
+      },
+      "assertType": "toBeChecked"
+    },
+    {
+      "eventId": "e2e-27",
+      "sequence": 27,
+      "timestamp": 1791580024300,
+      "url": "{{BASE}}/checkout/confirmed",
+      "action": "assert",
+      "value": "false",
+      "code": "page.locator('#save-details')",
+      "fullCode": "",
+      "target": {
+        "kind": "css",
+        "value": "#save-details"
+      },
+      "assertType": "toBeChecked"
+    },
+    {
+      "eventId": "e2e-28",
+      "sequence": 28,
+      "timestamp": 1791580025200,
+      "url": "{{BASE}}/checkout/confirmed",
+      "action": "assert",
+      "value": "Ireland",
+      "code": "page.locator('#country')",
+      "fullCode": "",
+      "target": {
+        "kind": "id",
+        "value": "country"
+      },
+      "assertType": "toHaveValue"
+    },
+    {
+      "eventId": "e2e-29",
+      "sequence": 29,
+      "timestamp": 1791580026100,
+      "url": "{{BASE}}/checkout/confirmed",
+      "action": "assert",
+      "value": "",
+      "code": "page.locator('table').getByText('Refactoring', { exact: true })",
+      "fullCode": "",
+      "target": {
+        "kind": "chain",
+        "parent": {
+          "kind": "css",
+          "value": "table"
+        },
+        "child": {
+          "kind": "text",
+          "value": "Refactoring",
+          "exact": true
+        }
+      },
+      "assertType": "toBeVisible"
+    },
+    {
+      "eventId": "e2e-30",
+      "sequence": 30,
+      "timestamp": 1791580027000,
+      "url": "{{BASE}}/checkout/confirmed",
+      "action": "assert",
+      "value": "{{BASE}}/checkout/confirmed",
+      "code": "",
+      "fullCode": "",
+      "target": null,
+      "assertType": "toHaveURL",
+      "suggested": false,
+      "reason": "Page navigated to /checkout/confirmed"
+    }
+  ],
+  "seenKeys": [
+    "eid:e2e-01",
+    "eid:e2e-02",
+    "eid:e2e-03",
+    "eid:e2e-04",
+    "eid:e2e-05",
+    "eid:e2e-06",
+    "eid:e2e-07",
+    "eid:e2e-08",
+    "eid:e2e-09",
+    "eid:e2e-10",
+    "eid:e2e-11",
+    "eid:e2e-12",
+    "eid:e2e-13",
+    "eid:e2e-14",
+    "eid:e2e-15",
+    "eid:e2e-16",
+    "eid:e2e-17",
+    "eid:e2e-18",
+    "eid:e2e-19",
+    "eid:e2e-20",
+    "eid:e2e-21",
+    "eid:e2e-22",
+    "eid:e2e-23",
+    "eid:e2e-24",
+    "eid:e2e-25",
+    "eid:e2e-26",
+    "eid:e2e-27",
+    "eid:e2e-28",
+    "eid:e2e-29",
+    "eid:e2e-30"
+  ],
+  "codePreview": "",
+  "codeEdited": false,
+  "codeFramework": "playwright",
+  "codeLanguage": "typescript",
+  "syncedStepKeys": [],
+  "lastPageUrl": "{{BASE}}/checkout/confirmed",
+  "windowId": null,
+  "updatedAt": 1791580027000
+}

@@ -1,0 +1,17 @@
+{
+  "description": "The order the demo checkout must receive after any exported script replays checkout-flow.json (or the flow recorded through the extension). {{LOCATRA_PASSWORD}} is the secret the run passes through the environment: the exported scripts never contain it.",
+  "order": {
+    "firstName": "Ada",
+    "lastName": "Lovelace",
+    "email": "ada@example.com",
+    "phone": "+44 20 7946 0001",
+    "country": "Ireland",
+    "notes": "Ring the bell twice",
+    "giftWrap": true,
+    "saveDetails": false,
+    "createAccount": true,
+    "password": "{{LOCATRA_PASSWORD}}",
+    "card": "4242424242424242",
+    "submittedFrom": "phone"
+  }
+}

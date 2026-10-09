@@ -1,0 +1,8 @@
+# Python packages the exported Python scripts need to run for real
+# (npm run test:exports). Pinned to the versions the Node side uses:
+# playwright 1.59 drives the same Chromium build as @playwright/test 1.59.1, and
+# selenium matches selenium-webdriver 4.50.0.
+playwright==1.59.0
+pytest==8.4.2
+pytest-playwright==0.7.1
+selenium==4.50.0
