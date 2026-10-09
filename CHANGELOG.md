@@ -2,6 +2,124 @@
 
 All notable changes to Locatra (formerly LocatorLens). Versions follow [semantic versioning](https://semver.org).
 
+## [1.4.0] — 2026-10-09
+
+A full audit of every feature and file. Renames the extension to **Locatra** and fixes
+everything the audit found. Locator uniqueness now matches what Playwright actually
+does, the recorder no longer captures secrets, and the Selenium and Cypress exports
+now find labelled form fields.
+
+### Security & privacy
+
+- **Passwords, one-time codes and card fields are never recorded.** The step stores no
+  value. The generated fill reads `LOCATRA_PASSWORD` / `LOCATRA_SECRET` from the
+  environment (`process.env`, `os.environ`, `Cypress.env`, with `log: false`).
+  Previously the real password was shown in the timeline, written into the script and
+  kept in `chrome.storage.local`.
+- Secret URL parameters (`password`, `access_token`, `api_key`, …) are redacted in
+  recorded URLs.
+- The side panel's HTML sanitizer is now an allowlist.
+
+### Fixed — locators
+
+- The CSS fallback no longer returns an ancestor's `#id` instead of the element.
+- Uniqueness is counted with Playwright's own matching rules: case-insensitive
+  substring, whitespace-normalized, and hidden elements excluded for `getByRole`. When
+  only the exact text is unique, the locator says `exact: true`. "Save" next to
+  "Save draft" is no longer reported as unique.
+- Unique locators always rank above ambiguous ones, so the recorder never picks an
+  ambiguous locator when a unique one exists.
+- Implicit roles and accessible names follow Playwright: `aria-labelledby` before
+  `aria-label`, `select[multiple]` is a listbox, `alt=""` images are presentation,
+  unnamed `<section>`s are not regions, and more.
+- `getByText` matches the smallest element containing the text, as Playwright does.
+  Text over 60 characters no longer produces a locator that matches nothing.
+- `getByLabel` covers `aria-labelledby` and labelled ARIA widgets.
+- There is no longer a 4,000-element scan limit, and open shadow roots are counted
+  everywhere.
+- Generated-class and generated-id detection: Bootstrap classes such as
+  `btn-primary` are no longer flagged. CSS-modules, styled-components and emotion
+  hashes, React `useId` ids, Radix, MUI and Angular Material ids and UUIDs are now
+  caught.
+
+### Fixed — recorder
+
+- Recording on a page with iframes (ads, reCAPTCHA, chat widgets) no longer adds
+  `page.goto(<iframe url>)` steps.
+- A fill is always recorded before the Enter or click that commits it, and only once.
+- Typing, checkboxes and selects inside shadow DOM components are recorded.
+- Capture resumes immediately after navigation, including inside iframes and iframes
+  added later. Tabs opened from the recorded tab join the recording.
+- Stop, Pause, Resume and assert mode act on the tab being recorded, not whichever
+  tab is active. Assert mode survives navigation.
+- Steps recorded while the side panel is closed are kept and delivered when it
+  reopens.
+- Recording inspects without clicking the page. Assert mode and Alt+Click no longer
+  trigger the page's own action.
+- File uploads record `setInputFiles`. Range, color and date inputs record their
+  value. Double-click records one step. Keyboard combos such as Shift+Tab are recorded
+  correctly, and IME composition no longer records a stray Enter.
+- Long-text assertions no longer fail, because they use `toContainText`.
+- A tab whose content script was orphaned by an extension update recovers without a
+  page reload.
+- Iframes added inside open shadow DOM, such as payment or chat widgets built as web
+  components, now get the content script. Their frame selectors are checked for
+  uniqueness across all shadow roots.
+
+### Fixed — Selenium & Cypress export
+
+- Role, label and text locators now match form controls by their accessible name:
+  `<label for>`, a wrapping `<label>`, `aria-label`, `aria-labelledby`. Previously they
+  matched nothing.
+- The Selenium text XPath no longer resolves to `<html>`.
+- Cypress: Tab uses `cy.press`. Typed values containing `{…}` are typed literally.
+  ARIA checkboxes can be checked. Cross-origin steps are wrapped in `cy.origin`.
+- Selenium: check and uncheck are idempotent, and the viewport step sets the viewport
+  size rather than the window size.
+- Every control character is escaped in every language. A NUL byte no longer breaks
+  Python output.
+- Cypress key combos, such as Shift+Tab, use `cy.realPress` from
+  [cypress-real-events](https://github.com/dmtrKovalenko/cypress-real-events). Unlike
+  `cy.type` modifiers, it makes the browser do the real thing, such as moving focus
+  backwards.
+  - The import is added only when a spec needs it.
+  - Specs that use it run in Chromium-based browsers only.
+  - Inside `cy.origin()` blocks it also needs `experimentalOriginDependencies: true`.
+- Frames inside shadow DOM: Selenium steps through `getShadowRoot()` / `shadow_root`,
+  and Cypress through `.shadow()`, to reach the frame.
+- Custom test-attribute names containing CSS-special characters (`data:qa`) are
+  escaped.
+
+### Fixed — UI
+
+- "Open Results Panel" in the popup now actually opens the panel. It is opened
+  directly from the click, which browsers require. Firefox can also close it.
+- Locatra reports when it can't run on a page (browser pages, the Web Store, PDFs)
+  instead of showing "Recording" while capturing nothing.
+- Side panels in different windows no longer receive each other's steps or picks.
+- Switching framework after editing the script asks before discarding the edits.
+- Reset no longer comes back after a framework switch.
+- The panel works in narrow Firefox sidebars.
+- The Copy button no longer gets stuck on "✓ Copied".
+- The Stress Test no longer shows two contradictory results.
+- Accessibility fixes: labelled step buttons, `aria-expanded` on toggles, and focus
+  kept after removing a step.
+
+### Tooling
+
+- CI was red on formatting. The pre-commit hook now runs Prettier as well as ESLint.
+- ESLint 9 with a flat config.
+- Coverage is measured for every source file, with ratcheted thresholds. Locator
+  engine coverage went from 70% to 99% statements, and the expected values in its
+  tests are checked against real Playwright.
+- The store-policy build check is stricter and its own tests now include fixtures
+  that must fail.
+- Firefox packages are validated with `web-ext lint`.
+- The smoke test now proves in a real browser that passwords are never stored and
+  that Selenium locators resolve.
+- Store promo art and docs use the Locatra name. The privacy policy describes exactly
+  what is stored.
+
 ## [1.3.0] — 2026-08-02
 
 Adds iframe support, and clears the remaining known gaps from the 1.2.1 audit.
