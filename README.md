@@ -63,6 +63,10 @@ with `package.json` and both browser manifests by `node scripts/version.mjs`.
 - **Secrets stay out of tests:** password and one-time-code fields are recorded without their value — the generated script reads `process.env.LOCATRA_PASSWORD` / `LOCATRA_SECRET` (or the framework's equivalent) instead — and secret-looking URL parameters (`password`, `token`, `api_key`, …) are written as `REDACTED`.
 - **Pause/resume**, **undo/redo**, a **filterable, collapsible timeline**, and recording that **survives full-page navigation**.
 - Produces an editable, **syntax-highlighted** test script in your chosen framework + language; copy or download.
+- **Replay** the recording in the current tab, step by step, with a pass/fail badge per step (stop at first failure, optional slow motion); password steps ask for their value for that run only.
+- **Automatic assertion suggestions:** when the URL changes or a confirmation message appears after a submit, a suggested check (`toHaveURL`, `toContainText`) appears in the timeline — nothing reaches the test until you accept it.
+- **Step screenshots:** each step gets a thumbnail in the timeline, kept locally in IndexedDB (switch off in the Record tab's Settings).
+- **Page Object export:** pick a region (or the whole page) and get a page-object class with named, uniqueness-checked locators and helper methods for every framework and language.
 
 ### Clean, theme-aware UI
 
@@ -99,21 +103,26 @@ Use `dist/` for anything you intend to submit — see
 
 ## Development
 
-| Command                 | What it does                                                                                                 |
-| ----------------------- | ------------------------------------------------------------------------------------------------------------ |
-| `npm run lint`          | ESLint (flat config, `eslint.config.mjs`) over `src/`, `scripts/`, `tests/`                                  |
-| `npm run format:check`  | Prettier check over scripts, tests, configs and docs (`src/` is excluded — see `.prettierignore`)            |
-| `npm test`              | Vitest suites for codegen, the locator engine, content scripts, the service worker, the panels and packaging |
-| `npm run test:coverage` | The same suites with V8 coverage and the thresholds in `vitest.config.mjs` enforced                          |
-| `npm run build`         | Reproducible Chrome + Firefox packages in `dist/`                                                            |
-| `npm run lint:firefox`  | Mozilla's `web-ext lint` over `dist/firefox` (fetched on demand with `npx`; run after `npm run build`)       |
-| `npm run version:check` | Assert `package.json`, the lockfile and all three manifests agree                                            |
-| `npm run screenshots`   | Capture store listing images from the built extension                                                        |
-| `npm run smoke`         | Drive the built extension end to end in a real Chromium                                                      |
-| `npm run verify`        | Version check + format check + lint + tests with coverage + build — run this before submitting               |
+| Command                              | What it does                                                                                                 |
+| ------------------------------------ | ------------------------------------------------------------------------------------------------------------ |
+| `npm run lint`                       | ESLint (flat config, `eslint.config.mjs`) over `src/`, `scripts/`, `tests/`                                  |
+| `npm run format:check`               | Prettier check over scripts, tests, configs and docs (`src/` is excluded — see `.prettierignore`)            |
+| `npm test`                           | Vitest suites for codegen, the locator engine, content scripts, the service worker, the panels and packaging |
+| `npm run test:coverage`              | The same suites with V8 coverage and the thresholds in `vitest.config.mjs` enforced                          |
+| `npm run build`                      | Reproducible Chrome + Firefox packages in `dist/`                                                            |
+| `npm run lint:firefox`               | Mozilla's `web-ext lint` over `dist/firefox` (fetched on demand with `npx`; run after `npm run build`)       |
+| `npm run version:check`              | Assert `package.json`, the lockfile and all three manifests agree                                            |
+| `npm run screenshots`                | Capture store listing images from the built extension                                                        |
+| `npm run smoke`                      | Drive the built extension end to end in a real Chromium                                                      |
+| `npm run smoke:all`                  | Also run the Page Object and step-screenshot smokes (`smoke:pom`, `smoke:screenshots`)                       |
+| `npm run test:exports`               | Run every exported test (Playwright / Selenium / Cypress × TS / JS / Python) for real against the demo page  |
+| `npm run test:exports:setup-python`  | Install the Python packages the Python exports need into `node_modules/.cache` (no venv needed)              |
+| `npm run test:exports:setup-cypress` | Install Cypress, `cypress-real-events` and TypeScript without saving them (the binary is large)              |
+| `npm run verify`                     | Version check + format check + lint + tests with coverage + build — run this before submitting               |
 
-CI runs the version check, format check, lint, coverage, build, `web-ext lint` and
-the smoke test (under `xvfb`) on every push and pull request. A pre-commit hook runs Prettier and ESLint over staged files via
+CI runs the version check, format check, lint, coverage, build, `web-ext lint`, the
+smoke test (under `xvfb`) and the export runs (every Playwright and Selenium export in
+one job, the Cypress exports in another) on every push and pull request. A pre-commit hook runs Prettier and ESLint over staged files via
 `lint-staged`. Use the Node version in `.nvmrc` (22) — see
 [STORE_SUBMISSION.md](STORE_SUBMISSION.md) for why it matters to reproducible builds.
 
@@ -144,12 +153,17 @@ all generated by `npm run screenshots` from the built extension.
 │   ├── content.js              # Overlay, inspect, recorder, selector lab
 │   ├── sidepanel.js / .html    # Main UI: inspect + record
 │   ├── popup.js / .html        # Compact launcher
+│   ├── thumbs-store.js         # IndexedDB store for step screenshots (worker + panel)
 ├── manifests/                  # Browser-specific manifest variants
 ├── scripts/
 │   ├── build.mjs               # Allowlist packaging + store-policy gate
 │   ├── version.mjs             # Keeps package.json + all manifests in step
+│   ├── smoke.mjs               # Built extension, driven end to end in Chromium
+│   ├── e2e/                    # npm run test:exports: demo server, recorder, runners
 │   └── screenshots/            # Demo page + capture script for listing images
 ├── tests/                      # Vitest suites
+│   ├── e2e/                    # Export-run fixtures and per-framework launch shims
+│   └── support/                # vm coverage plumbing + its accuracy proof
 ├── screenshots/store/          # Store listing images (regenerable)
 ├── icons/
 └── manifest.json               # Root manifest — always identical to manifests/manifest.chrome.json
@@ -165,13 +179,14 @@ justifications), [build_process.md](build_process.md) (architecture),
 
 Locatra requests only what it needs to inspect pages and drive the side panel locally — there is no network/host call to any Locatra server.
 
-| Permission                                              | Why it’s needed                                                                                |
-| ------------------------------------------------------- | ---------------------------------------------------------------------------------------------- |
-| `activeTab`                                             | act on the tab you’re using when you invoke a feature, even with site access set to “on click” |
-| `scripting` + host access (`http://*/*`, `https://*/*`) | inject the inspector/recorder content scripts into the page you’re testing                     |
-| `storage`                                               | remember your last pick, recorder timeline, and framework/language choice — on device          |
-| `contextMenus`                                          | the right-click “Copy Best Locator” / panel entries                                            |
-| `sidePanel` (Chrome) · `sidebar_action` (Firefox)       | the side-panel / sidebar surface                                                               |
+| Permission                                              | Why it’s needed                                                                                                |
+| ------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------- |
+| `activeTab`                                             | act on the tab you’re using when you invoke a feature, even with site access set to “on click”                 |
+| `scripting` + host access (`http://*/*`, `https://*/*`) | inject the inspector/recorder content scripts into the page you’re testing                                     |
+| `storage`                                               | remember your last pick, recorder timeline, and framework/language choice — on device                          |
+| `contextMenus`                                          | the right-click “Copy Best Locator” / panel entries                                                            |
+| `sidePanel` (Chrome) · `sidebar_action` (Firefox)       | the side-panel / sidebar surface                                                                               |
+| `optional_host_permissions: <all_urls>` (optional)      | step screenshots only: asked for when you switch them on, never at install; thumbnails stay in local IndexedDB |
 
 `tabs` is deliberately **not** requested — everything the extension does with
 `chrome.tabs` works without it, and the build fails if it ever reappears.

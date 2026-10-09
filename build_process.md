@@ -154,6 +154,7 @@ repository root directly. The Chrome manifest sets `minimum_chrome_version: "116
 | Permission / key                                          | Used by                                                                                                                                                                                                                                                                                                                                  |
 | --------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `activeTab`                                               | Host access to the tab the user is on at the moment they invoke a feature. Keeps Inspect / Record / Lab / Stress Test working for users who set Chrome site access to "on click" or revoke Firefox host permissions. It gates no API, so there is no call signature to point at (`HOST_ACCESS_PERMISSIONS` in `scripts/lib/policy.mjs`). |
+| `optional_host_permissions: <all_urls>` (optional)        | `chrome.tabs.captureVisibleTab` for step screenshots, which needs `<all_urls>` or an activeTab grant; requested with `chrome.permissions.request` when the user enables screenshots, never at install. The policy check accepts `<all_urls>` only here, and only when the package calls `permissions.request` with it                    |
 | `scripting` + `host_permissions: http://*/*, https://*/*` | `chrome.scripting.executeScript` (inject content scripts on demand — pages that loaded before the extension, sub-frames for Inspect/Record, the Lab relay, Stress Test, context-menu copy) and content-script messaging on any web page                                                                                                  |
 | `storage`                                                 | `chrome.storage.local` (last picked element, recorder timeline and script draft, framework/language) and `chrome.storage.session` (worker state, steps buffered while the panel is closed)                                                                                                                                               |
 | `contextMenus`                                            | the “Copy Best Locator” / panel entries                                                                                                                                                                                                                                                                                                  |
@@ -194,21 +195,39 @@ cannot quietly stop being true.
 `npm test` runs the Vitest suites below. They drive the real shipping files —
 nothing is duplicated or re-implemented for testability.
 
-| Suite                                 | Environment | Covers                                                                                                                                                                                                                                                 |
-| ------------------------------------- | ----------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| `tests/codegen.test.mjs`              | node        | Every framework × language combination, action and assertion statements, script scaffolding, and escaping of values containing quotes, backslashes and newlines                                                                                        |
-| `tests/locator-engine.dom.test.mjs`   | jsdom       | Role resolution, accessible-name computation, ranking and stability, live uniqueness counts, the a11y audit, and CSS-special identifiers                                                                                                               |
-| `tests/content-script.dom.test.mjs`   | jsdom       | Loads all three content scripts in manifest order behind a `chrome` stub and drives them through the background's message API — inspect lifecycle, Selector Lab, Stress Test, recorder controls                                                        |
-| `tests/sidepanel-render.dom.test.mjs` | jsdom       | `esc` / `hl` / `safeRender`, including that inline event handlers, `<script>` and `javascript:` URLs never survive rendering, plus panel startup, recorder timeline and script-editor behaviour                                                        |
-| `tests/background.test.mjs`           | node        | The service worker, run in fresh `node:vm` contexts over a shared `chrome` stub — message routing, injection and recording state across worker eviction                                                                                                |
-| `tests/popup.dom.test.mjs`            | jsdom       | The popup launcher's buttons and its state sync with the service worker                                                                                                                                                                                |
-| `tests/package.test.mjs`              | node        | The store-policy rules (`scripts/lib/policy.mjs`) against fixtures that must fail; both packages built into a temp dir and checked; archives read back with `unzip -t`, Python `zipfile` and a CRC-checking reader; docs checked against the manifests |
+| Suite                                                                                                                                                                  | Environment  | Covers                                                                                                                                                                                                                                                      |
+| ---------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------ | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `tests/codegen.test.mjs`                                                                                                                                               | node         | Every framework × language combination, action and assertion statements, script scaffolding, and escaping of values containing quotes, backslashes and newlines                                                                                             |
+| `tests/locator-engine.dom.test.mjs`                                                                                                                                    | jsdom        | Role resolution, accessible-name computation, ranking and stability, live uniqueness counts, the a11y audit, and CSS-special identifiers                                                                                                                    |
+| `tests/content-script.dom.test.mjs`                                                                                                                                    | jsdom        | Loads all three content scripts in manifest order behind a `chrome` stub and drives them through the background's message API — inspect lifecycle, Selector Lab, Stress Test, recorder controls                                                             |
+| `tests/sidepanel-render.dom.test.mjs`                                                                                                                                  | jsdom        | `esc` / `hl` / `safeRender`, including that inline event handlers, `<script>` and `javascript:` URLs never survive rendering, plus panel startup, recorder timeline and script-editor behaviour                                                             |
+| `tests/background.test.mjs`                                                                                                                                            | node         | The service worker, run in fresh `node:vm` contexts over a shared `chrome` stub — message routing, injection and recording state across worker eviction                                                                                                     |
+| `tests/popup.dom.test.mjs`                                                                                                                                             | jsdom        | The popup launcher's buttons and its state sync with the service worker                                                                                                                                                                                     |
+| `tests/*-replay*.test.mjs`, `tests/*pom*.test.mjs`, `tests/content-suggestions.dom.test.mjs`, `tests/*thumbs*.test.mjs`, `tests/sidepanel-features/flows.dom.test.mjs` | node / jsdom | Replay orchestration and in-page step execution, Page Object scanning and generation, automatic assertion suggestions, the IndexedDB thumbnail store, and the panel flows that drive them                                                                   |
+| `tests/support/coverage-accuracy.test.mjs`                                                                                                                             | node         | Proves coverage of the classic scripts is measured correctly (see below): a throwaway project measures the same workload through `vm` and through `import`, and both must equal Vite's source-mapped measurement statement for statement, branch for branch |
+| `tests/package.test.mjs`                                                                                                                                               | node         | The store-policy rules (`scripts/lib/policy.mjs`) against fixtures that must fail; both packages built into a temp dir and checked; archives read back with `unzip -t`, Python `zipfile` and a CRC-checking reader; docs checked against the manifests      |
 
 `.github/workflows/ci.yml` runs version check → format check → lint → tests with
 coverage → build → `web-ext lint` (Mozilla's validator, over `dist/firefox`) on every
 push and pull request and uploads both `.zip` files as artifacts; a second job runs
-the browser smoke test below under `xvfb`. A pre-commit hook runs Prettier and ESLint
+the browser smoke test below under `xvfb`, and two more run the exported tests for
+real (`npm run test:exports`, below) — Playwright and Selenium in one, Cypress in
+the other. A pre-commit hook runs Prettier and ESLint
 over staged files via `lint-staged`.
+
+### Coverage of classic scripts
+
+Every file in `src/` is a classic script, and most suites run it through `node:vm`.
+The stock `@vitest/coverage-v8` provider remapped those runs' raw V8 offsets onto
+Vite's _transformed_ copy of the file, so executed statements and implicit `else`
+branches were reported as uncovered (the locator engine read 86.7% branches when
+96.4% were taken), and an `import` plus a `vm` run of the same file were merged as
+if they were one script. `tests/support/` fixes that in three parts:
+`vm-coverage.mjs` tags every `vm` compile of a `src/` file; `classic-scripts.mjs`
+(a Vite plugin in `vitest.config.mjs`) turns an `import` of a `src/` file into a
+`vm` run of the same bytes; and `coverage-provider.mjs` keeps only the tagged
+entries and measures them against the file on disk, untransformed. Thresholds are
+global and per file, set just below the accurate numbers.
 
 jsdom has no layout, so `document.elementFromPoint` (the picker's hit test),
 `innerText` semantics and the real message plumbing between content script, service
@@ -231,14 +250,100 @@ but does not resolve fails the run.
 It also asserts the content script writes nothing to the page console, and that a
 recording survives reopening the panel.
 
-Requires a display, so it is not part of `npm run verify`; CI runs it under `xvfb`
-in its own job. Run it locally before submitting too:
+It also covers two of the newer features through the panel's real buttons:
+
+- **Replay.** A recorded checkout is replayed and must actually place the order.
+  The secret is entered in the replay form and is never stored. Replayed actions are
+  not recorded. Leaving the secret empty marks that step as skipped. Replaying
+  against a page with a missing field must fail at that step, highlighted, with the
+  reason.
+- **Suggested assertions.** Placing the order suggests `toHaveURL` and
+  `toContainText`. They stay out of the script until accepted, and Dismiss removes
+  one for good.
+
+Two more scripts cover the other features. Each uses its own port and browser
+profile, so they can run alongside the main one.
+
+- `npm run smoke:pom`, **Page Object export**:
+  - A whole-page scan, a real region pick, and Esc to cancel a pick.
+  - Every generated locator must match exactly one element, and the right one.
+  - The generated TypeScript and JavaScript classes are imported and used to fill
+    and submit the checkout.
+  - The Selenium locator strings must resolve too.
+  - Renaming and name validation, plus Copy and Download.
+- `npm run smoke:screenshots`, **step screenshots**:
+  - Without the optional `<all_urls>` grant: recording still works and the panel
+    shows "Grant access".
+  - With the grant (seeded into the profile, because the permission prompt is
+    native and can't be clicked):
+    - every step gets a thumbnail outlining the element in the right place;
+    - the preview opens, Esc closes it, and focus returns to the thumbnail;
+    - removing a step deletes its stored screenshot, and Clear Timeline deletes them
+      all;
+    - the setting switches capture off and on;
+    - suggested and viewport steps never get one.
+
+`npm run smoke:all` runs all three.
+
+They need a display, so they are not part of `npm run verify`. CI runs them under
+`xvfb` in their own job. Run them locally before submitting too:
 
 ```bash
-npm run build && npm run smoke
+npm run build && npm run smoke:all
 ```
 
+The Page Object smoke reads the clipboard back by pasting into a page, through the
+system clipboard. On a desktop, a clipboard manager or another app writing at the
+same moment can make that one check fail; rerun it.
+
 ---
+
+### `npm run test:exports`
+
+The unit suites prove exported code parses; this proves it **works**. It serves the
+demo checkout (`scripts/screenshots/demo-page.html`, with its payment iframe) and
+runs the export of a flow in every framework × language, each in its real runner:
+
+| Export             | Runs with                                                                                   |
+| ------------------ | ------------------------------------------------------------------------------------------- |
+| Playwright TS / JS | `@playwright/test` (pinned to the `playwright` version) with a generated config             |
+| Playwright Python  | `pytest` + `pytest-playwright`                                                              |
+| Selenium TS / JS   | `node` + `selenium-webdriver` (TS through Node's type stripping); Selenium Manager's driver |
+| Selenium Python    | `python` + `selenium`                                                                       |
+| Cypress TS / JS    | `cypress run` (Electron) with `cypress-real-events` for combo key presses                   |
+
+Cypress is pinned to 15.x (`npm run test:exports:setup-cypress`). Exported specs
+read secrets through a small `locatraSecret()` helper emitted into the spec: it calls
+`cy.env([name])` where that exists (Cypress 15 and later; Cypress 16 removed
+`Cypress.env()`) and falls back to `Cypress.env(name)` on older versions. Either way
+the value comes from `CYPRESS_LOCATRA_PASSWORD`, which the harness sets from
+`LOCATRA_PASSWORD`, and it is never logged.
+
+Every runner drives the Chromium Playwright installed; the scripts are run exactly as
+exported, and only the browser launch is redirected (headless, that binary) by small
+shims in `tests/e2e/support/`.
+
+Two flows are run. **canonical** is `tests/e2e/fixtures/checkout-flow.json`, steps in
+the exact shape the side panel stores: fills (one a password, read from
+`LOCATRA_PASSWORD`), a select, check/uncheck, hover, viewport, clicks and an
+assertion inside the payment iframe, Tab / Shift+Tab / Enter, and `toBeVisible`,
+`toHaveText`, `toContainText`, `toBeChecked`, `toHaveValue` and `toHaveURL`.
+**recorded** is the same checkout recorded through the built extension in a real
+browser (suggested assertions accepted with the panel's own button) and read back
+from the panel's storage — recorder, storage, codegen and framework end to end.
+
+A run passes only if it exits cleanly **and** the demo server received exactly one
+order matching `tests/e2e/fixtures/checkout-flow.expect.json` — names, country, gift
+wrap, card number from the iframe, the password from the environment, and the field
+that had focus when Enter submitted (which proves the Tab and Shift+Tab steps). A
+runner that is not installed is skipped with the command that installs it;
+`--require all` (used in CI) turns such a skip into a failure. Generated scripts and
+each runner's output are kept in `.tmp-exports/`.
+
+```bash
+npm run build && npm run test:exports
+npm run test:exports -- --only selenium-python,cypress-typescript --flow canonical
+```
 
 ## 13. Store screenshots
 

@@ -2,6 +2,63 @@
 
 All notable changes to Locatra (formerly LocatorLens). Versions follow [semantic versioning](https://semver.org).
 
+## [Unreleased]
+
+### Added
+
+- **Replay in the browser.** "▶ Replay" in the Record tab runs the recorded flow on
+  the page, step by step, using the same locator semantics the exported test will use.
+  - Each step shows pending, running, passed, failed or skipped.
+  - The failing step is highlighted with the reason: no match, several matches, hidden
+    or disabled, or expected vs actual for assertions.
+  - Replay waits for page loads between steps, works inside iframes, and can stop at
+    the first failure or run in slow motion.
+  - Values for sensitive steps are asked for at replay time and never stored.
+  - Replayed actions are never recorded.
+  - File uploads can't be replayed in the browser and show as skipped.
+- **Page Object export.** Pick a region (or scan the whole page) to get a page class
+  with a named, unique locator for every field, button and link.
+  - Helpers: `fill…`, `select…`, `check…`, `click…`.
+  - Available for Playwright, Selenium and Cypress, in TypeScript, JavaScript and Python.
+  - Names are editable and validated, and the class can be copied or downloaded.
+- **Suggested assertions.** While recording, the extension suggests:
+  - `toHaveURL` after a navigation (including single-page-app URL changes);
+  - `toContainText` / `toBeVisible` for the success or error message that appears
+    after a submit.
+
+  Suggestions are left out of the script until you accept them (one by one or "Accept
+  all"). They can be switched off in Settings.
+
+- **Step screenshots.** Each recorded step gets a thumbnail, with the target element
+  outlined, and a larger preview.
+  - Screenshots are stored only in the browser (IndexedDB) and pruned after 14 days.
+  - They can be switched off in Settings.
+  - Capturing every page needs the optional `<all_urls>` permission, requested only
+    when you enable the feature. Without it, thumbnails still appear on tabs where
+    Locatra was opened from the toolbar.
+- `toHaveURL` and `toHaveValue` assertions in every framework.
+
+### Fixed
+
+- Exported Cypress specs read secrets with `cy.env()` on Cypress 16, which removed
+  `Cypress.env()`, and fall back to `Cypress.env()` on older versions.
+- `getByLabel` matches are returned in document order, as Playwright returns them.
+
+### Tests
+
+- Every exported script runs for real in CI, against a demo checkout:
+  - Playwright TypeScript/JavaScript/Python, Selenium TypeScript/JavaScript/Python and
+    Cypress TypeScript/JavaScript;
+  - for a hand-written flow and for one recorded through the extension.
+
+  A run passes only if the order it places matches the expected one, including the
+  secret read from the environment and the card number typed inside the iframe.
+
+- Coverage of classic scripts is now measured accurately. A custom provider stops V8
+  offsets from being mapped onto Vite-transformed code.
+  - Coverage is about 95% statements and 88% branches across all source files.
+  - Each file has its own threshold.
+
 ## [1.4.0] — 2026-10-09
 
 A full audit of every feature and file. Renames the extension to **Locatra** and fixes

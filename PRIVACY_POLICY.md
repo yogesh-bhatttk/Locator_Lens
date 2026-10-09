@@ -76,6 +76,9 @@ Locatra or anyone else, and the extension does not use synced storage.
   Steps contain element descriptions, the values you typed into ordinary fields,
   and page addresses (with secret parameters redacted, as above).
 - **Preferences** — your chosen output framework and language.
+- **Settings** (`llSettings`) — whether automatic assertion suggestions and step
+  screenshots are switched on (both are, by default; the **Settings** section of the
+  Record tab turns either off).
 - **Advanced settings with no UI** — an optional list of additional attribute names
   to treat as test ids (`customAttributes`) and a debug-logging flag (`llDebug`).
   The extension only reads these; they exist only if you set them yourself from the
@@ -88,6 +91,31 @@ Locatra or anyone else, and the extension does not use synced storage.
 - Steps recorded while the side panel was closed, buffered until the panel opens
   again and takes them.
 
+IndexedDB (database `locatra`, persists until you clear it or uninstall):
+
+- **Step screenshots** — while you record, the extension takes a small screenshot
+  of the visible tab after each recorded step (`chrome.tabs.captureVisibleTab`),
+  shrinks it to a thumbnail and keeps it in IndexedDB so the timeline can show what
+  each step did. Thumbnails never leave the browser: they are not uploaded, synced,
+  or written into the generated script. Removing a step or clearing the timeline
+  deletes its thumbnails, thumbnails older than 14 days are deleted automatically,
+  and switching **Step screenshots** off in Settings stops capturing them. Like any
+  screenshot, a thumbnail shows whatever was on screen — turn the setting off
+  before recording pages that display sensitive information.
+
+Features that work on what is already stored, entirely inside your browser:
+
+- **Replay** runs the recorded steps again in your current tab, in the page itself.
+  Values for password steps are asked for each time, used for that run only and
+  never saved.
+- **Page Object export** scans the elements of a region you pick (or the whole
+  page) and generates a page-object class; the result is shown in the side panel
+  for you to copy or download.
+- **Automatic assertion suggestions** watch, during a recording, for the page
+  address changing and for confirmation messages appearing after you submit a form,
+  and propose checks for them. Suggestions never contain the values of password or
+  other sensitive fields, and nothing is added to your test until you accept it.
+
 **Copy and download:** if you copy generated code or download a script, that is
 **you** saving or sharing it through your operating system or clipboard — not an
 upload by Locatra.
@@ -98,14 +126,15 @@ Permissions are used **only** to deliver the features below. See
 `manifests/manifest.chrome.json` and `manifests/manifest.firefox.json` for the
 authoritative set.
 
-| Permission / access                                | Purpose                                                                                                                        |
-| -------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------ |
-| `activeTab`                                        | Act on the tab you are using at the moment you invoke the extension, even if you have restricted its site access to "on click" |
-| `scripting`                                        | Inject the inspector / recorder / Selector Lab into pages that loaded before the extension did                                 |
-| `storage`                                          | Keep the last pick, the recorder state and your preferences on your device (see above)                                         |
-| `contextMenus`                                     | The right-click "Copy Best Locator" and panel entries                                                                          |
-| `sidePanel` (Chrome)                               | Show results in the browser side panel (Firefox uses its built-in sidebar instead)                                             |
-| `host_permissions`: `http://*/*` and `https://*/*` | Run the content script on the web pages you test; no `file://` or other schemes are requested                                  |
+| Permission / access                                  | Purpose                                                                                                                                                                                                                                                     |
+| ---------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `activeTab`                                          | Act on the tab you are using at the moment you invoke the extension, even if you have restricted its site access to "on click"                                                                                                                              |
+| `scripting`                                          | Inject the inspector / recorder / Selector Lab into pages that loaded before the extension did                                                                                                                                                              |
+| `storage`                                            | Keep the last pick, the recorder state, your preferences and settings on your device (see above)                                                                                                                                                            |
+| `contextMenus`                                       | The right-click "Copy Best Locator" and panel entries                                                                                                                                                                                                       |
+| `sidePanel` (Chrome)                                 | Show results in the browser side panel (Firefox uses its built-in sidebar instead)                                                                                                                                                                          |
+| `host_permissions`: `http://*/*` and `https://*/*`   | Run the content script on the web pages you test; no `file://` or other schemes are requested                                                                                                                                                               |
+| `optional_host_permissions`: `<all_urls>` (optional) | Only for step screenshots: the browser's tab-capture API requires it. Asked for when you switch step screenshots on, never at install; you can decline and keep recording without thumbnails. Screenshots stay in local IndexedDB and are never transmitted |
 
 ## Third-party services
 
