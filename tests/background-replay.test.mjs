@@ -5,7 +5,15 @@
 
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
-import { NO_ANSWER, TAB, WINDOW, flush, startWorker, until } from './background-harness.mjs';
+import {
+  CONTENT_SCRIPT_FILES,
+  NO_ANSWER,
+  TAB,
+  WINDOW,
+  flush,
+  startWorker,
+  until,
+} from './background-harness.mjs';
 
 const URL1 = 'https://shop.example/checkout';
 
@@ -103,7 +111,7 @@ describe('replay: the happy path', () => {
     await runToEnd(w, { steps: [goto(), click()] });
     const allFrames = w.injected.filter((i) => i.target.allFrames === true);
     expect(allFrames.length).toBeGreaterThanOrEqual(2);
-    expect(allFrames[0].files).toEqual(['src/codegen.js', 'src/content-locator-engine.js', 'src/content.js']);
+    expect(allFrames[0].files).toEqual(CONTENT_SCRIPT_FILES);
   });
 
   it('honours the step timeout and clamps silly values', async () => {

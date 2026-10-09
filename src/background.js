@@ -18,8 +18,19 @@ if (typeof importScripts === 'function' && !globalThis.LLThumbs) {
   } catch (e) {}
 }
 
-/** Load order matters: engine defines __LocatorLensEngine before content.js runs. */
-const CONTENT_SCRIPT_FILES = ['src/codegen.js', 'src/content-locator-engine.js', 'src/content.js'];
+/**
+ * Load order matters: the code-generator targets register themselves on
+ * LLCodegen (codegen.js) and the engine defines __LocatorLensEngine, both before
+ * content.js runs. Same list, same order, as content_scripts in both manifests.
+ */
+const CONTENT_SCRIPT_FILES = [
+  'src/codegen.js',
+  'src/codegen-java.js',
+  'src/codegen-csharp.js',
+  'src/codegen-wdio.js',
+  'src/content-locator-engine.js',
+  'src/content.js'
+];
 
 /** Shown by the panel/popup when a page refuses the content script. */
 const RESTRICTED_PAGE_ERROR =
@@ -498,31 +509,7 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
         respond({ ok: false, error: 'No active tab to inspect.' });
         return;
       }
-      const tabId = tab.id;
-      const windowId = tab.windowId;
-      ready().then(() => {
-        inspectTabs.set(tabId, isWindowId(windowId) ? windowId : null);
-        persistState();
-        // Inject first, then broadcast: sub-frames have no content script until now,
-        // and each frame overlays and hit-tests its own document.
-        injectAllFrames(tabId, () => {
-          pingTopFrame(tabId, (alive) => {
-            if (!alive) {
-              // Restricted page (or one that refused injection): do not leave the
-              // tab marked as inspecting, and tell every UI so.
-              ready().then(() => {
-                if (inspectTabs.delete(tabId)) persistState();
-              });
-              relayToSidePanel({ type: 'STOP_INSPECT', windowId, tabId });
-              respond({ ok: false, error: RESTRICTED_PAGE_ERROR });
-              return;
-            }
-            sendToFrame(tabId, { type: 'START_INSPECT' });
-            relayToSidePanel({ type: 'START_INSPECT', windowId, tabId });
-            respond({ ok: true });
-          });
-        });
-      });
+      startInspect(tab, respond);
     });
     return true;
   }
@@ -538,24 +525,7 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
       relayToSidePanel({ type: 'STOP_INSPECT', windowId: fromTab.windowId, tabId: fromTab.id });
       return;
     }
-    queryActiveTab(msg.windowId, (tab) => {
-      const windowId = isWindowId(msg.windowId) ? msg.windowId : tab ? tab.windowId : undefined;
-      ready().then(() => {
-        // The inspected tab need not still be the active one: stop every tab of
-        // this window that is inspecting, plus the active tab.
-        const targets = new Set();
-        if (tab) targets.add(tab.id);
-        for (const [id, w] of inspectTabs) if (isWindowId(windowId) && w === windowId) targets.add(id);
-        let changed = false;
-        for (const id of targets) {
-          if (inspectTabs.delete(id)) changed = true;
-          sendToFrame(id, { type: 'STOP_INSPECT' });
-        }
-        if (changed) persistState();
-        relayToSidePanel({ type: 'STOP_INSPECT', windowId, tabId: tab ? tab.id : undefined });
-        sendResponse({ ok: true });
-      });
-    });
+    queryActiveTab(msg.windowId, (tab) => stopInspect(msg.windowId, tab, sendResponse));
     return true;
   }
 
@@ -775,53 +745,7 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
         respond({ ok: false, error: 'No active tab to record.' });
         return;
       }
-      const tabId = tab.id;
-      const windowId = isWindowId(tab.windowId) ? tab.windowId : isWindowId(msg.windowId) ? msg.windowId : -1;
-      ready().then(() => {
-        let s = sessions.get(windowId);
-        const created = !s;
-        if (!s) {
-          s = { windowId, tabIds: new Set(), paused: false, assertMode: false, assertType: null };
-          sessions.set(windowId, s);
-          // A fresh recording: anything still buffered belongs to the last one.
-          clearRecordBuffer(windowId);
-        }
-        // Pressing Start means "capture now", whatever the previous pause said.
-        s.paused = false;
-        releaseReplayPause(windowId);
-        const joined = !s.tabIds.has(tabId);
-        s.tabIds.add(tabId);
-        persistState();
-
-        // Every frame records its own events — a click inside an iframe never reaches
-        // the top document's listeners.
-        injectAllFrames(tabId, () => {
-          pingTopFrame(tabId, (alive) => {
-            if (!alive) {
-              ready().then(() => {
-                const cur = sessions.get(windowId);
-                if (cur && joined) cur.tabIds.delete(tabId);
-                if (cur && created && cur.tabIds.size === 0) sessions.delete(windowId);
-                persistState();
-              });
-              respond({ ok: false, error: RESTRICTED_PAGE_ERROR });
-              return;
-            }
-            // Stopped while the page was being checked: do not arm it after all.
-            if (sessions.get(windowId) !== s || !s.tabIds.has(tabId)) {
-              respond({ ok: true });
-              return;
-            }
-            sendToFrame(tabId, {
-              type: 'START_RECORDING',
-              paused: s.paused,
-              assertMode: s.assertMode,
-              assertType: s.assertType
-            });
-            respond({ ok: true });
-          });
-        });
-      });
+      startRecording(tab, msg.windowId, respond);
     });
     return true;
   }
@@ -835,36 +759,7 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
     msg.type === 'SET_ASSERT_MODE'
   ) {
     if (fromTab) return;
-    queryActiveTab(msg.windowId, (tab) => {
-      const windowId = isWindowId(msg.windowId) ? msg.windowId : tab ? tab.windowId : undefined;
-      ready().then(() => {
-        const s = isWindowId(windowId) ? sessions.get(windowId) : null;
-        const targets = new Set(s ? s.tabIds : []);
-        // No session on record (e.g. state lost): still reach the visible page, so
-        // a Stop is never a no-op for a tab that is visibly recording.
-        if (!s && tab) targets.add(tab.id);
-
-        // The user changing the recording state mid-replay overrides the replay's
-        // own "pause, then restore" — it must not undo what they just chose.
-        if (msg.type !== 'SET_ASSERT_MODE') releaseReplayPause(windowId);
-        if (s) {
-          if (msg.type === 'STOP_RECORDING') sessions.delete(windowId);
-          else if (msg.type === 'PAUSE_RECORDING') s.paused = true;
-          else if (msg.type === 'RESUME_RECORDING') s.paused = false;
-          else {
-            s.assertMode = !!msg.on;
-            if (msg.assertType) s.assertType = msg.assertType;
-          }
-          persistState();
-        }
-
-        // Forward the whole message (SET_ASSERT_MODE carries `on`/`assertType`).
-        const out = Object.assign({}, msg);
-        delete out.windowId;
-        for (const id of targets) sendToFrame(id, out);
-        sendResponse({ ok: true });
-      });
-    });
+    queryActiveTab(msg.windowId, (tab) => applyRecordingCommand(msg, tab, sendResponse));
     return true;
   }
 
@@ -970,7 +865,522 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
     );
     return true;
   }
+
+  // 🖼 STEP SCREENSHOTS: the settings page's "Clear step screenshots" — every
+  // window's thumbnails, and any capture still in flight.
+  if (msg.type === 'THUMBS_CLEAR_ALL') {
+    if (fromTab) return;
+    forgetAllThumbs();
+    const store = thumbStore();
+    let pending = Promise.resolve(0);
+    if (store && typeof store.clearAll === 'function') pending = store.clearAll();
+    else if (store) pending = store.prune(0);
+    Promise.resolve(pending).then(
+      (n) => {
+        relayToSidePanel({ type: 'THUMBS_CLEARED', all: true });
+        sendResponse({ ok: true, deleted: typeof n === 'number' ? n : 0 });
+      },
+      () => sendResponse({ ok: false, error: 'Could not delete thumbnails.' })
+    );
+    return true;
+  }
+
+  // 🩺 LOCATOR HEALTH: which page is the panel's window showing?
+  if (msg.type === 'GET_ACTIVE_PAGE') {
+    if (fromTab) return;
+    const respond = respondOnce(sendResponse);
+    queryActiveTab(msg.windowId, (tab) => {
+      if (!tab) {
+        respond({ ok: false, error: 'No active tab.' });
+        return;
+      }
+      topFrameHref(tab.id, (href) => {
+        const page = pageKeys(href);
+        if (!page) {
+          respond({ ok: false, error: RESTRICTED_PAGE_ERROR });
+          return;
+        }
+        respond({ ok: true, tabId: tab.id, url: page.url, siteKey: page.siteKey });
+      });
+    });
+    return true;
+  }
+
+  // 🩺 LOCATOR HEALTH: re-resolve watched locators on the window's active tab.
+  if (msg.type === 'HEALTH_CHECK') {
+    if (fromTab) return;
+    runHealthCheck(msg, respondOnce(sendResponse));
+    return true;
+  }
 });
+
+// ── Inspect / record, shared by the UI messages and the keyboard shortcuts ────
+
+/** Switch inspect mode on in `tab`. respond({ ok, error? }). */
+function startInspect(tab, respond) {
+  const tabId = tab.id;
+  const windowId = tab.windowId;
+  ready().then(() => {
+    inspectTabs.set(tabId, isWindowId(windowId) ? windowId : null);
+    persistState();
+    // Inject first, then broadcast: sub-frames have no content script until now,
+    // and each frame overlays and hit-tests its own document.
+    injectAllFrames(tabId, () => {
+      pingTopFrame(tabId, (alive) => {
+        if (!alive) {
+          // Restricted page (or one that refused injection): do not leave the
+          // tab marked as inspecting, and tell every UI so.
+          ready().then(() => {
+            if (inspectTabs.delete(tabId)) persistState();
+          });
+          relayToSidePanel({ type: 'STOP_INSPECT', windowId, tabId });
+          respond({ ok: false, error: RESTRICTED_PAGE_ERROR });
+          return;
+        }
+        sendToFrame(tabId, { type: 'START_INSPECT' });
+        relayToSidePanel({ type: 'START_INSPECT', windowId, tabId });
+        respond({ ok: true });
+      });
+    });
+  });
+}
+
+/**
+ * Switch inspect mode off for a window: every tab of it that is inspecting, plus
+ * `tab` (the active one) — the inspected tab need not still be active.
+ */
+function stopInspect(requestedWindowId, tab, respond) {
+  const windowId = isWindowId(requestedWindowId) ? requestedWindowId : tab ? tab.windowId : undefined;
+  ready().then(() => {
+    const targets = new Set();
+    if (tab) targets.add(tab.id);
+    for (const [id, w] of inspectTabs) if (isWindowId(windowId) && w === windowId) targets.add(id);
+    let changed = false;
+    for (const id of targets) {
+      if (inspectTabs.delete(id)) changed = true;
+      sendToFrame(id, { type: 'STOP_INSPECT' });
+    }
+    if (changed) persistState();
+    relayToSidePanel({ type: 'STOP_INSPECT', windowId, tabId: tab ? tab.id : undefined });
+    respond({ ok: true });
+  });
+}
+
+/**
+ * Tell the window's panel where its recording stands, after any change from any
+ * source (panel, popup, shortcut, a closed tab or window, a replay's pause), so it
+ * never has to poll GET_RECORDING_STATE.
+ */
+function relayRecordingState(windowId) {
+  const s = sessions.get(windowId);
+  relayToSidePanel({
+    type: 'RECORDING_STATE',
+    windowId,
+    active: !!s,
+    paused: s ? s.paused : false,
+    assertMode: s ? s.assertMode : false,
+    assertType: s ? s.assertType : null
+  });
+}
+
+/** Start (or join) the recording session of `tab`'s window. respond({ ok, error? }). */
+function startRecording(tab, requestedWindowId, respond) {
+  const tabId = tab.id;
+  const windowId = isWindowId(tab.windowId) ? tab.windowId : isWindowId(requestedWindowId) ? requestedWindowId : -1;
+  ready().then(() => {
+    let s = sessions.get(windowId);
+    const created = !s;
+    if (!s) {
+      s = { windowId, tabIds: new Set(), paused: false, assertMode: false, assertType: null };
+      sessions.set(windowId, s);
+      // A fresh recording: anything still buffered belongs to the last one.
+      clearRecordBuffer(windowId);
+    }
+    // Pressing Start means "capture now", whatever the previous pause said.
+    s.paused = false;
+    releaseReplayPause(windowId);
+    const joined = !s.tabIds.has(tabId);
+    s.tabIds.add(tabId);
+    persistState();
+
+    // Every frame records its own events — a click inside an iframe never reaches
+    // the top document's listeners.
+    injectAllFrames(tabId, () => {
+      pingTopFrame(tabId, (alive) => {
+        if (!alive) {
+          ready().then(() => {
+            const cur = sessions.get(windowId);
+            if (cur && joined) cur.tabIds.delete(tabId);
+            if (cur && created && cur.tabIds.size === 0) sessions.delete(windowId);
+            persistState();
+            relayRecordingState(windowId);
+          });
+          respond({ ok: false, error: RESTRICTED_PAGE_ERROR });
+          return;
+        }
+        // Stopped while the page was being checked: do not arm it after all.
+        if (sessions.get(windowId) !== s || !s.tabIds.has(tabId)) {
+          respond({ ok: true });
+          return;
+        }
+        sendToFrame(tabId, {
+          type: 'START_RECORDING',
+          paused: s.paused,
+          assertMode: s.assertMode,
+          assertType: s.assertType
+        });
+        relayRecordingState(windowId);
+        respond({ ok: true });
+      });
+    });
+  });
+}
+
+/**
+ * STOP_RECORDING / PAUSE_RECORDING / RESUME_RECORDING / SET_ASSERT_MODE: act on
+ * the whole session of the window — every tab that joined it — not on whatever tab
+ * is active right now.
+ */
+function applyRecordingCommand(msg, tab, respond) {
+  const windowId = isWindowId(msg.windowId) ? msg.windowId : tab ? tab.windowId : undefined;
+  ready().then(() => {
+    const s = isWindowId(windowId) ? sessions.get(windowId) : null;
+    const targets = new Set(s ? s.tabIds : []);
+    // No session on record (e.g. state lost): still reach the visible page, so
+    // a Stop is never a no-op for a tab that is visibly recording.
+    if (!s && tab) targets.add(tab.id);
+
+    // The user changing the recording state mid-replay overrides the replay's
+    // own "pause, then restore" — it must not undo what they just chose.
+    if (msg.type !== 'SET_ASSERT_MODE') releaseReplayPause(windowId);
+    if (s) {
+      if (msg.type === 'STOP_RECORDING') sessions.delete(windowId);
+      else if (msg.type === 'PAUSE_RECORDING') s.paused = true;
+      else if (msg.type === 'RESUME_RECORDING') s.paused = false;
+      else {
+        s.assertMode = !!msg.on;
+        if (msg.assertType) s.assertType = msg.assertType;
+      }
+      persistState();
+    }
+
+    // Forward the whole message (SET_ASSERT_MODE carries `on`/`assertType`).
+    const out = Object.assign({}, msg);
+    delete out.windowId;
+    for (const id of targets) sendToFrame(id, out);
+    if (s) relayRecordingState(windowId);
+    respond({ ok: true });
+  });
+}
+
+// ── Keyboard shortcuts (manifest `commands`) ─────────────────────────────────
+// A command acts on the focused window's active tab — the `tab` the browser hands
+// the listener, when it does. Inspect and record go through exactly the paths the
+// panel's buttons use, restricted-page rollback included; a failure has nowhere to
+// show but the toolbar button, so it flashes a "!" badge with the reason as the
+// button's tooltip, and goes to the window's panel as ACTIVATION_FAILED.
+const COMMAND_FEATURES = { 'toggle-inspect': 'inspect', 'toggle-recording': 'recording' };
+const ACTIVATION_BADGE_MS = 4000;
+const ACTIVATION_BADGE_COLOR = '#B83A2E';
+/** tabId (or 'all') -> the timer that clears its failure badge. */
+const badgeTimers = new Map();
+
+function defaultActionTitle() {
+  try {
+    const m = chrome.runtime.getManifest();
+    return (m && m.action && m.action.default_title) || 'Locatra';
+  } catch (e) {
+    return 'Locatra';
+  }
+}
+
+/** Call one chrome.action setter, ignoring every way it can fail. */
+function actionCall(name, details) {
+  const action = chrome.action;
+  if (!action || typeof action[name] !== 'function') return;
+  try {
+    const p = action[name](details, () => void chrome.runtime.lastError);
+    if (p && typeof p.catch === 'function') p.catch(() => {});
+  } catch (e) {}
+}
+
+function flashFailureBadge(tabId, error) {
+  const scope = typeof tabId === 'number' ? { tabId } : {};
+  const key = typeof tabId === 'number' ? tabId : 'all';
+  actionCall('setBadgeBackgroundColor', Object.assign({ color: ACTIVATION_BADGE_COLOR }, scope));
+  actionCall('setBadgeText', Object.assign({ text: '!' }, scope));
+  actionCall('setTitle', Object.assign({ title: `Locatra: ${error}` }, scope));
+  clearTimeout(badgeTimers.get(key));
+  badgeTimers.set(
+    key,
+    setTimeout(() => {
+      badgeTimers.delete(key);
+      actionCall('setBadgeText', Object.assign({ text: '' }, scope));
+      actionCall('setTitle', Object.assign({ title: defaultActionTitle() }, scope));
+    }, ACTIVATION_BADGE_MS)
+  );
+}
+
+function reportActivationFailure(tab, windowId, feature, error) {
+  flashFailureBadge(tab ? tab.id : undefined, error);
+  relayToSidePanel({
+    type: 'ACTIVATION_FAILED',
+    windowId: tab && isWindowId(tab.windowId) ? tab.windowId : windowId,
+    feature,
+    error
+  });
+}
+
+/**
+ * Open the window's panel from a command. Synchronous on purpose: the key press is
+ * the user gesture open() needs, and it does not survive an await. Best effort.
+ */
+function openPanelFromCommand(windowId) {
+  try {
+    const sidePanel = chrome['sidePanel'];
+    let p = null;
+    if (sidePanel && typeof sidePanel.open === 'function') {
+      if (isWindowId(windowId)) p = sidePanel.open({ windowId });
+    } else if (typeof browser !== 'undefined' && browser.sidebarAction && browser.sidebarAction.open) {
+      p = browser.sidebarAction.open();
+    }
+    if (p && typeof p.catch === 'function') p.catch(() => {});
+  } catch (e) {}
+}
+
+function handleCommand(command, tab) {
+  const feature = COMMAND_FEATURES[command];
+  if (!feature) return;
+  const given = tab && typeof tab.id === 'number' ? tab : null;
+  // The user invoked Locatra on this tab: a capture there may work again.
+  if (given) captureBlockedTabs.delete(given.id);
+  // Starting to inspect opens the panel, which is where the results go. Whether
+  // this press starts or stops is only known synchronously once state is loaded;
+  // when it is not, opening a panel is the harmless guess.
+  if (feature === 'inspect' && !(hydrated && given && inspectTabs.has(given.id))) {
+    openPanelFromCommand(given ? given.windowId : undefined);
+  }
+  const act = (t) => {
+    if (!t) {
+      reportActivationFailure(null, undefined, feature, `No active tab to ${feature === 'inspect' ? 'inspect' : 'record'}.`);
+      return;
+    }
+    if (!given) captureBlockedTabs.delete(t.id);
+    ready().then(() => {
+      const fail = (res) => {
+        if (res && res.ok === false) reportActivationFailure(t, t.windowId, feature, res.error);
+      };
+      if (feature === 'inspect') {
+        if (inspectTabs.has(t.id)) stopInspect(t.windowId, t, () => {});
+        else startInspect(t, fail);
+        return;
+      }
+      if (isWindowId(t.windowId) && sessions.has(t.windowId)) {
+        applyRecordingCommand({ type: 'STOP_RECORDING', windowId: t.windowId }, t, () => {});
+      } else {
+        startRecording(t, t.windowId, fail);
+      }
+    });
+  };
+  if (given) act(given);
+  else queryActiveTab(undefined, act);
+}
+
+if (chrome.commands && chrome.commands.onCommand && typeof chrome.commands.onCommand.addListener === 'function') {
+  chrome.commands.onCommand.addListener(handleCommand);
+}
+
+// ── Locator health check ─────────────────────────────────────────────────────
+// The panel keeps watched locators per page (llWatched, keyed by siteKey); this
+// re-resolves them in the window's active tab. Every frame gets the content script
+// (a watched locator may live in an iframe), then one executeScript call runs the
+// content script's own __LocatraHealthCheck in every frame — in the ISOLATED world,
+// which is the content script's — and the frames' answers are merged: the frame
+// that owns an item (by frame path, as replay decides it) has the say.
+const HEALTH_CHECK_TIMEOUT_MS = 10000;
+const HEALTH_CHECK_MAX_ITEMS = 2000;
+const HEALTH_STATUSES = new Set(['ok', 'broken', 'ambiguous', 'frame-missing', 'error']);
+const HEALTH_OUTDATED_ERROR =
+  "Locatra's page script in this tab is out of date. Reload the page and check again.";
+
+// Credentials and tokens that travel in a URL (as content.js redacts them).
+const SENSITIVE_URL_PARAM_RE =
+  /([?&#;])(password|passwd|pwd|secret|client_secret|access_token|id_token|refresh_token|api_key|apikey)=([^&#;]*)/gi;
+
+/**
+ * { url, siteKey } for a page, or null for anything that is not an http(s) page.
+ * url drops credentials and redacts secret parameters; siteKey is origin + path —
+ * no query, no hash — which is how watched locators are grouped.
+ */
+function pageKeys(href) {
+  if (typeof href !== 'string' || !href) return null;
+  let u;
+  try {
+    u = new URL(href);
+  } catch (e) {
+    return null;
+  }
+  if (u.protocol !== 'http:' && u.protocol !== 'https:') return null;
+  u.username = '';
+  u.password = '';
+  return {
+    url: u.href.replace(SENSITIVE_URL_PARAM_RE, (m, sep, key) => `${sep}${key}=REDACTED`),
+    siteKey: u.origin + u.pathname
+  };
+}
+
+/**
+ * The top frame's address, read from the page itself — the host permission (or an
+ * activeTab grant) already allows that, so no `tabs` permission is needed for
+ * tab.url. cb(href | null); null on a page Locatra may not touch.
+ */
+function topFrameHref(tabId, cb) {
+  try {
+    chrome.scripting.executeScript({ target: { tabId }, func: () => location.href }, (results) => {
+      const failed = !!chrome.runtime.lastError;
+      const first = !failed && Array.isArray(results) ? results[0] : null;
+      cb(first && typeof first.result === 'string' ? first.result : null);
+    });
+  } catch (e) {
+    cb(null);
+  }
+}
+
+/**
+ * Runs inside each frame (serialised by executeScript, so it must not refer to
+ * anything outside itself). Wraps the content script's answer with the frame's
+ * address and anything it threw.
+ */
+function healthCheckInFrame(items) {
+  let results = null;
+  let error = null;
+  try {
+    const check = globalThis.__LocatraHealthCheck;
+    results = typeof check === 'function' ? check(items) : null;
+  } catch (e) {
+    error = String((e && e.message) || e);
+  }
+  let href = null;
+  try {
+    href = String(location.href);
+  } catch (e) {}
+  return { results: Array.isArray(results) ? results : null, error, href };
+}
+
+function sanitizeHealthItems(items) {
+  const out = [];
+  for (const it of items) {
+    if (!it || typeof it !== 'object' || typeof it.id !== 'string' || !it.id) continue;
+    out.push({ id: it.id, target: it.target, fingerprint: it.fingerprint });
+  }
+  return out;
+}
+
+/** One frame's answer for an item it owns, reduced to the response contract. */
+function normalizeHealthResult(id, r) {
+  const count = typeof r.count === 'number' && isFinite(r.count) && r.count >= 0 ? Math.floor(r.count) : 0;
+  let status = HEALTH_STATUSES.has(r.status) ? r.status : null;
+  if (!status) status = count === 1 ? 'ok' : count === 0 ? 'broken' : 'ambiguous';
+  const out = { id, status, count };
+  const sug = r.suggestion;
+  if (sug && typeof sug === 'object' && sug.target && typeof sug.target === 'object' && typeof sug.code === 'string') {
+    out.suggestion = { target: sug.target, code: sug.code };
+  }
+  if (typeof r.error === 'string' && r.error) out.error = r.error;
+  return out;
+}
+
+/**
+ * Merge executeScript's per-frame results. For each item the frame that owns it
+ * answers; no owner means the frame is gone ('frame-missing') — or, when a frame
+ * threw, that the check itself failed there ('error').
+ */
+function mergeHealthResults(items, injection) {
+  const frames = (Array.isArray(injection) ? injection : [])
+    .filter((f) => f && typeof f === 'object')
+    .sort((a, b) => (a.frameId || 0) - (b.frameId || 0));
+  let href = null;
+  let answered = 0;
+  const errors = [];
+  const owned = new Map();
+  for (const f of frames) {
+    if (f.error) errors.push(String(f.error.message || f.error));
+    const out = f.result;
+    if (!out || typeof out !== 'object') continue;
+    if ((f.frameId || 0) === 0 && href === null && typeof out.href === 'string') href = out.href;
+    if (out.error) errors.push(String(out.error));
+    if (!Array.isArray(out.results)) continue;
+    answered++;
+    for (const r of out.results) {
+      if (r && typeof r === 'object' && r.owned === true && typeof r.id === 'string' && !owned.has(r.id)) {
+        owned.set(r.id, r);
+      }
+    }
+  }
+  const page = pageKeys(href);
+  if (!page) return { ok: false, error: RESTRICTED_PAGE_ERROR };
+  // Not one frame could run the check, and none failed trying: the content script
+  // predates it (an extension update since the page loaded).
+  if (!answered && !errors.length) return { ok: false, error: HEALTH_OUTDATED_ERROR };
+  const results = items.map((it) => {
+    const r = owned.get(it.id);
+    if (r) return normalizeHealthResult(it.id, r);
+    if (errors.length) return { id: it.id, status: 'error', count: 0, error: errors[0] };
+    return { id: it.id, status: 'frame-missing', count: 0 };
+  });
+  return { ok: true, siteKey: page.siteKey, results };
+}
+
+function runHealthCheck(msg, respond) {
+  if (!Array.isArray(msg.items)) {
+    respond({ ok: false, error: 'HEALTH_CHECK needs an items array.' });
+    return;
+  }
+  if (msg.items.length > HEALTH_CHECK_MAX_ITEMS) {
+    respond({ ok: false, error: `Too many locators to check at once (max ${HEALTH_CHECK_MAX_ITEMS}).` });
+    return;
+  }
+  const items = sanitizeHealthItems(msg.items);
+  // Time-boxed: a frame stuck in a long task must not leave the panel waiting.
+  const timer = setTimeout(
+    () => respond({ ok: false, error: `The health check timed out after ${HEALTH_CHECK_TIMEOUT_MS / 1000} s.` }),
+    HEALTH_CHECK_TIMEOUT_MS
+  );
+  const done = (r) => {
+    clearTimeout(timer);
+    respond(r);
+  };
+  queryActiveTab(msg.windowId, (tab) => {
+    if (!tab) {
+      done({ ok: false, error: 'No active tab to check.' });
+      return;
+    }
+    const tabId = tab.id;
+    injectAllFrames(tabId, () => {
+      pingTopFrame(tabId, (alive) => {
+        if (!alive) {
+          done({ ok: false, error: RESTRICTED_PAGE_ERROR });
+          return;
+        }
+        try {
+          chrome.scripting.executeScript(
+            { target: { tabId, allFrames: true }, func: healthCheckInFrame, args: [items] },
+            (injection) => {
+              const err = chrome.runtime.lastError;
+              if (err) {
+                done({ ok: false, error: `Could not check this page: ${err.message || err}` });
+                return;
+              }
+              done(mergeHealthResults(items, injection));
+            }
+          );
+        } catch (e) {
+          done({ ok: false, error: `Could not check this page: ${(e && e.message) || e}` });
+        }
+      });
+    });
+  });
+}
 
 // ── New frames (C3) ───────────────────────────────────────────────────────────
 // Content scripts report iframes added after injection; injecting is per tab and
@@ -1038,7 +1448,10 @@ chrome.tabs.onRemoved.addListener((tabId) => {
     for (const [windowId, s] of Array.from(sessions.entries())) {
       if (!s.tabIds.delete(tabId)) continue;
       changed = true;
-      if (s.tabIds.size === 0) sessions.delete(windowId);
+      if (s.tabIds.size === 0) {
+        sessions.delete(windowId);
+        relayRecordingState(windowId); // the session's last tab closed: it ended
+      }
     }
     if (lastPick && lastPick.tabId === tabId) {
       lastPick = null;
@@ -1055,6 +1468,7 @@ if (chrome.windows && chrome.windows.onRemoved) {
     if (run) abortReplay(run, 'stopped');
     ready().then(() => {
       let changed = sessions.delete(windowId);
+      if (changed) relayRecordingState(windowId);
       if (windowId in panelSeen) {
         delete panelSeen[windowId];
         changed = true;
@@ -1134,8 +1548,8 @@ function ensureTopFrame(tabId, cb) {
 }
 
 // ── Settings ─────────────────────────────────────────────────────────────────
-// llSettings in storage.local is edited by the panel; missing key or field means
-// the default (on). Only stepScreenshots matters to the worker.
+// llSettings in storage.local is edited by the panel and the settings page; a
+// missing key or field means the default. Only stepScreenshots matters to the worker.
 const SETTINGS_KEY = 'llSettings';
 let stepScreenshotsEnabled = true;
 let settingsLoad = null;
@@ -1194,6 +1608,8 @@ let lastCaptureAt = 0;
 /** Steps the panel deleted (or windows it cleared) while their capture was in flight. */
 const forgottenThumbIds = new Set();
 const thumbsClearedAt = new Map();
+/** When every thumbnail was last cleared (THUMBS_CLEAR_ALL). */
+let thumbsAllClearedAt = 0;
 
 const isEventId = (v) => (typeof v === 'string' && v.length > 0) || (typeof v === 'number' && isFinite(v));
 
@@ -1224,9 +1640,19 @@ function forgetThumbs(eventIds, windowId) {
   if (isWindowId(windowId)) thumbsClearedAt.set(windowId, Date.now());
 }
 
-/** Did the panel delete this step (or clear its window) after it was queued? */
+/** Every capture still waiting or in flight is for a step whose thumbnail was just cleared. */
+function forgetAllThumbs() {
+  pendingCaptures.clear();
+  thumbsAllClearedAt = Date.now();
+}
+
+/** Did the panel delete this step (or clear its window, or everything) after it was queued? */
 function thumbForgotten(job) {
-  return forgottenThumbIds.has(job.eventId) || (thumbsClearedAt.get(job.windowId) || 0) >= job.queuedAt;
+  return (
+    forgottenThumbIds.has(job.eventId) ||
+    (thumbsClearedAt.get(job.windowId) || 0) >= job.queuedAt ||
+    thumbsAllClearedAt >= job.queuedAt
+  );
 }
 
 // captureVisibleTab needs the literal <all_urls> host permission (http/https host
@@ -1559,6 +1985,7 @@ function pauseForReplay(run) {
     run.resume.add(w);
     changed = true;
     for (const id of s.tabIds) sendToFrame(id, { type: 'PAUSE_RECORDING' });
+    relayRecordingState(w);
   }
   if (changed) persistState();
 }
@@ -1570,6 +1997,7 @@ function resumeAfterReplay(windowId) {
   s.paused = false;
   persistState();
   for (const id of s.tabIds) sendToFrame(id, { type: 'RESUME_RECORDING' });
+  relayRecordingState(windowId);
 }
 
 /** The user set this window's recording state themselves: the replay no longer restores it. */

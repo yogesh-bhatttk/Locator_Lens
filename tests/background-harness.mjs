@@ -7,7 +7,7 @@
 // asynchronously or not at all, captureVisibleTab, storage.onChanged, and the
 // image APIs used to downscale a capture. Not a test file itself (no .test.mjs).
 
-/* global Buffer, Blob, atob, setTimeout, console */
+/* global Buffer, Blob, URL, atob, setTimeout, console */
 
 import { readFileSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
@@ -17,6 +17,15 @@ import vm from 'node:vm';
 export const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 export const BACKGROUND = readFileSync(join(ROOT, 'src/background.js'), 'utf8');
 export const THUMBS_STORE = readFileSync(join(ROOT, 'src/thumbs-store.js'), 'utf8');
+
+/**
+ * What every injection must load, in order: exactly the manifest's content_scripts
+ * list (both browsers), so a page injected later runs the same code as one the
+ * manifest injected.
+ */
+export const CONTENT_SCRIPT_FILES = JSON.parse(
+  readFileSync(join(ROOT, 'manifests/manifest.chrome.json'), 'utf8')
+).content_scripts[0].js;
 
 export const TAB = 42;
 export const WINDOW = 7;
@@ -80,6 +89,12 @@ export function memoryThumbs({ fail = false } = {}) {
       for (const [k, v] of records) if (v.windowId === windowId && records.delete(k)) n++;
       return Promise.resolve(n);
     },
+    clearAll: () => {
+      calls.push(['clearAll']);
+      const n = records.size;
+      records.clear();
+      return Promise.resolve(n);
+    },
     prune: (age) => {
       calls.push(['prune', age]);
       return Promise.resolve(0);
@@ -139,6 +154,18 @@ export function imageApis({
  *   loadThumbsStore: also run the real src/thumbs-store.js first
  *   allUrls: is the optional <all_urls> host permission granted? true (default) |
  *     false | 'none' (no permissions API) | 'error' (lastError) | 'throw'
+ *   frames: tabId -> [{ frameId, href, check?, throws? }] — what executeScript({ func })
+ *     runs in. The worker's real function is serialised (toString) and evaluated in
+ *     a fresh context per frame with globalThis.__LocatraHealthCheck = check and
+ *     location.href = href, exactly as the browser would, so a function that leans
+ *     on anything outside itself fails here too. Default: one top frame at
+ *     https://example.com/page with no health-check function. `allFrames: false`
+ *     runs frame 0 only. `throws` makes that frame's injection report an error
+ *     (InjectionResult.error, as Firefox does).
+ *   execute(tabId, opts): override for executeScript({ func }): return
+ *     { error: 'msg' } (lastError), 'hang' (never calls back), 'throw', or undefined
+ *     to fall through to `frames`
+ *   noCommands / noAction: leave out chrome.commands / chrome.action
  */
 export function startWorker(options = {}) {
   const listeners = {
@@ -154,6 +181,22 @@ export function startWorker(options = {}) {
     storageChanged: [],
     permAdded: [],
     permRemoved: [],
+    command: [],
+  };
+  const badges = [];
+  const executed = [];
+  const frames = options.frames ?? {};
+  const framesOf = (tabId) => frames[tabId] ?? [{ frameId: 0, href: 'https://example.com/page' }];
+
+  /** Run a serialised executeScript func the way a frame would. */
+  const runInFrame = (frame, func, args) => {
+    const sandbox = { location: { href: frame.href } };
+    if (frame.check) sandbox.__LocatraHealthCheck = frame.check;
+    vm.createContext(sandbox);
+    const fn = vm.runInContext('(' + func.toString() + ')', sandbox);
+    const out = fn(...JSON.parse(JSON.stringify(args ?? [])));
+    // Results cross back structured-cloned, never by reference.
+    return out === undefined ? null : JSON.parse(JSON.stringify(out));
   };
   let allUrls = options.allUrls === undefined ? true : options.allUrls;
   const permissionChecks = [];
@@ -237,6 +280,7 @@ export function startWorker(options = {}) {
         return lastError;
       },
       getURL: (p) => 'chrome-extension://test-extension-id/' + p,
+      getManifest: () => JSON.parse(readFileSync(join(ROOT, 'manifests/manifest.chrome.json'), 'utf8')),
       sendMessage: (msg, cb) => {
         relayed.push(msg);
         if (cb) cb();
@@ -304,6 +348,35 @@ export function startWorker(options = {}) {
     },
     scripting: {
       executeScript: (opts, cb) => {
+        if (typeof opts.func === 'function') {
+          executed.push(opts);
+          const tabId = opts.target?.tabId;
+          const custom = options.execute ? options.execute(tabId, opts) : undefined;
+          if (custom === 'hang') return;
+          if (custom === 'throw') throw new Error('executeScript exploded');
+          if (custom && custom.error) {
+            withError({ message: custom.error }, () => cb && cb(undefined));
+            return;
+          }
+          if (restricted.has(tabId) || !tabs.has(tabId)) {
+            withError({ message: 'Cannot access contents of the page.' }, () => cb && cb(undefined));
+            return;
+          }
+          const list = opts.target.allFrames
+            ? framesOf(tabId)
+            : framesOf(tabId).filter((f) => f.frameId === 0);
+          const results = list.map((f) => {
+            if (f.throws)
+              return { frameId: f.frameId, documentId: 'doc-' + f.frameId, error: new Error(f.throws) };
+            return {
+              frameId: f.frameId,
+              documentId: 'doc-' + f.frameId,
+              result: runInFrame(f, opts.func, opts.args),
+            };
+          });
+          if (cb) ok(() => cb(results));
+          return;
+        }
         injected.push(opts);
         const tabId = opts.target?.tabId;
         if (restricted.has(tabId) || !tabs.has(tabId)) {
@@ -320,6 +393,25 @@ export function startWorker(options = {}) {
       onClicked: { addListener: (fn) => listeners.menuClicked.push(fn) },
     },
     sidePanel: { open: () => Promise.resolve() },
+    commands: options.noCommands
+      ? undefined
+      : { onCommand: { addListener: (fn) => listeners.command.push(fn) } },
+    action: options.noAction
+      ? undefined
+      : {
+          setBadgeText: (d, cb) => {
+            badges.push(['text', d]);
+            if (cb) ok(() => cb());
+          },
+          setBadgeBackgroundColor: (d, cb) => {
+            badges.push(['color', d]);
+            if (cb) ok(() => cb());
+          },
+          setTitle: (d, cb) => {
+            badges.push(['title', d]);
+            if (cb) ok(() => cb());
+          },
+        },
     permissions:
       allUrls === 'none'
         ? undefined
@@ -371,6 +463,7 @@ export function startWorker(options = {}) {
     console,
     Blob,
     atob,
+    URL,
     Date: options.Date ?? Date,
     ...(image ? { createImageBitmap: image.createImageBitmap, OffscreenCanvas: image.OffscreenCanvas } : {}),
     ...(options.context ?? {}),
@@ -440,6 +533,11 @@ export function startWorker(options = {}) {
     thumbs,
     image,
     listeners,
+    badges,
+    executed,
+    frames,
+    /** The user pressed a keyboard shortcut (chrome.commands.onCommand). */
+    command: (name, tab) => listeners.command.forEach((fn) => fn(name, tab)),
     connectPanel,
     sendFrom,
     /** A message from an extension page (panel/popup). */
@@ -551,6 +649,7 @@ export function fakeIndexedDB(opts = {}) {
         });
       },
       get: (key) => req(() => def.data.get(key)),
+      getAllKeys: () => req(() => [...def.data.keys()]),
       delete: (key) => req(() => void def.data.delete(key)),
       index: (name) => ({
         getAllKeys: (query) =>

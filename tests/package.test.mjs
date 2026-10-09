@@ -461,10 +461,54 @@ describe.each(TARGET_NAMES)('%s package', (target) => {
 
   it('loads content scripts in an order that satisfies their dependencies', () => {
     // content.js reads __LocatorLensEngine and window.LLCodegen at call time, both
-    // of which are defined by earlier files in this list.
+    // of which are defined by earlier files in this list; the target modules
+    // register themselves on LLCodegen, so they come after codegen.js.
     const js = manifest().content_scripts[0].js;
-    expect(js.indexOf('src/codegen.js')).toBeLessThan(js.indexOf('src/content.js'));
-    expect(js.indexOf('src/content-locator-engine.js')).toBeLessThan(js.indexOf('src/content.js'));
+    expect(js).toEqual([
+      'src/codegen.js',
+      'src/codegen-java.js',
+      'src/codegen-csharp.js',
+      'src/codegen-wdio.js',
+      'src/content-locator-engine.js',
+      'src/content.js',
+    ]);
+    for (const f of js) expect(filesIn(dir()), f).toContain(f);
+  });
+
+  it('injects later frames with exactly the manifest’s content scripts, in the same order', () => {
+    // A page injected by background.js (sub-frames, pages loaded before an update)
+    // must run the same code as one the manifest injected.
+    expect(injectedFiles(read('src/background.js'))).toEqual(manifest().content_scripts[0].js);
+  });
+
+  it('declares the keyboard shortcuts, with suggested keys clear of the browsers’ own', () => {
+    const commands = manifest().commands;
+    expect(Object.keys(commands).sort()).toEqual(['toggle-inspect', 'toggle-recording']);
+    expect(commands['toggle-inspect']).toEqual({
+      suggested_key: { default: 'Alt+Shift+E' },
+      description: 'Start or stop inspecting',
+    });
+    expect(commands['toggle-recording']).toEqual({
+      suggested_key: { default: 'Alt+Shift+K' },
+      description: 'Start or stop recording',
+    });
+    // The worker handles exactly these names.
+    const bg = read('src/background.js');
+    for (const name of Object.keys(commands)) expect(bg).toContain(`'${name}'`);
+    expect(bg).toMatch(/chrome\.commands\.onCommand\.addListener\(handleCommand\)/);
+  });
+
+  it('opens the settings page in a tab, and the page loads every code-generator target', () => {
+    expect(manifest().options_ui).toEqual({ page: 'src/options.html', open_in_tab: true });
+    expect(manifest().options_page).toBeUndefined();
+    const scripts = htmlReferences('src/options.html', read('src/options.html'));
+    const order = ['src/codegen.js', 'src/codegen-java.js', 'src/codegen-csharp.js', 'src/codegen-wdio.js'];
+    for (const f of [...order, 'src/options.js']) expect(scripts, f).toContain(f);
+    const at = order.map((f) => scripts.indexOf(f));
+    expect([...at].sort((a, b) => a - b)).toEqual(at);
+    expect(scripts.indexOf('src/options.js')).toBeGreaterThan(Math.max(...at));
+    // The popup's ⚙ Settings link.
+    expect(stripJsComments(read('src/popup.js'))).toMatch(/chrome\.runtime\.openOptionsPage\(/);
   });
 
   // The rejection was for a permission nothing needed. "Every permission is
@@ -510,7 +554,7 @@ describe.each(TARGET_NAMES)('%s package', (target) => {
 
   it('declares a side-panel surface appropriate to the browser', () => {
     const m = manifest();
-    if (target === 'chrome') {
+    if (target !== 'firefox') {
       expect(m.side_panel?.default_path).toBeTruthy();
       expect(m.permissions).toContain('sidePanel');
       // chrome.sidePanel arrived in 114; anything that states a floor must clear it.
@@ -552,6 +596,54 @@ describe.each(TARGET_NAMES)('%s package', (target) => {
     ].join('\n');
     const out = execFileSync('python3', ['-I', '-c', script, built[target].zipPath], { encoding: 'utf8' });
     expect(Number(out.trim())).toBe(filesIn(dir()).length);
+  });
+});
+
+describe('edge package', () => {
+  it('is the Chrome package under its own name: same manifest, same files, same bytes', () => {
+    const chrome = join(OUT, 'chrome');
+    const edge = join(OUT, 'edge');
+    expect(filesIn(edge).sort()).toEqual(filesIn(chrome).sort());
+    for (const f of filesIn(edge)) {
+      expect(readFileSync(join(edge, f)).equals(readFileSync(join(chrome, f))), f).toBe(true);
+    }
+    expect(built.edge.zipPath.endsWith(`locatra-edge-${built.edge.version}.zip`)).toBe(true);
+    expect(built.edge.version).toBe(built.chrome.version);
+  });
+
+  it('is a build target of its own', () => {
+    expect(TARGET_NAMES).toEqual(['chrome', 'firefox', 'edge']);
+  });
+});
+
+describe('building', () => {
+  it('refuses an unknown target', () => {
+    expect(() => build('safari', OUT)).toThrow(
+      /Unknown target "safari". Expected one of: chrome, firefox, edge/
+    );
+  });
+
+  it('names a file declared in SHIP that is missing, instead of shipping without it', () => {
+    SHIP.push('src/not-written-yet.js');
+    try {
+      expect(() => build('chrome', OUT)).toThrow(
+        'Declared in SHIP but missing on disk: src/not-written-yet.js — create it, or remove it from SHIP in scripts/build.mjs'
+      );
+    } finally {
+      SHIP.pop();
+    }
+  });
+
+  it('ships the settings page and the code-generator targets', () => {
+    for (const f of [
+      'src/options.html',
+      'src/options.js',
+      'src/codegen-java.js',
+      'src/codegen-csharp.js',
+      'src/codegen-wdio.js',
+    ]) {
+      expect(SHIP, f).toContain(f);
+    }
   });
 });
 
@@ -713,9 +805,47 @@ describe('documentation matches the manifests', () => {
       const text = doc(file);
       expect(text, `${file} mentions Export session`).not.toMatch(/Export session/i);
       expect(text, `${file} mentions POM data`).not.toMatch(/POM data/i);
-      expect(text, `${file} mentions configurable test-id attributes`).not.toMatch(
-        /custom test-id attribute|custom test attributes/i
-      );
+      // (Custom test-id attributes used to be listed here too; the settings page
+      // now has them.)
     }
+  });
+
+  it('documents the Edge package and its Partner Center listing', () => {
+    const guide = doc('STORE_SUBMISSION.md');
+    expect(guide).toContain('dist/locatra-edge-<version>.zip');
+    expect(guide).toContain('dist/edge/');
+    const lines = guide.split('\n');
+    const start = lines.findIndex((l) => /^##\s.*Edge Add-ons/.test(l));
+    expect(start, 'no "Edge Add-ons" section').toBeGreaterThan(-1);
+    const end = lines.findIndex((l, i) => i > start && /^##\s/.test(l));
+    const section = lines.slice(start, end === -1 ? undefined : end).join('\n');
+    for (const field of [
+      'Display name',
+      'Description',
+      'Category',
+      'Privacy policy',
+      'Search terms',
+      'Store logo',
+      'Screenshots',
+      'Notes for certification',
+    ]) {
+      expect(section, `Edge section misses ${field}`).toContain(field);
+    }
+    expect(section).toContain('https://github.com/yogesh-bhatttk/Locator_Lens/blob/master/PRIVACY_POLICY.md');
+    // Every declared permission is justified there too.
+    for (const p of declared('manifests/manifest.chrome.json').permissions) {
+      expect(section, `Edge section does not justify ${p}`).toContain(`\`${p}\``);
+    }
+    expect(section).toContain(declared('manifests/manifest.chrome.json').description);
+  });
+
+  it('tells README readers about Edge and the keyboard shortcuts', () => {
+    const readme = doc('README.md');
+    expect(readme).toMatch(/Edge/);
+    for (const c of Object.values(declared('manifests/manifest.chrome.json').commands)) {
+      expect(readme, c.suggested_key.default).toContain(c.suggested_key.default);
+    }
+    // No store URL is invented for a listing that does not exist yet.
+    expect(readme).not.toMatch(/microsoftedge\.microsoft\.com\/addons\/detail/);
   });
 });

@@ -1,7 +1,8 @@
 # Store submission guide
 
-Everything needed to build, verify and submit Locatra to the Chrome Web Store
-and addons.mozilla.org, plus the permission justifications reviewers ask for.
+Everything needed to build, verify and submit Locatra to the Chrome Web Store,
+addons.mozilla.org and Microsoft Edge Add-ons, plus the permission justifications
+reviewers ask for.
 
 ---
 
@@ -19,8 +20,16 @@ npm run lint:firefox   # Mozilla's web-ext lint over dist/firefox (CI runs it to
 | ------------------------------------ | --------------------------------------------------------- |
 | `dist/chrome/`                       | unpacked tree — `chrome://extensions` → Load unpacked     |
 | `dist/firefox/`                      | unpacked tree — `about:debugging` → Load Temporary Add-on |
+| `dist/edge/`                         | unpacked tree — `edge://extensions` → Load unpacked       |
 | `dist/locatra-chrome-<version>.zip`  | upload to the Chrome Web Store                            |
 | `dist/locatra-firefox-<version>.zip` | upload to AMO                                             |
+| `dist/locatra-edge-<version>.zip`    | upload to Microsoft Edge Add-ons (Partner Center)         |
+
+The Edge package is built from the Chrome manifest and holds byte-identical files
+(Edge is Chromium: `chrome.sidePanel`, `commands` and `options_ui` behave the
+same); it is a target of its own so the archive uploaded to Partner Center is
+named for it and is checked by the same rules. `node scripts/build.mjs edge` builds
+only it.
 
 The build prints a SHA-256 for each archive, preceded by the Node and zlib versions
 that produced it. Archives are reproducible: file order, timestamps and permissions
@@ -249,6 +258,95 @@ feature that exists.
 - [ ] `browser_specific_settings.gecko.id` unchanged (`locatorlens@yogesh-bhatttk.com`);
       changing it creates a _new_ add-on rather than updating the existing listing
 - [ ] `strict_min_version` still correct for the APIs in use
+
+## 7b. Microsoft Edge Add-ons (Partner Center)
+
+Submit at Partner Center → Microsoft Edge → **Create new extension** (or the
+existing item → **Update**). Every field, in the order Partner Center asks:
+
+**Packages**
+
+- [ ] `npm run verify` and `npm run smoke` pass; version bumped past the last
+      version **submitted to Edge** (Edge, like Chrome, consumes a rejected number)
+- [ ] upload `dist/locatra-edge-<version>.zip`. Partner Center reads name, version,
+      description and icons from its manifest — nothing to retype
+
+**Availability**
+
+- **Visibility**: Public
+- **Markets**: all markets
+
+**Properties**
+
+| Field                       | Value                                                                                            |
+| --------------------------- | ------------------------------------------------------------------------------------------------ |
+| Category                    | Developer tools                                                                                  |
+| Privacy policy requirements | **No** — the extension does not access, collect or transmit personal information (see §3b)       |
+| Privacy policy URL          | https://github.com/yogesh-bhatttk/Locator_Lens/blob/master/PRIVACY_POLICY.md (set it regardless) |
+| Website URL                 | https://github.com/yogesh-bhatttk/Locator_Lens                                                   |
+| Support contact details     | https://github.com/yogesh-bhatttk/Locator_Lens/issues                                            |
+| Mature content              | No                                                                                               |
+
+**Store listing** (English)
+
+| Field                  | Value                                                                                                                                        |
+| ---------------------- | -------------------------------------------------------------------------------------------------------------------------------------------- |
+| Display name           | Locatra – Smart Locator Automation (from the manifest)                                                                                       |
+| Description            | The short description from §3b, then the paragraph below — Partner Center wants 250–10,000 characters                                        |
+| Store logo             | `icons/icon128.png` meets the 128×128 minimum; a 300×300 rendering of the same mark is recommended (not generated yet)                       |
+| Small promotional tile | `screenshots/store/promo-small-440x280.png` (optional)                                                                                       |
+| Large promotional tile | `screenshots/store/promo-marquee-1400x560.png` (optional)                                                                                    |
+| Screenshots            | the five `screenshots/store/store-*.png` images from §5 (1280×800, real captures of the Chromium build — Edge renders the panel identically) |
+| YouTube video URL      | leave empty                                                                                                                                  |
+| Search terms           | `playwright`, `selenium`, `cypress`, `locator`, `test recorder`, `xpath`, `qa automation` (7 terms, each ≤ 30 characters)                    |
+
+Description, pasted after the short description:
+
+> Locatra is a test-authoring tool for QA engineers. Hover any element to get
+> ranked, uniqueness-checked locators (role, label, test id, text, CSS, XPath),
+> validate selectors in the Selector Lab, and record a flow into a runnable
+> Playwright, Selenium, Cypress or WebdriverIO test in TypeScript, JavaScript,
+> Python, Java or C#. Replay a recording in the page, export Page Objects, and
+> keep an eye on the locators you rely on with the locator health check. Keyboard
+> shortcuts (Alt+Shift+E to inspect, Alt+Shift+K to record) work on any page.
+> Everything runs locally in your browser: no account, no server, no telemetry.
+
+The short description, verbatim from the manifest:
+
+> Inspect elements for ranked Playwright locators and record flows into test scripts—runs locally in your browser.
+
+**Permissions.** Partner Center has no per-permission form; reviewers read the
+justification from the notes below. Same set, same reasons as §4:
+
+- `activeTab` — act on the tab the user invokes Locatra on (button, context menu
+  or keyboard shortcut), also when site access is set to "on click".
+- `scripting` — inject the inspector/recorder content scripts into pages that loaded
+  before the extension, and run the locator health check in the page's frames.
+- `storage` — settings, the recorder timeline, watched locators (local), and the
+  worker's inspect/recording state (session). Nothing is transmitted.
+- `contextMenus` — the right-click "Copy Best Locator" / "Open Results Panel" items.
+- `sidePanel` — the results panel, the extension's main surface.
+- host access `http://*/*`, `https://*/*` — the user tests arbitrary internal and
+  public hosts; see §4 "Broad host access". `<all_urls>` is optional and requested
+  at run time only for step screenshots.
+
+**Submission options → Notes for certification** (paste):
+
+> Locatra is a developer tool for writing end-to-end tests. To try it: open any
+> http(s) page (for example https://example.com), click the toolbar icon →
+> "Start Inspecting" and hover/click an element — ranked locators appear in the
+> side panel. In the panel's Record tab press "Start Recording", click and type on
+> the page, then "Stop" to see the generated test. Alt+Shift+E / Alt+Shift+K toggle
+> inspecting / recording from the keyboard; the ⚙ Settings link in the popup opens
+> the options page. No account or test credentials are needed. The package has no
+> network code (no fetch, XMLHttpRequest, WebSocket, EventSource or sendBeacon) and
+> no remote code; the source is https://github.com/yogesh-bhatttk/Locator_Lens.
+> Permissions: activeTab, scripting, storage, contextMenus, sidePanel and
+> http/https host access, each used as described in the listing; the optional
+> <all_urls> grant is requested only when the user turns on step screenshots.
+
+- [ ] Edge reviews can take up to 7 business days; an update replaces the listing
+      only after certification
 
 ## 8. If a submission is rejected
 

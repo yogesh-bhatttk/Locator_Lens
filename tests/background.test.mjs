@@ -16,6 +16,10 @@ import { describe, expect, it } from 'vitest';
 
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const SOURCE = readFileSync(join(ROOT, 'src/background.js'), 'utf8');
+/** Injection must load exactly what the manifest's content_scripts does, in order. */
+const MANIFEST_CONTENT_SCRIPTS = JSON.parse(
+  readFileSync(join(ROOT, 'manifests/manifest.chrome.json'), 'utf8')
+).content_scripts[0].js;
 
 const TAB = 42;
 const WINDOW = 7;
@@ -338,11 +342,7 @@ describe('recording across a worker eviction', () => {
     await flush();
 
     expect(second.injected).toHaveLength(1);
-    expect(second.injected[0].files).toEqual([
-      'src/codegen.js',
-      'src/content-locator-engine.js',
-      'src/content.js',
-    ]);
+    expect(second.injected[0].files).toEqual(MANIFEST_CONTENT_SCRIPTS);
     expect(rearms(second)).toHaveLength(1);
   });
 

@@ -35,7 +35,7 @@ const rec = (eventId, extra = {}) => ({
 describe('thumbs-store: shape', () => {
   it('exposes the documented promise API on globalThis.LLThumbs', () => {
     const { api } = store();
-    for (const fn of ['put', 'get', 'getMany', 'delete', 'deleteMany', 'clearWindow', 'prune']) {
+    for (const fn of ['put', 'get', 'getMany', 'delete', 'deleteMany', 'clearWindow', 'clearAll', 'prune']) {
       expect(typeof api[fn]).toBe('function');
     }
     expect(api.DB_NAME).toBe('locatra');
@@ -164,6 +164,17 @@ describe('thumbs-store: CRUD', () => {
     expect(await api.clearWindow('7')).toBe(0);
     expect(await api.clearWindow(99)).toBe(0);
   });
+
+  it('clearAll removes every window’s thumbnails — the settings page’s “Clear step screenshots”', async () => {
+    const { api } = store();
+    await api.put(rec('a', { windowId: 7 }));
+    await api.put(rec('b', { windowId: 8 }));
+    await api.put(rec('c', { windowId: null }));
+    await api.put(rec(4, { createdAt: Date.now() + 10 * DAY })); // even a "future" record
+    expect(await api.clearAll()).toBe(4);
+    expect(await api.getMany(['a', 'b', 'c', 4])).toEqual([null, null, null, null]);
+    expect(await api.clearAll()).toBe(0);
+  });
 });
 
 describe('thumbs-store: prune', () => {
@@ -206,6 +217,7 @@ describe('thumbs-store: degraded environments never reject', () => {
     expect(await api.delete('a')).toBe(false);
     expect(await api.deleteMany(['a'])).toBe(0);
     expect(await api.clearWindow(7)).toBe(0);
+    expect(await api.clearAll()).toBe(0);
   });
 
   it('an indexedDB getter that throws (privacy mode) counts as unavailable', async () => {
@@ -245,6 +257,7 @@ describe('thumbs-store: degraded environments never reject', () => {
     expect(await api.put(rec('a'))).toBe(false);
     expect(await api.getMany(['a'])).toEqual([]);
     expect(await api.clearWindow(7)).toBe(0);
+    expect(await api.clearAll()).toBe(0);
   });
 
   it('a request that throws synchronously aborts the transaction', async () => {

@@ -23,10 +23,35 @@
     },
     "default_title": "Locatra – Smart Locator Automation"
   },
+  "options_ui": {
+    "page": "src/options.html",
+    "open_in_tab": true
+  },
+  "commands": {
+    "toggle-inspect": {
+      "suggested_key": {
+        "default": "Alt+Shift+E"
+      },
+      "description": "Start or stop inspecting"
+    },
+    "toggle-recording": {
+      "suggested_key": {
+        "default": "Alt+Shift+K"
+      },
+      "description": "Start or stop recording"
+    }
+  },
   "content_scripts": [
     {
       "matches": ["http://*/*", "https://*/*"],
-      "js": ["src/codegen.js", "src/content-locator-engine.js", "src/content.js"],
+      "js": [
+        "src/codegen.js",
+        "src/codegen-java.js",
+        "src/codegen-csharp.js",
+        "src/codegen-wdio.js",
+        "src/content-locator-engine.js",
+        "src/content.js"
+      ],
       "run_at": "document_idle"
     }
   ],

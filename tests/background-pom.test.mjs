@@ -2,7 +2,7 @@
 
 import { describe, expect, it } from 'vitest';
 
-import { TAB, WINDOW, flush, startWorker } from './background-harness.mjs';
+import { CONTENT_SCRIPT_FILES, TAB, WINDOW, flush, startWorker } from './background-harness.mjs';
 
 const RESTRICTED = /can't run on this page/;
 const toTab = (w, type) => w.sent.filter((s) => s.msg.type === type);
@@ -14,7 +14,7 @@ describe('POM_PICK_START', () => {
     expect(res).toEqual({ ok: true, tabId: TAB });
     expect(w.injected[0]).toEqual({
       target: { tabId: TAB, allFrames: true },
-      files: ['src/codegen.js', 'src/content-locator-engine.js', 'src/content.js'],
+      files: CONTENT_SCRIPT_FILES,
     });
     // Exactly the spec's message, to every frame (each hit-tests its own document).
     expect(toTab(w, 'POM_PICK_START')).toEqual([
@@ -74,7 +74,7 @@ describe('POM_SCAN', () => {
     expect(w.injected).toEqual([
       {
         target: { tabId: TAB },
-        files: ['src/codegen.js', 'src/content-locator-engine.js', 'src/content.js'],
+        files: CONTENT_SCRIPT_FILES,
       },
     ]);
     expect(toTab(w, 'POM_SCAN')).toHaveLength(1);

@@ -12,7 +12,7 @@ import { readFileSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import vm from 'node:vm';
-import { beforeAll, beforeEach, describe, expect, it } from 'vitest';
+import { afterEach, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 
@@ -80,7 +80,18 @@ beforeEach(() => {
 
 describe('markup contract', () => {
   it('has every element popup.js reaches for', () => {
-    for (const id of ['inspectBtn', 'statusDot', 'btnIcon', 'btnText', 'hintRow', 'panelBtn', 'popupMsg']) {
+    for (const id of [
+      'inspectBtn',
+      'statusDot',
+      'btnIcon',
+      'btnText',
+      'hintRow',
+      'panelBtn',
+      'popupMsg',
+      'inspectKey',
+      'recordKey',
+      'settingsBtn',
+    ]) {
       expect(document.getElementById(id), id).not.toBeNull();
     }
     // openPanel() addresses the label as the second <span> of the button.
@@ -443,5 +454,130 @@ describe('degraded environments and failures', () => {
     } finally {
       delete globalThis.chrome.runtime.getURL;
     }
+  });
+});
+
+describe('keyboard-shortcut hints', () => {
+  const hint = (id) => document.getElementById(id);
+  afterEach(() => {
+    delete globalThis.chrome.commands;
+    globalThis.chrome.runtime.lastError = null;
+  });
+
+  it('shows the keys the user has now, next to Inspect and Record', () => {
+    let calls = 0;
+    globalThis.chrome.commands = {
+      getAll: (cb) => {
+        calls++;
+        cb([
+          { name: '_execute_action', shortcut: 'Ctrl+Shift+L' },
+          { name: 'toggle-inspect', shortcut: 'Alt+Shift+E', description: 'Start or stop inspecting' },
+          { name: 'toggle-recording', shortcut: ' ⌥⇧K ' },
+        ]);
+      },
+    };
+    open();
+    expect(calls).toBe(1);
+    expect(hint('inspectKey').hidden).toBe(false);
+    expect(hint('inspectKey').textContent).toBe('Alt+Shift+E');
+    expect(hint('recordKey').hidden).toBe(false);
+    expect(hint('recordKey').textContent).toBe('⌥⇧K');
+    // The button's own label is untouched.
+    expect(btnText()).toBe('Start Inspecting');
+  });
+
+  it('shows nothing for a command with no key bound (the user cleared it, or Chrome did not assign it)', () => {
+    globalThis.chrome.commands = {
+      getAll: (cb) => cb([{ name: 'toggle-inspect', shortcut: '' }, { name: 'toggle-recording' }]),
+    };
+    open();
+    expect(hint('inspectKey').hidden).toBe(true);
+    expect(hint('inspectKey').textContent).toBe('');
+    expect(hint('recordKey').hidden).toBe(true);
+  });
+
+  it('stays hidden without the commands API, on an error, a bad answer, or a throw', () => {
+    open(); // no chrome.commands
+    expect(hint('inspectKey').hidden).toBe(true);
+    globalThis.chrome.commands = {
+      getAll: (cb) => {
+        globalThis.chrome.runtime.lastError = { message: 'nope' };
+        cb(undefined);
+        globalThis.chrome.runtime.lastError = null;
+      },
+    };
+    open();
+    expect(hint('inspectKey').hidden).toBe(true);
+    globalThis.chrome.commands = { getAll: (cb) => cb({ not: 'an array' }) };
+    open();
+    expect(hint('inspectKey').hidden).toBe(true);
+    globalThis.chrome.commands = { getAll: (cb) => cb([null, { name: 'toggle-inspect', shortcut: 7 }]) };
+    open();
+    expect(hint('inspectKey').hidden).toBe(true);
+    globalThis.chrome.commands = {
+      getAll: () => {
+        throw new Error('boom');
+      },
+    };
+    expect(() => open()).not.toThrow();
+  });
+
+  it('a markup without the hint elements is fine', () => {
+    hint('recordKey').remove();
+    globalThis.chrome.commands = {
+      getAll: (cb) => cb([{ name: 'toggle-recording', shortcut: 'Alt+Shift+K' }]),
+    };
+    expect(() => open()).not.toThrow();
+  });
+});
+
+describe('the ⚙ Settings link', () => {
+  const settings = () => document.getElementById('settingsBtn');
+  afterEach(() => {
+    delete globalThis.chrome.runtime.openOptionsPage;
+    globalThis.chrome.runtime.lastError = null;
+  });
+
+  it('is a labelled button that opens the extension’s settings page', () => {
+    let opened = 0;
+    globalThis.chrome.runtime.openOptionsPage = (cb) => {
+      opened++;
+      cb();
+    };
+    open();
+    expect(settings().tagName).toBe('BUTTON');
+    expect(settings().textContent.trim()).toBe('⚙ Settings');
+    settings().click();
+    expect(opened).toBe(1);
+    expect(document.getElementById('popupMsg').hidden).toBe(true);
+  });
+
+  it('says why when the browser cannot open it', () => {
+    const msg = () => document.getElementById('popupMsg');
+    globalThis.chrome.runtime.openOptionsPage = (cb) => {
+      globalThis.chrome.runtime.lastError = { message: 'Could not create an options page.' };
+      cb();
+      globalThis.chrome.runtime.lastError = null;
+    };
+    open();
+    settings().click();
+    expect(msg().hidden).toBe(false);
+    expect(msg().textContent).toBe("Couldn't open the settings: Could not create an options page.");
+    expect(msg().classList.contains('error')).toBe(true);
+
+    globalThis.chrome.runtime.openOptionsPage = () => {
+      throw new Error('blocked');
+    };
+    settings().click();
+    expect(msg().textContent).toBe("Couldn't open the settings: blocked");
+
+    delete globalThis.chrome.runtime.openOptionsPage;
+    settings().click();
+    expect(msg().textContent).toBe("Couldn't open the settings: this browser has no settings page API");
+  });
+
+  it('a markup without the link is fine', () => {
+    settings().remove();
+    expect(() => open()).not.toThrow();
   });
 });

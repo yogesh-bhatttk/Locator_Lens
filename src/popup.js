@@ -187,6 +187,52 @@ function openPanel() {
   trackPanelOpen(opening);
 }
 
+// Keyboard shortcuts, as the user has them now (they can rebind or clear them in
+// the browser's shortcut settings, so nothing here is hardcoded). A command with no
+// key bound shows no hint.
+const SHORTCUT_HINTS = { 'toggle-inspect': 'inspectKey', 'toggle-recording': 'recordKey' };
+
+function showShortcuts(commands) {
+  if (!Array.isArray(commands)) return;
+  for (const cmd of commands) {
+    const id = cmd && SHORTCUT_HINTS[cmd.name];
+    const el = id && document.getElementById(id);
+    if (!el) continue;
+    const key = typeof cmd.shortcut === 'string' ? cmd.shortcut.trim() : '';
+    el.textContent = key;
+    el.hidden = !key;
+  }
+}
+
+function loadShortcuts() {
+  const api = chrome.commands;
+  if (!api || typeof api.getAll !== 'function') return;
+  try {
+    api.getAll((commands) => {
+      if (chrome.runtime.lastError) return;
+      showShortcuts(commands);
+    });
+  } catch (e) {}
+}
+
+/** The settings page (manifest options_ui). */
+function openSettings() {
+  showMessage('');
+  const fail = (err) => showMessage(`Couldn't open the settings: ${errorText(err)}`, 'error');
+  if (typeof chrome.runtime.openOptionsPage !== 'function') {
+    fail('this browser has no settings page API');
+    return;
+  }
+  try {
+    chrome.runtime.openOptionsPage(() => {
+      const err = chrome.runtime.lastError;
+      if (err) fail(err);
+    });
+  } catch (err) {
+    fail(err);
+  }
+}
+
 function loadState() {
   // Restore inspect state (e.g. if popup was re-opened while inspecting)
   chrome.runtime.sendMessage(withWindow({ type: 'GET_INSPECT_STATE' }), (res) => {
@@ -233,6 +279,9 @@ document.addEventListener('DOMContentLoaded', () => {
   updatePanelUI();
   document.getElementById('inspectBtn').addEventListener('click', toggleInspect);
   document.getElementById('panelBtn').addEventListener('click', openPanel);
+  const settingsBtn = document.getElementById('settingsBtn');
+  if (settingsBtn) settingsBtn.addEventListener('click', openSettings);
+  loadShortcuts();
 
   if (chrome.windows && typeof chrome.windows.getCurrent === 'function') {
     chrome.windows.getCurrent((win) => {

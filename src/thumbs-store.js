@@ -17,7 +17,7 @@
 //
 // Every function returns a Promise that never rejects. Without IndexedDB (or when
 // the database cannot be opened) each resolves to its "nothing" value: put → false,
-// get → null, getMany → [], delete → false, deleteMany/clearWindow/prune → 0.
+// get → null, getMany → [], delete → false, deleteMany/clearWindow/clearAll/prune → 0.
 (function (root) {
   'use strict';
   if (!root || root.LLThumbs) return;
@@ -183,6 +183,18 @@
     });
   }
 
+  /** Delete every thumbnail of every window. @returns Promise<number> deleted. */
+  function clearAll() {
+    return run('readwrite', 0, function (store, set) {
+      var req = store.getAllKeys();
+      req.onsuccess = function () {
+        var keys = req.result || [];
+        keys.forEach(function (k) { store.delete(k); });
+        set(keys.length);
+      };
+    });
+  }
+
   /** Delete thumbnails older than maxAgeMs (default 14 days). @returns Promise<number> deleted. */
   function prune(maxAgeMs) {
     var age = typeof maxAgeMs === 'number' && maxAgeMs >= 0 ? maxAgeMs : DEFAULT_MAX_AGE_MS;
@@ -210,6 +222,7 @@
     delete: del,
     deleteMany: deleteMany,
     clearWindow: clearWindow,
+    clearAll: clearAll,
     prune: prune
   };
 })(typeof globalThis !== 'undefined' ? globalThis : typeof self !== 'undefined' ? self : this);

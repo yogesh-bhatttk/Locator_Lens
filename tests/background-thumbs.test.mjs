@@ -485,6 +485,83 @@ describe('THUMBS_DELETE / THUMBS_CLEAR', () => {
   });
 });
 
+describe('THUMBS_CLEAR_ALL (settings page: “Clear step screenshots”)', () => {
+  it('deletes every window’s thumbnails, answers the count and tells every panel', async () => {
+    const w = startWorker();
+    const a = w.connectPanel(WINDOW);
+    const b = w.connectPanel(99);
+    w.thumbs.records.set('x', { eventId: 'x', windowId: WINDOW });
+    w.thumbs.records.set('y', { eventId: 'y', windowId: 99 });
+    expect(await w.ask({ type: 'THUMBS_CLEAR_ALL' })).toEqual({ ok: true, deleted: 2 });
+    expect(w.thumbs.records.size).toBe(0);
+    expect(w.thumbs.calls).toContainEqual(['clearAll']);
+    // No window: every panel drops what it shows.
+    expect(a.of('THUMBS_CLEARED')).toEqual([{ type: 'THUMBS_CLEARED', all: true }]);
+    expect(b.of('THUMBS_CLEARED')).toEqual([{ type: 'THUMBS_CLEARED', all: true }]);
+  });
+
+  it('falls back to pruning everything with a store that predates clearAll', async () => {
+    const t = memoryThumbs();
+    delete t.clearAll;
+    t.prune = (age) => {
+      t.calls.push(['prune', age]);
+      return Promise.resolve(3);
+    };
+    const w = startWorker({ thumbs: t });
+    expect(await w.ask({ type: 'THUMBS_CLEAR_ALL' })).toEqual({ ok: true, deleted: 3 });
+    expect(t.calls).toContainEqual(['prune', 0]);
+  });
+
+  it('answers ok with nothing deleted without a store, and reports a store that rejects', async () => {
+    const w = startWorker({ thumbs: null });
+    expect(await w.ask({ type: 'THUMBS_CLEAR_ALL' })).toEqual({ ok: true, deleted: 0 });
+    const t = memoryThumbs();
+    t.clearAll = () => Promise.reject(new Error('x'));
+    const w2 = startWorker({ thumbs: t });
+    expect(await w2.ask({ type: 'THUMBS_CLEAR_ALL' })).toEqual({
+      ok: false,
+      error: 'Could not delete thumbnails.',
+    });
+    expect(w2.relaysOf('THUMBS_CLEARED')).toEqual([]);
+    const t3 = memoryThumbs();
+    t3.clearAll = () => Promise.resolve('n/a');
+    expect(await startWorker({ thumbs: t3 }).ask({ type: 'THUMBS_CLEAR_ALL' })).toEqual({
+      ok: true,
+      deleted: 0,
+    });
+  });
+
+  it('is ignored from content scripts', () => {
+    const w = startWorker();
+    expect(w.fromTab({ type: 'THUMBS_CLEAR_ALL' }).responded).toBe(false);
+    expect(w.thumbs.calls.filter((c) => c[0] === 'clearAll')).toEqual([]);
+  });
+
+  it('drops pending captures, and a capture in flight is not stored', async () => {
+    let release;
+    const t = memoryThumbs();
+    const w = startWorker({ thumbs: t, image: { width: 1280, height: 800 } });
+    const gate = new Promise((r) => (release = r));
+    const original = w.context.OffscreenCanvas.prototype.convertToBlob;
+    w.context.OffscreenCanvas.prototype.convertToBlob = async function (o) {
+      await gate;
+      return original.call(this, o);
+    };
+    record(w, step());
+    await until(() => w.captures.length === 1);
+    record(w, step()); // waits for the next capture slot
+    await w.ask({ type: 'THUMBS_CLEAR_ALL' });
+    release();
+    await flush(700);
+    expect(w.captures).toHaveLength(1);
+    expect(t.calls.filter((c) => c[0] === 'put')).toEqual([]);
+    expect(thumbsOf(w)).toEqual([]);
+    // Steps recorded afterwards get their thumbnails as usual.
+    record(w, step());
+    await until(() => thumbsOf(w).length === 1, { what: 'a new thumbnail' });
+  });
+});
+
 describe('thumbnail store lifecycle', () => {
   it('prunes old thumbnails when the worker starts', () => {
     const w = startWorker();

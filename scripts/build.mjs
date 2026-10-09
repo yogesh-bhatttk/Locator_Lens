@@ -29,8 +29,17 @@ const DEFAULT_OUT = join(ROOT, 'dist');
 export const SHIP = [
   'src/background.js',
   'src/codegen.js',
+  // Code-generator targets that plug into LLCodegen.registerTarget(): content
+  // scripts (manifest + background's CONTENT_SCRIPT_FILES), and <script>s of the
+  // side panel and the settings page.
+  'src/codegen-java.js',
+  'src/codegen-csharp.js',
+  'src/codegen-wdio.js',
   'src/content-locator-engine.js',
   'src/content.js',
+  // The settings page (manifest options_ui).
+  'src/options.html',
+  'src/options.js',
   'src/popup.html',
   'src/popup.js',
   'src/sidepanel.html',
@@ -44,6 +53,11 @@ export const SHIP = [
 const TARGETS = {
   chrome: { manifest: 'manifests/manifest.chrome.json' },
   firefox: { manifest: 'manifests/manifest.firefox.json' },
+  // Microsoft Edge Add-ons takes the Chrome MV3 package as is (Edge is Chromium,
+  // with chrome.sidePanel and the same commands/options_ui). Its own target, with
+  // its own archive name, so the file uploaded to Partner Center is unambiguous
+  // and is checked by the same policy rules on its own.
+  edge: { manifest: 'manifests/manifest.chrome.json' },
 };
 
 // ── file collection ─────────────────────────────────────────────────────────────
@@ -61,7 +75,11 @@ function collect() {
   const files = [];
   for (const item of SHIP) {
     const abs = join(ROOT, item);
-    if (!existsSync(abs)) throw new Error(`Declared in SHIP but missing on disk: ${item}`);
+    if (!existsSync(abs)) {
+      throw new Error(
+        `Declared in SHIP but missing on disk: ${item} — create it, or remove it from SHIP in scripts/build.mjs`
+      );
+    }
     for (const file of walk(abs)) {
       files.push({ name: relative(ROOT, file).split(/[\\/]/).join('/'), data: readFileSync(file) });
     }

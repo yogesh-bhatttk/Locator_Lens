@@ -122,6 +122,27 @@
     }
     .cap-icon svg { width: 14px; height: 14px; }
     .cap-label { display: block; font-weight: 700; color: var(--text-strong); margin-bottom: 1px; }
+
+    /* Keyboard-shortcut hints (from chrome.commands.getAll — whatever the user set). */
+    .key-hint {
+      font: 600 10px ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+      padding: 1px 5px; border-radius: var(--r-sm);
+      border: 1px solid currentColor; opacity: .8; letter-spacing: 0;
+    }
+    .key-hint[hidden] { display: none; }
+    .inspect-btn .key-hint { margin-left: 2px; }
+    .cap-label .key-hint { margin-left: 6px; color: var(--text-muted); font-weight: 600; }
+
+    .popup-footer {
+      display: flex; justify-content: flex-end;
+      margin: -4px 14px 12px;
+    }
+    .settings-link {
+      display: inline-flex; align-items: center; gap: 5px;
+      padding: 4px 8px; border-radius: var(--r-sm);
+      color: var(--text-muted); font-size: 11px; font-weight: 600;
+    }
+    .settings-link:hover { background: var(--brand-soft); color: var(--brand); }
   </style>
 </head>
 
@@ -141,6 +162,7 @@
     <button class="inspect-btn" id="inspectBtn">
       <span id="btnIcon">🎯</span>
       <span id="btnText">Start Inspecting</span>
+      <kbd class="key-hint" id="inspectKey" title="Keyboard shortcut" hidden></kbd>
     </button>
     <button class="panel-btn" id="panelBtn">
       <span aria-hidden="true">▦</span>
@@ -159,12 +181,16 @@
     </div>
     <div class="cap-row">
       <span class="cap-icon" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"/><circle cx="12" cy="12" r="3.5" fill="currentColor" stroke="none"/></svg></span>
-      <div><span class="cap-label">Record</span>Capture a flow and export a Playwright test script.</div>
+      <div><span class="cap-label">Record<kbd class="key-hint" id="recordKey" title="Keyboard shortcut: start or stop recording" hidden></kbd></span>Capture a flow and export a Playwright test script.</div>
     </div>
     <div class="cap-row">
       <span class="cap-icon" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><rect x="4" y="11" width="16" height="10" rx="2"/><path d="M8 11V7a4 4 0 0 1 8 0v4"/></svg></span>
       <div><span class="cap-label">Local</span>Everything runs in your browser — nothing is sent away.</div>
     </div>
+  </div>
+
+  <div class="popup-footer">
+    <button class="settings-link" id="settingsBtn" type="button">⚙ Settings</button>
   </div>
 
   <script src="popup.js"></script>
