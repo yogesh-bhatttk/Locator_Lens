@@ -1,10 +1,11 @@
 // codegen.js is a UMD-style IIFE that publishes onto the global object. Importing
 // it for side effects is enough to get the real shipping module — no shim, no copy.
 import { execFileSync } from 'node:child_process';
-import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { stripTypeScriptTypes } from 'node:module';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import vm from 'node:vm';
 import { JSDOM } from 'jsdom';
 import { beforeAll, describe, expect, it } from 'vitest';
 
@@ -1803,5 +1804,230 @@ describe('Cypress secrets on Cypress 15 and 16', () => {
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
+  });
+});
+
+// ── pluggable targets (registerTarget) ────────────────────────────────────────
+// Each test gets its own copy of the shipping file in a fresh context, so a target
+// registered here never leaks into the framework lists the other suites assert.
+describe('Selenium frame-wrapped chains', () => {
+  const chain = {
+    kind: 'chain',
+    parent: { kind: 'css', value: 'form.card' },
+    child: { kind: 'id', value: 'num' },
+  };
+  const framed = { kind: 'frame', selector: '#pay', index: 0, child: chain };
+  const nested = {
+    kind: 'frame',
+    selector: '#outer',
+    index: 0,
+    child: { kind: 'frame', index: 1, child: chain },
+  };
+
+  it('render the chain inside the frame, not the <body> fallback', () => {
+    expect(C.locatorExpr(framed, 'selenium', 'javascript')).toBe(
+      "driver.findElement(By.css('form.card')).findElement(By.id('num'))"
+    );
+    expect(C.locatorExpr(nested, 'selenium', 'python')).toBe(
+      'driver.find_element(By.CSS_SELECTOR, "form.card").find_element(By.ID, "num")'
+    );
+    expect(
+      C.locatorExpr(
+        { kind: 'frame', selector: '#f', index: 0, child: { kind: 'id', value: 'x' } },
+        'selenium',
+        'javascript'
+      )
+    ).toBe("driver.findElement(By.id('x'))");
+  });
+
+  it('switch into every frame before the chained lookup in a statement', () => {
+    expect(C.actionStatement({ action: 'click', target: nested }, 'selenium', 'javascript')).toBe(
+      [
+        "await driver.switchTo().frame(driver.findElement(By.css('#outer')));",
+        'await driver.switchTo().frame(1);',
+        "await driver.findElement(By.css('form.card')).findElement(By.id('num')).click();",
+        'await driver.switchTo().defaultContent();',
+      ].join('\n')
+    );
+  });
+});
+
+describe('registerTarget', () => {
+  const freshCodegen = () => {
+    const sandbox = {};
+    vm.runInNewContext(readFileSync(new URL('../src/codegen.js', import.meta.url), 'utf8'), sandbox);
+    return sandbox.LLCodegen;
+  };
+  const calls = [];
+  const def = (over = {}) => ({
+    framework: { id: 'acme', label: 'Acme' },
+    languages: [{ id: 'kotlin', label: 'Kotlin', ext: '.kt' }],
+    locatorExpr: (target, lang, rel) => (
+      calls.push(['loc', target.kind, lang, rel]),
+      `find(${target.value})`
+    ),
+    actionStatement: (step, lang) => (calls.push(['act', step.action, lang]), `do(${step.action})`),
+    wrapScript: (stmts, lang, steps, opts) => {
+      calls.push(['wrap', lang, steps && steps.length, opts]);
+      return `wrapped[${stmts.join('|')}]`;
+    },
+    pageObject: (model, lang) => `po(${model.className}, ${lang})`,
+    ...over,
+  });
+
+  it('validates the definition', () => {
+    const G = freshCodegen();
+    expect(() => G.registerTarget()).toThrow('framework.id and languages[] are required');
+    expect(() => G.registerTarget({ framework: {}, languages: [{ id: 'x' }] })).toThrow('framework.id');
+    expect(() => G.registerTarget({ framework: { id: 'x' }, languages: [] })).toThrow('languages[]');
+    expect(() => G.registerTarget(def({ pageObject: null }))).toThrow(
+      'registerTarget: pageObject() is required'
+    );
+    expect(G.FRAMEWORKS.map((f) => f.id)).toEqual(['playwright', 'selenium', 'cypress']);
+  });
+
+  it('adds a new framework and language, valid only as registered', () => {
+    const G = freshCodegen();
+    const d = def();
+    expect(G.registerTarget(d)).toBe(d);
+    expect(G.FRAMEWORKS.map((f) => f.id)).toEqual(['playwright', 'selenium', 'cypress', 'acme']);
+    expect(G.LANGUAGES.map((l) => l.id)).toEqual(['typescript', 'javascript', 'python', 'kotlin']);
+    expect(G.isValidCombo('acme', 'kotlin')).toBe(true);
+    expect(G.isValidCombo('acme', 'typescript')).toBe(false);
+    expect(G.isValidCombo('playwright', 'kotlin')).toBe(false);
+    expect(G.isValidCombo('nope', 'typescript')).toBe(false);
+    expect(G.languagesFor('acme').map((l) => l.id)).toEqual(['kotlin']);
+    expect(G.languagesFor('playwright').map((l) => l.id)).toEqual(['typescript', 'javascript', 'python']);
+    expect(G.fileExtension('kotlin')).toBe('.kt');
+    expect(G.fileExtension('python')).toBe('.py');
+    expect(G.fileExtension('unknown')).toBe('.ts');
+    // Re-registering a framework/language does not duplicate the menu entries.
+    G.registerTarget(def({ framework: { id: 'acme' }, languages: [{ id: 'kotlin' }, { id: 'scala' }] }));
+    expect(G.FRAMEWORKS.filter((f) => f.id === 'acme')).toHaveLength(1);
+    expect(G.LANGUAGES.map((l) => l.id)).toEqual(['typescript', 'javascript', 'python', 'kotlin', 'scala']);
+    expect(G.LANGUAGES.find((l) => l.id === 'scala').label).toBe('scala');
+    expect(G.FRAMEWORKS.find((f) => f.id === 'acme').label).toBe('Acme');
+  });
+
+  // A plug-in framework asked for a language it didn't register used to fall through
+  // to the built-in Playwright path: Playwright code labelled as the other framework.
+  it("falls back to a plug-in framework's own language for an unregistered one", () => {
+    const G = freshCodegen();
+    calls.length = 0;
+    G.registerTarget(def());
+    expect(G.pageObject({ className: 'Cart' }, 'acme', 'python')).toBe('po(Cart, kotlin)');
+    expect(G.pageObjectFileName({ className: 'Cart' }, 'acme', 'python')).toBe('CartPage.kt');
+    expect(G.locatorExpr({ kind: 'id', value: 'q' }, 'acme', 'typescript')).toBe('find(q)');
+    expect(G.testScript([{ action: 'click', target: { kind: 'id', value: 'q' } }], 'acme', 'python')).toBe(
+      'wrapped[do(click)]'
+    );
+    expect(calls.every((c) => !c.includes('python') && !c.includes('typescript'))).toBe(true);
+    // Built-in frameworks keep their existing behaviour for languages they lack.
+    expect(G.pageObjectFileName({ className: 'Cart' }, 'cypress', 'python')).toBe('CartPage.ts');
+  });
+
+  it('adds a language to a built-in framework without touching its other languages', () => {
+    const G = freshCodegen();
+    G.registerTarget(def({ framework: { id: 'playwright', label: 'ignored' } }));
+    expect(G.FRAMEWORKS.map((f) => f.label)).toEqual(['Playwright', 'Selenium', 'Cypress']);
+    expect(G.languagesFor('playwright').map((l) => l.id)).toEqual([
+      'typescript',
+      'javascript',
+      'python',
+      'kotlin',
+    ]);
+    expect(G.locatorExpr({ kind: 'id', value: 'a' }, 'playwright', 'kotlin')).toBe('find(a)');
+    expect(G.locatorExpr({ kind: 'id', value: 'a' }, 'playwright', 'typescript')).toBe("page.locator('#a')");
+  });
+
+  it('delegates locators, statements, scripts and page objects to the target', () => {
+    const G = freshCodegen();
+    G.registerTarget(def());
+    calls.length = 0;
+    expect(G.locatorExpr({ kind: 'id', value: 'x' }, 'acme', 'kotlin', true)).toBe('find(x)');
+    expect(G.locatorExpr(null, 'acme', 'kotlin')).toBe('');
+    expect(G.actionStatement({ action: 'click', target: { kind: 'id', value: 'x' } }, 'acme', 'kotlin')).toBe(
+      'do(click)'
+    );
+    expect(G.actionStatement({ action: 'goto', value: 'https://a.example/' }, 'acme', 'kotlin')).toBe(
+      'do(goto)'
+    );
+    expect(
+      G.actionStatement({ action: 'assert', assertType: 'toHaveURL', value: 'u' }, 'acme', 'kotlin')
+    ).toBe('do(assert)');
+    expect(G.pageObject({ className: 'Shop' }, 'acme', 'kotlin')).toBe('po(Shop, kotlin)');
+    expect(G.pageObject(undefined, 'acme', 'kotlin')).toBe('po(undefined, kotlin)');
+    expect(G.pageObjectFileName({ className: 'Shop' }, 'acme', 'kotlin')).toBe('ShopPage.kt');
+    expect(calls).toEqual([
+      ['loc', 'id', 'kotlin', true],
+      ['act', 'click', 'kotlin'],
+      ['act', 'goto', 'kotlin'],
+      ['act', 'assert', 'kotlin'],
+    ]);
+  });
+
+  it('lets a target write the core TODOs in its own comment syntax', () => {
+    const G = freshCodegen();
+    const seen = [];
+    G.registerTarget(
+      def({
+        framework: { id: 'acme' },
+        languages: [{ id: 'kotlin' }],
+        comment: (text, lang) => (seen.push([text, lang]), `/* ${text.replace(/\*\//g, '* /')} */`),
+      })
+    );
+    G.registerTarget(
+      def({
+        framework: { id: 'acme' },
+        languages: [{ id: 'cobol' }],
+        todo: (text, lang) => `*> TODO(${lang}): ${text}`,
+        comment: () => 'never used when todo() exists',
+      })
+    );
+    G.registerTarget(def({ framework: { id: 'acme' }, languages: [{ id: 'python' }] }));
+    expect(G.actionStatement({ action: 'x*/y' }, 'acme', 'kotlin')).toBe(
+      '/* TODO: unsupported step "x* /y" */'
+    );
+    expect(G.actionStatement({ action: 'click' }, 'acme', 'kotlin')).toBe(
+      '/* TODO: "click" step has no element locator */'
+    );
+    expect(seen).toEqual([
+      ['TODO: unsupported step "x*/y"', 'kotlin'],
+      ['TODO: "click" step has no element locator', 'kotlin'],
+    ]);
+    expect(G.actionStatement({ action: 'nope\nline' }, 'acme', 'cobol')).toBe(
+      '*> TODO(cobol): unsupported step "nope line"'
+    );
+    expect(G.actionStatement({ action: 'fill', target: null }, 'acme', 'cobol')).toBe(
+      '*> TODO(cobol): "fill" step has no element locator'
+    );
+    // Without either hook the TODO keeps the core's // or # form.
+    expect(G.actionStatement({ action: 'nope' }, 'acme', 'python')).toBe('# TODO: unsupported step "nope"');
+    // Built-in pairs are untouched.
+    expect(G.actionStatement({ action: 'nope' }, 'playwright', 'javascript')).toBe(
+      '// TODO: unsupported step "nope"'
+    );
+  });
+
+  it('keeps the core guards: unknown actions and missing locators are TODOs, suggestions are dropped', () => {
+    const G = freshCodegen();
+    G.registerTarget(def());
+    calls.length = 0;
+    expect(G.actionStatement({ action: 'teleport' }, 'acme', 'kotlin')).toBe(
+      '// TODO: unsupported step "teleport"'
+    );
+    expect(G.actionStatement({ action: 'fill', value: 'v' }, 'acme', 'kotlin')).toBe(
+      '// TODO: "fill" step has no element locator'
+    );
+    expect(calls).toEqual([]);
+    const steps = [
+      { action: 'click', target: { kind: 'id', value: 'a' } },
+      { action: 'assert', assertType: 'toBeVisible', target: { kind: 'id', value: 'b' }, suggested: true },
+      { action: 'click', target: { kind: 'id', value: 'c' } },
+    ];
+    expect(G.testScript(steps, 'acme', 'kotlin')).toBe('wrapped[do(click)|do(click)]');
+    expect(calls.at(-1)).toEqual(['wrap', 'kotlin', 2, undefined]);
+    expect(G.wrapScript(['a', 'b', 'c'], 'acme', 'kotlin', steps, { x: 1 })).toBe('wrapped[a|c]');
+    expect(calls.at(-1)).toEqual(['wrap', 'kotlin', 2, { x: 1 }]);
   });
 });

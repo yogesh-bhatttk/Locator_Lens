@@ -463,6 +463,75 @@ describe('pageObject: helpers per kind', () => {
 });
 
 describe('pageObject: locators reuse locatorExpr', () => {
+  // A chain inside a frame used to reach selLocator() directly, which has no chain
+  // case, so the member looked up <body> instead of the element.
+  const FRAMED_CHAIN = {
+    pageUrl: 'https://shop.example/checkout',
+    elements: [
+      {
+        name: 'Card',
+        kind: 'input',
+        target: {
+          kind: 'frame',
+          selector: '#pay',
+          index: 0,
+          child: {
+            kind: 'chain',
+            parent: { kind: 'css', value: 'form.card' },
+            child: { kind: 'id', value: 'num' },
+          },
+        },
+      },
+    ],
+  };
+
+  it('looks a frame-wrapped chain up inside the frame, parent first (Selenium)', () => {
+    const js = render(FRAMED_CHAIN, 'selenium', 'javascript');
+    expect(js).toContain(
+      "  async card() {\n    await this.driver.switchTo().defaultContent();\n    await this.driver.switchTo().frame(this.driver.findElement(By.css('#pay')));\n    return this.driver.findElement(By.css('form.card')).findElement(By.id('num'));\n  }"
+    );
+    const ts = render(FRAMED_CHAIN, 'selenium', 'typescript');
+    expect(ts).toContain(
+      "  async card(): Promise<WebElement> {\n    await this.driver.switchTo().defaultContent();\n    await this.driver.switchTo().frame(this.driver.findElement(By.css('#pay')));\n    return this.driver.findElement(By.css('form.card')).findElement(By.id('num'));\n  }"
+    );
+    const py = render(FRAMED_CHAIN, 'selenium', 'python');
+    expect(py).toContain(
+      '    @property\n    def card(self) -> WebElement:\n        self.driver.switch_to.default_content()\n        self.driver.switch_to.frame(self.driver.find_element(By.CSS_SELECTOR, "#pay"))\n        return self.driver.find_element(By.CSS_SELECTOR, "form.card").find_element(By.ID, "num")'
+    );
+    for (const code of [js, ts, py]) expect(code).not.toMatch(/body/);
+  });
+
+  it('runs the frame-wrapped chain lookup against a stand-in driver (Selenium JS)', async () => {
+    const code = render(FRAMED_CHAIN, 'selenium', 'javascript');
+    const log = [];
+    const element = (desc) => ({
+      findElement: (sel) => (log.push(`${desc}.findElement(${sel})`), element(`${desc}>${sel}`)),
+      clear: async () => log.push(`${desc}.clear()`),
+      sendKeys: async (v) => log.push(`${desc}.sendKeys(${v})`),
+    });
+    const driver = {
+      get: async () => {},
+      findElement: (sel) => (log.push(`findElement(${sel})`), element(sel)),
+      switchTo: () => ({
+        defaultContent: async () => log.push('defaultContent()'),
+        frame: async (f) => log.push(`frame(${typeof f === 'object' ? 'element' : f})`),
+      }),
+    };
+    const By = { id: (v) => `#${v}`, css: (v) => v };
+    const module = { exports: {} };
+    new Function('require', 'module', code)(() => ({ By }), module);
+    await new module.exports.CheckoutPage(driver).fillCard('4242');
+    expect(log).toEqual([
+      'defaultContent()',
+      'findElement(#pay)',
+      'frame(element)',
+      'findElement(form.card)',
+      'form.card.findElement(#num)',
+      'form.card>#num.clear()',
+      'form.card>#num.sendKeys(4242)',
+    ]);
+  });
+
   it('keeps exact, nth, chains, frames and shadow paths', () => {
     for (const [fw, lang] of COMBOS) {
       const code = render(RICH, fw, lang);

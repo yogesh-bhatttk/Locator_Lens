@@ -109,8 +109,72 @@
     { id: 'python', label: 'Python' }
   ];
 
-  // Cypress has no Python bindings.
+  // ── Pluggable targets ───────────────────────────────────────────────────────
+  // Additional frameworks/languages (Java, C#, WebdriverIO, …) live in their own files
+  // and register here, so each can be built and tested without touching this one:
+  //   LLCodegen.registerTarget({
+  //     framework: { id, label },        // new (webdriverio) or existing (playwright)
+  //     languages: [{ id, label, ext }], // e.g. { id: 'java', label: 'Java', ext: '.java' }
+  //     locatorExpr(target, lang, rel), actionStatement(step, lang),
+  //     wrapScript(stmts, lang, steps, opts), pageObject(model, lang),
+  //     todo(text, lang)?, comment(text, lang)?   // optional, see below
+  //   });
+  // The core still turns an unknown action, or a step without an element locator,
+  // into a TODO before delegating; when the target defines todo(text, lang) it
+  // renders it (text is e.g. 'unsupported step "x"'), else when it defines
+  // comment(text, lang) it renders the comment 'TODO: ' + text, else the TODO is a
+  // `// TODO: …` line (`# TODO: …` for a language id of 'python').
+  // wrapScript's opts.variables is normalised (see wrapScript); a step's test-data
+  // reference is _internals.variableRefName(step).
+  // A registered framework×language pair takes precedence for that pair only; the
+  // shared helpers it needs are on LLCodegen._internals.
+  var TARGETS = {};
+  var BUILTIN_LANGS = ['typescript', 'javascript', 'python'];
+  var BUILTIN_FWS = ['playwright', 'selenium', 'cypress'];
+
+  function targetFor(fw, lang) {
+    return Object.prototype.hasOwnProperty.call(TARGETS, fw + ':' + lang) ? TARGETS[fw + ':' + lang] : null;
+  }
+
+  // A plug-in framework asked for a language it didn't register (webdriverio +
+  // python) used to fall through to the built-in Playwright path — Playwright code
+  // labelled as the other framework. Use that framework's first registered language.
+  function pluginLang(fw, lang) {
+    if (targetFor(fw, lang) || BUILTIN_FWS.indexOf(fw) !== -1) return lang;
+    var prefix = fw + ':';
+    for (var key in TARGETS) {
+      if (Object.prototype.hasOwnProperty.call(TARGETS, key) && key.indexOf(prefix) === 0) return key.slice(prefix.length);
+    }
+    return lang;
+  }
+
+  function registerTarget(def) {
+    if (!def || !def.framework || !def.framework.id || !Array.isArray(def.languages) || !def.languages.length) {
+      throw new Error('registerTarget: framework.id and languages[] are required');
+    }
+    ['locatorExpr', 'actionStatement', 'wrapScript', 'pageObject'].forEach(function (fn) {
+      if (typeof def[fn] !== 'function') throw new Error('registerTarget: ' + fn + '() is required');
+    });
+    var fwId = def.framework.id;
+    if (!FRAMEWORKS.some(function (f) { return f.id === fwId; })) {
+      FRAMEWORKS.push({ id: fwId, label: def.framework.label || fwId });
+    }
+    def.languages.forEach(function (l) {
+      if (!LANGUAGES.some(function (x) { return x.id === l.id; })) LANGUAGES.push({ id: l.id, label: l.label || l.id });
+      if (l.ext) LANG_EXT[l.id] = l.ext;
+      TARGETS[fwId + ':' + l.id] = def;
+    });
+    return def;
+  }
+
+  // File extension per language, for page-object and test downloads.
+  var LANG_EXT = { typescript: '.ts', javascript: '.js', python: '.py' };
+
+  // Cypress has no Python bindings. Built-in frameworks pair with the built-in
+  // languages; anything else is valid only where a target registered it.
   function isValidCombo(fw, lang) {
+    if (targetFor(fw, lang)) return true;
+    if (BUILTIN_FWS.indexOf(fw) === -1 || BUILTIN_LANGS.indexOf(lang) === -1) return false;
     if (fw === 'cypress' && lang === 'python') return false;
     return true;
   }
@@ -661,7 +725,9 @@
   function frameExpr(t, fw, lang) {
     var peeled = unwrapFrames(t);
     if (!peeled.inner) return '';
-    if (fw === 'selenium') return selLocator(peeled.inner, lang);
+    // The inner target may itself be a chain (a parent/child pair inside the frame),
+    // so it goes through locatorExpr, never straight to selLocator.
+    if (fw === 'selenium') return locatorExpr(peeled.inner, fw, lang);
 
     var expr = '';
     for (var i = 0; i < peeled.frames.length; i++) {
@@ -678,6 +744,9 @@
 
   function locatorExpr(target, fw, lang, rel) {
     if (!target) return '';
+    lang = pluginLang(fw, lang);
+    var plug = targetFor(fw, lang);
+    if (plug) return plug.locatorExpr(target, lang, rel);
     if (target.kind === 'frame') return frameExpr(target, fw, lang);
     if (target.kind === 'chain') return chainExpr(target, fw, lang);
     if (fw === 'selenium') return selLocator(target, lang, rel);
@@ -718,7 +787,265 @@
   }
 
   function fillValueExpr(step, fw, lang) {
-    return step.sensitive ? secretExpr(step, fw, lang) : q(step.value, lang);
+    return step.sensitive ? secretExpr(step, fw, lang) : valueExpr(step, lang);
+  }
+
+  /** A typed or selected value: its test-data reference when it has one, else the literal. */
+  function valueExpr(step, lang) {
+    var ref = variableRefName(step);
+    return ref ? variableRef(ref, lang) : q(step.value, lang);
+  }
+
+  // ── test-data variables ─────────────────────────────────────────────────────
+  // Typed and selected values can become named test data: the script declares them
+  // once (testData / TEST_DATA) and the fill / selectOption statements reference
+  // them, so a test runs with other data by editing one block (or test-data.json).
+  //   extractVariables(steps)     → [{ name, value, kind, eventIds, indexes }]
+  //   applyVariables(steps, vars) → shallow copies; matching steps get varRef: name
+  //   testScript(steps, fw, lang, { variables: true | vars })
+  // A name is a lowerCamelCase identifier that is legal and not reserved in every
+  // language a target renders (JS/TS, Python, Java, C#). Python keys are the
+  // snake_case form of the same name (firstName → "first_name"); two names whose
+  // snake_case forms are equal are treated as the same name. Sensitive values are
+  // never test data: they stay environment variables.
+  var VAR_NAME_RE = /^[A-Za-z_][A-Za-z0-9_]*$/;
+  var VAR_NAME_MAX = 64;
+  var VAR_BASE_MAX = 40;
+  var VAR_RESERVED = (
+    // JavaScript / TypeScript (incl. strict mode, contextual and type keywords)
+    'arguments await break case catch class const continue debugger default delete do else enum eval export ' +
+    'extends false finally for function if implements import in instanceof interface let new null package ' +
+    'private protected public return static super switch this throw true try typeof undefined var void while ' +
+    'with yield abstract any as async bigint boolean constructor declare get infer is keyof module namespace ' +
+    'never number object readonly require set string symbol type unique unknown NaN Infinity ' +
+    // Object.prototype members (a key in an object literal; __proto__ would set the prototype)
+    '__proto__ prototype hasOwnProperty isPrototypeOf propertyIsEnumerable toLocaleString toString valueOf ' +
+    // Python (incl. soft keywords)
+    'False None True and assert def del elif except from global lambda nonlocal not or pass raise match _ ' +
+    // Java
+    'byte char double final float goto int long native short strictfp synchronized throws transient volatile ' +
+    'record sealed permits ' +
+    // C#
+    'base bool checked decimal delegate event explicit extern fixed foreach implicit internal lock operator ' +
+    'out override params ref sbyte sizeof stackalloc struct uint ulong unchecked unsafe ushort using virtual ' +
+    'dynamic nameof'
+  ).split(' ');
+  // Filler words dropped from a label when other words remain ("Enter your email" → email).
+  var VAR_STOP_WORDS = ['a', 'an', 'the', 'your', 'my', 'our', 'please', 'enter', 'type', 'select', 'choose', 'pick', 'here'];
+  // When the target says nothing usable (a CSS selector, a numeric placeholder).
+  var VAR_INPUT_HINTS = {
+    email: 'email', tel: 'phone', url: 'url', number: 'numberValue', search: 'searchTerm', date: 'date',
+    time: 'time', 'datetime-local': 'dateTime', month: 'month', week: 'week', color: 'color', range: 'rangeValue'
+  };
+
+  function own(obj, key) { return Object.prototype.hasOwnProperty.call(obj, key); }
+
+  function isValidVariableName(name) {
+    return typeof name === 'string' && name.length <= VAR_NAME_MAX && VAR_NAME_RE.test(name) &&
+      VAR_RESERVED.indexOf(name) === -1;
+  }
+
+  /** The Python TEST_DATA key of a name: its snake_case form. */
+  function pyVarKey(name) {
+    var words = poWords(name);
+    return words.length ? words.map(function (w) { return w.toLowerCase(); }).join('_') : String(name).toLowerCase();
+  }
+
+  /** The key a name has in the given language's declaration (Python: snake_case). */
+  function variableKey(name, lang) {
+    return lang === 'python' ? pyVarKey(name) : String(name);
+  }
+
+  /** Why a name cannot be used (null when it can); `others` are the other variables' names. */
+  function validateVariableName(name, others) {
+    if (typeof name !== 'string' || name === '') return 'Enter a name.';
+    if (name.length > VAR_NAME_MAX) return 'Use at most ' + VAR_NAME_MAX + ' characters.';
+    if (!VAR_NAME_RE.test(name)) return 'Use letters, digits and _ only, starting with a letter or _.';
+    if (VAR_RESERVED.indexOf(name) !== -1) return '"' + name + '" is a reserved word in generated code.';
+    var list = Array.isArray(others) ? others : [];
+    for (var i = 0; i < list.length; i++) {
+      if (list[i] === name) return 'Another variable is already named "' + name + '".';
+    }
+    for (var j = 0; j < list.length; j++) {
+      if (typeof list[j] === 'string' && pyVarKey(list[j]) === pyVarKey(name)) {
+        return 'Clashes with "' + list[j] + '": both are "' + pyVarKey(name) + '" in Python.';
+      }
+    }
+    return null;
+  }
+
+  /** The element a step's target finally addresses (through frames and chains). */
+  function varInnerTarget(t) {
+    var guard = 0;
+    while (t && (t.kind === 'frame' || t.kind === 'chain') && guard++ < 64) {
+      t = t.kind === 'frame' ? t.child : (t.child || t.parent);
+    }
+    return t || null;
+  }
+
+  function varWords(text) {
+    var words = poWords(text);
+    var kept = words.filter(function (w) { return VAR_STOP_WORDS.indexOf(w.toLowerCase()) === -1; });
+    if (kept.length) words = kept;
+    while (words.length && /^[0-9]/.test(words[0])) words.shift();
+    return words.slice(0, 4);
+  }
+
+  /** The base name for a step's value, from its target (label, name, placeholder, test id, …). */
+  function deriveVariableName(step) {
+    step = step || {};
+    var t = varInnerTarget(step.target);
+    var text = '';
+    if (t && t.kind === 'role') text = t.name;
+    else if (t && t.kind !== 'css') text = t.value;
+    var words = varWords(text);
+    var name;
+    if (words.length) {
+      name = words.map(function (w, i) { return i ? cap(w) : w.toLowerCase(); }).join('').slice(0, VAR_BASE_MAX);
+    } else if (own(VAR_INPUT_HINTS, String(step.inputType))) {
+      name = VAR_INPUT_HINTS[step.inputType];
+    } else {
+      name = step.action === 'selectOption' ? 'selectedOption' : 'inputValue';
+    }
+    return VAR_RESERVED.indexOf(name) === -1 ? name : name + 'Value';
+  }
+
+  /** A step whose value can be test data: a non-sensitive, accepted fill/select with a value and a locator. */
+  function varEligible(step) {
+    return !!step && typeof step === 'object' && !isSuggested(step) &&
+      (step.action === 'fill' || step.action === 'selectOption') && !step.sensitive &&
+      typeof step.value === 'string' && step.value !== '' && !!unwrapFrames(step.target).inner;
+  }
+
+  /** The variable a step's statement references, or null when it renders a literal. */
+  function variableRefName(step) {
+    if (!step || (step.action !== 'fill' && step.action !== 'selectOption') || step.sensitive) return null;
+    return isValidVariableName(step.varRef) ? step.varRef : null;
+  }
+
+  function variableRef(name, lang) {
+    return lang === 'python' ? 'TEST_DATA[' + q(pyVarKey(name), lang) + ']' : 'testData.' + name;
+  }
+
+  function hasEventId(step) { return step.eventId != null && step.eventId !== ''; }
+
+  // One variable per distinct (name, value), in order of first use. A step's own
+  // varName (set when the user renames a variable) wins over the derived name and is
+  // claimed before any derived one, so it is never pushed to a suffix by them; a
+  // name already taken by a different value gets the next free numeric suffix
+  // (email, email2, email3). `indexes` are the steps' positions in `steps`.
+  function extractVariables(steps) {
+    var list = Array.isArray(steps) ? steps : [];
+    var claims = {}; // name → the (name, value) key that owns it
+    var pyClaims = {}; // Python key → name
+    var free = function (name) { return !own(claims, name) && !own(pyClaims, pyVarKey(name)); };
+    var claim = function (name, key) { claims[name] = key; pyClaims[pyVarKey(name)] = name; };
+    var bases = list.map(function (s) {
+      if (!varEligible(s)) return null;
+      return isValidVariableName(s.varName) ? { name: s.varName, explicit: true } : { name: deriveVariableName(s) };
+    });
+    bases.forEach(function (b, i) {
+      if (b && b.explicit && free(b.name)) claim(b.name, b.name + '\u0000' + list[i].value);
+    });
+    var byKey = {};
+    var out = [];
+    bases.forEach(function (b, i) {
+      if (!b) return;
+      var s = list[i];
+      var key = b.name + '\u0000' + s.value;
+      var v = own(byKey, key) ? byKey[key] : null;
+      if (!v) {
+        var name = b.name;
+        if (claims[name] !== key) {
+          if (free(name)) {
+            claim(name, key);
+          } else {
+            var root = name.slice(0, VAR_NAME_MAX - 4);
+            var n = 2;
+            name = root + n;
+            while (!free(name)) name = root + ++n;
+            claim(name, key);
+          }
+        }
+        v = byKey[key] = { name: name, value: s.value, kind: s.action === 'fill' ? 'fill' : 'select', eventIds: [], indexes: [] };
+        out.push(v);
+      }
+      if (hasEventId(s)) v.eventIds.push(s.eventId);
+      v.indexes.push(i);
+    });
+    return out;
+  }
+
+  // A step is matched by its eventId; a step without one (an older recording) is
+  // matched by its position in `steps` against the variable's `indexes`, so the
+  // same array (or one in the same order) must be passed to both functions. A match
+  // only counts when the step's value still equals the variable's value — a step
+  // edited since extraction keeps its literal rather than referencing other data.
+  // Steps that match nothing lose any stale varRef.
+  function applyVariables(steps, vars) {
+    var byId = {};
+    var byIndex = {};
+    (Array.isArray(vars) ? vars : []).forEach(function (v) {
+      if (!v || !isValidVariableName(v.name) || typeof v.value !== 'string') return;
+      (Array.isArray(v.eventIds) ? v.eventIds : []).forEach(function (id) {
+        if (!own(byId, String(id))) byId[String(id)] = v;
+      });
+      (Array.isArray(v.indexes) ? v.indexes : []).forEach(function (i) {
+        if (!own(byIndex, String(i))) byIndex[String(i)] = v;
+      });
+    });
+    return (Array.isArray(steps) ? steps : []).map(function (s, i) {
+      if (!s || typeof s !== 'object') return s;
+      var copy = {};
+      for (var k in s) if (own(s, k)) copy[k] = s[k];
+      delete copy.varRef;
+      var key = hasEventId(s) ? String(s.eventId) : String(i);
+      var table = hasEventId(s) ? byId : byIndex;
+      var v = own(table, key) ? table[key] : null;
+      if (v && varEligible(s) && s.value === v.value) copy.varRef = v.name;
+      return copy;
+    });
+  }
+
+  /** The variables as pretty JSON: { "<name>": "<value>", … } (with a final newline). */
+  function variablesJson(vars) {
+    var list = scriptVariables(vars, null);
+    if (!list.length) return '{}\n';
+    return '{\n' + list.map(function (v) {
+      return '  ' + JSON.stringify(v.name) + ': ' + JSON.stringify(v.value);
+    }).join(',\n') + '\n}\n';
+  }
+
+  // The variables a script declares: the valid entries of `vars` (first of each
+  // name) plus any variable a step references that `vars` does not list, so a
+  // reference can never point at an undeclared name.
+  function scriptVariables(vars, steps) {
+    var out = [];
+    var seen = {};
+    var add = function (name, value) {
+      if (!isValidVariableName(name) || own(seen, name)) return;
+      seen[name] = true;
+      out.push({ name: name, value: String(value == null ? '' : value) });
+    };
+    (Array.isArray(vars) ? vars : []).forEach(function (v) { if (v) add(v.name, v.value); });
+    (Array.isArray(steps) ? steps : []).forEach(function (s) {
+      var ref = variableRefName(s);
+      if (ref) add(ref, s.value);
+    });
+    return out;
+  }
+
+  /** The one test-data declaration for the built-in languages ('' when there is none). */
+  function variablesDeclaration(vars, lang) {
+    if (!vars || !vars.length) return '';
+    if (lang === 'python') {
+      return 'TEST_DATA = {\n' + vars.map(function (v) {
+        return '    ' + q(pyVarKey(v.name), lang) + ': ' + q(v.value, lang) + ',';
+      }).join('\n') + '\n}';
+    }
+    return 'const testData = {\n' + vars.map(function (v) {
+      return '  ' + v.name + ': ' + q(v.value, lang) + ',';
+    }).join('\n') + '\n};';
   }
 
   // ── uploads (C6) ───────────────────────────────────────────────────────────
@@ -803,8 +1130,8 @@
         return uploadNote(lang) + '\n' + aw + loc + (py ? '.set_input_files(' : '.setInputFiles(') +
           listLiteral(uploadFiles(step.value), lang) + ')' + semi;
       case 'selectOption':
-        if (py) return loc + '.select_option(' + q(step.value, lang) + ')';
-        return 'await ' + loc + '.selectOption(' + q(step.value, lang) + ');';
+        if (py) return loc + '.select_option(' + valueExpr(step, lang) + ')';
+        return 'await ' + loc + '.selectOption(' + valueExpr(step, lang) + ');';
       default: return todo(lang, 'unsupported step "' + commentSafe(a) + '"');
     }
   }
@@ -884,16 +1211,16 @@
             '  ' + loc + '.clear().type(secret, { log: false, parseSpecialCharSequences: false });\n});';
         }
         if (SET_VALUE_TYPES_CYPRESS.indexOf(step.inputType) !== -1) {
-          return loc + ".invoke('val', " + q(step.value, lang) + ").trigger('input').trigger('change');";
+          return loc + ".invoke('val', " + valueExpr(step, lang) + ").trigger('input').trigger('change');";
         }
         // A literal "{" in a recorded value is text, not a cy.type() key sequence.
-        return step.value ? loc + '.clear().type(' + q(step.value, lang) + ', { parseSpecialCharSequences: false });' : loc + '.clear();';
+        return step.value ? loc + '.clear().type(' + valueExpr(step, lang) + ', { parseSpecialCharSequences: false });' : loc + '.clear();';
       case 'upload': {
         var files = uploadFiles(step.value);
         if (!files.length) return todo(lang, 'upload step with no files (Cypress cannot clear a file input)');
         return uploadNote(lang) + '\n' + loc + '.selectFile(' + listLiteral(files, lang) + ');';
       }
-      case 'selectOption': return loc + '.select(' + q(step.value, lang) + ');';
+      case 'selectOption': return loc + '.select(' + valueExpr(step, lang) + ');';
       default: return todo(lang, 'unsupported step "' + commentSafe(a) + '"');
     }
   }
@@ -1048,8 +1375,8 @@
           ".map((p) => require('path').resolve(p)).join('\\n'));";
       }
       case 'selectOption':
-        if (py) return 'Select(' + loc + ').select_by_visible_text(' + q(step.value, lang) + ')';
-        return 'await new Select(' + loc + ').selectByVisibleText(' + q(step.value, lang) + ');';
+        if (py) return 'Select(' + loc + ').select_by_visible_text(' + valueExpr(step, lang) + ')';
+        return 'await new Select(' + loc + ').selectByVisibleText(' + valueExpr(step, lang) + ');';
       default: return todo(lang, 'unsupported step "' + commentSafe(a) + '"');
     }
   }
@@ -1153,16 +1480,29 @@
     }
   }
 
+  // A TODO the core writes for a step it cannot express. A registered target that
+  // defines todo(text, lang) or comment(text, lang) writes it in its own comment
+  // syntax (and sanitising); otherwise it is a // or # line comment.
+  function targetTodo(plug, lang, text) {
+    if (plug && typeof plug.todo === 'function') return plug.todo(text, lang);
+    if (plug && typeof plug.comment === 'function') return plug.comment('TODO: ' + text, lang);
+    return todo(lang, text);
+  }
+
   function actionStatement(step, fw, lang) {
     if (!step) return '';
+    lang = pluginLang(fw, lang);
     var a = step.action;
     // A step from a newer recorder, or a corrupted one, becomes a visible TODO rather
     // than a throw or a silently different action.
-    if (KNOWN_ACTIONS.indexOf(a) === -1) return todo(lang, 'unsupported step "' + commentSafe(a) + '"');
-    if (a === 'assert' && step.assertType === 'toHaveURL') return urlAssert(step, fw, lang);
-    if (TARGETLESS_ACTIONS.indexOf(a) === -1 && !unwrapFrames(step.target).inner) {
-      return todo(lang, '"' + a + '" step has no element locator');
+    var plug = targetFor(fw, lang);
+    if (KNOWN_ACTIONS.indexOf(a) === -1) return targetTodo(plug, lang, 'unsupported step "' + commentSafe(a) + '"');
+    var urlStep = a === 'assert' && step.assertType === 'toHaveURL';
+    if (!urlStep && TARGETLESS_ACTIONS.indexOf(a) === -1 && !unwrapFrames(step.target).inner) {
+      return targetTodo(plug, lang, '"' + a + '" step has no element locator');
     }
+    if (plug) return plug.actionStatement(step, lang);
+    if (urlStep) return urlAssert(step, fw, lang);
     if (fw === 'selenium') return selStatement(step, lang);
     if (fw === 'cypress') return cyStatement(step, lang);
     return pwStatement(step, lang);
@@ -1255,8 +1595,13 @@
   // from testScript() so callers that produce statements themselves (e.g. to preserve
   // Playwright JS/TS native fidelity) still get correct imports + indentation.
   // `steps` (optional, parallel to stmts) lets Cypress place cy.origin() blocks.
-  function wrapScript(stmts, fw, lang, steps) {
+  // `opts.variables` (optional, an array from extractVariables) adds the one
+  // test-data declaration the statements' references need; any variable a step
+  // references but the list lacks is declared too. Registered targets receive opts
+  // with `variables` normalised the same way (a non-empty array, or absent).
+  function wrapScript(stmts, fw, lang, steps, opts) {
     stmts = stmts || [];
+    lang = pluginLang(fw, lang);
     // A suggested (not yet accepted) assertion is never part of the script.
     if (Array.isArray(steps) && steps.length === stmts.length && steps.some(isSuggested)) {
       var keptSteps = [];
@@ -1267,16 +1612,30 @@
       });
       steps = keptSteps;
     }
+    var vars = scriptVariables(opts && opts.variables, steps);
+    var plug = targetFor(fw, lang);
+    if (plug) {
+      if (opts == null && !vars.length) return plug.wrapScript(stmts, lang, steps, opts);
+      var plugOpts = {};
+      for (var k in opts) if (own(opts, k)) plugOpts[k] = opts[k];
+      if (vars.length) plugOpts.variables = vars;
+      else delete plugOpts.variables;
+      return plug.wrapScript(stmts, lang, steps, plugOpts);
+    }
     var joined = stmts.join('\n');
     var pyOs = lang === 'python' && /\bos\.(environ|path)\b/.test(joined) ? 'import os\n' : '';
+    // The test-data declaration, followed by the blank lines that separate it from
+    // the next top-level statement ('' when the script has no variables).
+    var decl = variablesDeclaration(vars, lang);
+    var declBlock = decl ? decl + (lang === 'python' ? '\n\n\n' : '\n\n') : '';
 
     if (fw === 'playwright') {
       if (lang === 'python') {
-        return pyOs + 'from playwright.sync_api import Page, expect\n\n\n' +
+        return pyOs + 'from playwright.sync_api import Page, expect\n\n\n' + declBlock +
           'def test_recorded(page: Page):\n' +
           pyBody(stmts, '    ');
       }
-      return "import { test, expect } from '@playwright/test';\n\n" +
+      return "import { test, expect } from '@playwright/test';\n\n" + declBlock +
         "test('recorded test', async ({ page }) => {\n" +
         indent(stmts, '  ') + '\n});\n';
     }
@@ -1287,12 +1646,14 @@
         // cy.origin() serialises its callback, so the helper must be declared inside.
         var inner = cyHelpers(g.stmts, lang).concat(g.stmts);
         if (usesRealEvents(g.stmts)) inner = [realEventsOriginRequire(lang)].concat(inner);
-        return '    cy.origin(' + q(g.origin, lang) + ', () => {\n' + indent(inner, '      ') + '\n    });';
+        // …and so must the test data, which reaches it as a serialised argument.
+        var cb = decl ? ', { args: { testData } }, ({ testData }) => {\n' : ', () => {\n';
+        return '    cy.origin(' + q(g.origin, lang) + cb + indent(inner, '      ') + '\n    });';
       }).join('\n');
       var helpers = cyHelpers(stmts, lang);
       var helper = helpers.length ? helpers.join('\n\n') + '\n\n' : '';
       var realEvents = usesRealEvents(stmts) ? realEventsHeader(lang) : '';
-      return realEvents + helper + "describe('recorded test', () => {\n" +
+      return realEvents + declBlock + helper + "describe('recorded test', () => {\n" +
         "  it('replays the recorded flow', () => {\n" +
         body + '\n  });\n});\n';
     }
@@ -1306,7 +1667,7 @@
       if (/\bWebDriverWait\(/.test(joined)) uiNames.push('WebDriverWait');
       if (uiNames.length) pyImports.push('from selenium.webdriver.support.ui import ' + uiNames.join(', '));
       if (/\bEC\./.test(joined)) pyImports.push('from selenium.webdriver.support import expected_conditions as EC');
-      return pyOs + pyImports.join('\n') + '\n\n\n' +
+      return pyOs + pyImports.join('\n') + '\n\n\n' + (decl ? decl + '\n\n' : '') +
         'driver = webdriver.Chrome()\n' +
         'driver.implicitly_wait(10)  # Selenium has no auto-wait; give elements time to appear\n' +
         'try:\n' +
@@ -1319,7 +1680,7 @@
     if (/\buntil\./.test(joined)) jsNames.push('until');
     var jsHead = 'const { ' + jsNames.join(', ') + " } = require('selenium-webdriver');\n";
     if (/\bassert\./.test(joined)) jsHead += "const assert = require('assert');\n";
-    return jsHead + '\n' +
+    return jsHead + '\n' + declBlock +
       '(async () => {\n' +
       '  const driver = await new Builder().forBrowser(\'chrome\').build();\n' +
       '  await driver.manage().setTimeouts({ implicit: 10000 }); // Selenium has no auto-wait\n' +
@@ -1333,9 +1694,25 @@
 
   function isSuggested(step) { return !!step && step.suggested === true; }
 
-  function testScript(actions, fw, lang) {
-    var steps = (actions || []).filter(function (a) { return !isSuggested(a); });
-    return wrapScript(steps.map(function (a) { return actionStatement(a, fw, lang); }), fw, lang, steps);
+  // `opts.variables`: true extracts the test data from the steps; an array (from
+  // extractVariables, possibly edited) is used as-is; absent or false keeps every
+  // value a literal. Variables are applied before suggested steps are dropped, so
+  // index-matched steps (no eventId) line up with the array they were extracted from.
+  function testScript(actions, fw, lang, opts) {
+    var all = actions || [];
+    var vars = opts && opts.variables;
+    if (vars === true) vars = extractVariables(all);
+    if (Array.isArray(vars)) {
+      all = applyVariables(all, vars);
+      var o = {};
+      for (var k in opts) if (own(opts, k)) o[k] = opts[k];
+      o.variables = vars;
+      opts = o;
+    } else if (all.some(function (a) { return !!a && a.varRef != null; })) {
+      all = applyVariables(all, []); // literals only: drop references a caller left on the steps
+    }
+    var steps = all.filter(function (a) { return !isSuggested(a); });
+    return wrapScript(steps.map(function (a) { return actionStatement(a, fw, lang); }), fw, lang, steps, opts);
   }
 
   // ════════════════════════════════════════════════════════════════════════════
@@ -1716,6 +2093,9 @@
 
   function pageObject(model, fw, lang) {
     model = model || {};
+    lang = pluginLang(fw, lang);
+    var plug = targetFor(fw, lang);
+    if (plug) return plug.pageObject(model, lang);
     if (!isValidCombo(fw, lang)) lang = 'typescript';
     var cls = poClassName(model);
     var info = poMembers(model, fw, lang);
@@ -1726,8 +2106,9 @@
 
   /** The file name a page object downloads as: <ClassName>.ts|.js|.py */
   function pageObjectFileName(model, fw, lang) {
+    lang = pluginLang(fw, lang);
     if (!isValidCombo(fw, lang)) lang = 'typescript';
-    var ext = { typescript: '.ts', javascript: '.js', python: '.py' }[lang] || '.ts';
+    var ext = LANG_EXT[lang] || '.ts';
     return poClassName(model || {}) + ext;
   }
 
@@ -1743,7 +2124,39 @@
     pageObject: pageObject,
     pageObjectClassName: function (model) { return poClassName(model || {}); },
     pageObjectFileName: pageObjectFileName,
-    q: q
+    q: q,
+    extractVariables: extractVariables,
+    applyVariables: applyVariables,
+    variablesJson: variablesJson,
+    isValidVariableName: isValidVariableName,
+    validateVariableName: validateVariableName,
+    variableKey: variableKey,
+    registerTarget: registerTarget,
+    fileExtension: function (lang) { return LANG_EXT[lang] || '.ts'; },
+    // Shared building blocks for registered targets (codegen-*.js). Not a stable
+    // public API: only the target modules in this repository use it.
+    _internals: {
+      escapeControls: escapeControls, attrSel: attrSel, normWs: normWs, cssIdent: cssIdent,
+      xpathLiteral: xpathLiteral, roleCss: roleCss, roleNodeXpath: roleNodeXpath, nameXpath: nameXpath,
+      labelXpath: labelXpath, textXpath: textXpath, xpMatch: xpMatch, attrMatchSel: attrMatchSel,
+      explicitRole: explicitRole, roleNatives: roleNatives, LABELLED_ROLES: LABELLED_ROLES,
+      PLACEHOLDER_ROLES: PLACEHOLDER_ROLES, ALT_ROLES: ALT_ROLES, LABELABLE_XPATH: LABELABLE_XPATH,
+      LABELABLE_CSS: LABELABLE_CSS, unwrapFrames: unwrapFrames, validShadowPath: validShadowPath,
+      hasNth: hasNth, isAmbiguousRole: isAmbiguousRole, hasAmbiguousRole: hasAmbiguousRole,
+      hasPositionalFrame: hasPositionalFrame, parseKeyCombo: parseKeyCombo, KEY_SELENIUM: KEY_SELENIUM,
+      MOD_SELENIUM: MOD_SELENIUM, REAL_PRESS_MODS: REAL_PRESS_MODS, secretName: secretName,
+      uploadFiles: uploadFiles, parseViewport: parseViewport, vpW: vpW, vpH: vpH,
+      isSuggested: isSuggested, commentSafe: commentSafe, indent: indent,
+      SET_VALUE_TYPES_SELENIUM: SET_VALUE_TYPES_SELENIUM, SET_VALUE_JS: SET_VALUE_JS,
+      KNOWN_ACTIONS: KNOWN_ACTIONS, TARGETLESS_ACTIONS: TARGETLESS_ACTIONS, urlOrigin: urlOrigin,
+      poClassName: poClassName, poWords: poWords, poIdent: poIdent, poClaim: poClaim,
+      PO_RESERVED: PO_RESERVED, cap: cap,
+      // test-data variables: the name rules, and what a step / script references
+      VAR_RESERVED: VAR_RESERVED, VAR_NAME_RE: VAR_NAME_RE, isValidVariableName: isValidVariableName,
+      deriveVariableName: deriveVariableName, variableKey: variableKey, pyVarKey: pyVarKey,
+      variableRefName: variableRefName, variableRef: variableRef, scriptVariables: scriptVariables,
+      variablesDeclaration: variablesDeclaration, varEligible: varEligible
+    }
   };
 
   global.LLCodegen = LLCodegen;
