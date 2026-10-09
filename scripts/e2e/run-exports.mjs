@@ -300,6 +300,20 @@ async function playwrightPython({ dir, script, env }) {
   return { result: await run(python(), args, { cwd: dir, env: { ...env, PYTHONPATH: pythonPath() } }) };
 }
 
+// GitHub's Ubuntu runners ship their own ChromeDriver on PATH (CHROMEWEBDRIVER), and
+// Selenium uses a driver found on PATH even when its version doesn't match the browser
+// — so every Selenium run died with "This version of ChromeDriver only supports Chrome
+// version 154" against Playwright's Chromium 147. Hiding stray drivers lets Selenium
+// Manager fetch the one that matches. An explicit LOCATRA_CHROMEDRIVER still wins.
+function withoutStrayChromedriver(env) {
+  const exe = process.platform === 'win32' ? 'chromedriver.exe' : 'chromedriver';
+  const path = (env.PATH ?? process.env.PATH ?? '')
+    .split(delimiter)
+    .filter((dir) => dir && !existsSync(join(dir, exe)))
+    .join(delimiter);
+  return { ...env, PATH: path };
+}
+
 function seleniumNode(lang) {
   return async ({ dir, script, env }) => {
     const file = `recorded.${EXT[lang]}`;
@@ -309,7 +323,11 @@ function seleniumNode(lang) {
     const preload = join(E2E, 'support/selenium-preload.cjs');
     const args = ['--require', preload, file];
     return {
-      result: await run(process.execPath, args, { cwd: dir, env: { ...env, NODE_NO_WARNINGS: '1' } }),
+      result: await run(process.execPath, args, {
+        cwd: dir,
+        env: withoutStrayChromedriver({ ...env, NODE_NO_WARNINGS: '1' }),
+        unset: ['CHROMEWEBDRIVER'],
+      }),
     };
   };
 }
@@ -322,7 +340,13 @@ async function seleniumPython({ dir, script, env }) {
   }
   writeFileSync(join(dir, 'recorded.py'), script);
   const pp = pythonPath([join(E2E, 'support/selenium-python')]);
-  return { result: await run(python(), ['recorded.py'], { cwd: dir, env: { ...env, PYTHONPATH: pp } }) };
+  return {
+    result: await run(python(), ['recorded.py'], {
+      cwd: dir,
+      env: withoutStrayChromedriver({ ...env, PYTHONPATH: pp }),
+      unset: ['CHROMEWEBDRIVER'],
+    }),
+  };
 }
 
 function cypress(lang) {
