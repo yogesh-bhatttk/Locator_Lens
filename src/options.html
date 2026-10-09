@@ -1,0 +1,519 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Locatra – Settings</title>
+  <style>
+    /* Locatra — design tokens (the side panel's: warm cream paper + deep teal brand,
+       with the matching dark theme). */
+    :root,
+    [data-theme="light"] {
+      --bg:#F7F5EE;--canvas:#FAF9F5;--surface:#FFFFFF;--surface-2:#F2EFE6;--surface-3:#ECE8DC;--hover:#F0ECDF;--border:#E3DECF;--border-strong:#D2CCBA;
+      --text:#1A1915;--text-strong:#100F0C;--text-muted:#6B665B;--text-faint:#948E80;
+      --brand:#1F6A6F;--brand-strong:#155257;--brand-soft:#E3EEEE;--brand-soft-2:#CFE2E3;--on-brand:#FFFFFF;
+      --success:#2F7A4E;--success-soft:#E0EFE5;--warn:#A66316;--warn-soft:#F7E9D4;--danger:#B83A2E;--danger-soft:#F7E1DD;--info:#2F5DA6;--info-soft:#E0E8F4;
+      --code-bg:#F4F1E8;--code-text:#1A1915;
+      --shadow-sm:0 1px 2px rgba(40,33,20,0.04);--shadow:0 1px 3px rgba(40,33,20,0.06),0 2px 8px rgba(40,33,20,0.04);
+      --focus-ring:#155257;
+      --r-sm:6px;--r-md:8px;--r-lg:12px;--r-pill:999px;
+    }
+    [data-theme="dark"] {
+      --bg:#1B1A17;--canvas:#201F1B;--surface:#26241F;--surface-2:#2E2C26;--surface-3:#36332C;--hover:#312E27;--border:#383530;--border-strong:#4A463E;
+      --text:#ECE7DA;--text-strong:#FAF6EA;--text-muted:#9C968A;--text-faint:#6E695F;
+      --brand:#6FB9BE;--brand-strong:#95D2D6;--brand-soft:#1F3536;--brand-soft-2:#28494B;--on-brand:#0F2425;
+      --success:#7FBE9C;--success-soft:#1F3327;--warn:#D9A35F;--warn-soft:#38291A;--danger:#E08A7E;--danger-soft:#3A2320;--info:#8AA8D4;--info-soft:#1F2A3A;
+      --code-bg:#1A1916;--code-text:#E3DECF;
+      --shadow-sm:0 1px 2px rgba(0,0,0,0.3);--shadow:0 1px 3px rgba(0,0,0,0.4),0 2px 8px rgba(0,0,0,0.25);
+      --focus-ring:#95D2D6;
+    }
+    @media (prefers-color-scheme: dark) {
+      :root:not([data-theme]) {
+        --bg:#1B1A17;--canvas:#201F1B;--surface:#26241F;--surface-2:#2E2C26;--surface-3:#36332C;--hover:#312E27;--border:#383530;--border-strong:#4A463E;
+        --text:#ECE7DA;--text-strong:#FAF6EA;--text-muted:#9C968A;--text-faint:#6E695F;
+        --brand:#6FB9BE;--brand-strong:#95D2D6;--brand-soft:#1F3536;--brand-soft-2:#28494B;--on-brand:#0F2425;
+        --success:#7FBE9C;--success-soft:#1F3327;--warn:#D9A35F;--warn-soft:#38291A;--danger:#E08A7E;--danger-soft:#3A2320;--info:#8AA8D4;--info-soft:#1F2A3A;
+        --code-bg:#1A1916;--code-text:#E3DECF;
+        --shadow-sm:0 1px 2px rgba(0,0,0,0.3);--shadow:0 1px 3px rgba(0,0,0,0.4),0 2px 8px rgba(0,0,0,0.25);
+        --focus-ring:#95D2D6;
+      }
+    }
+    :root { color-scheme: light dark; }
+    [data-theme="light"] { color-scheme: light; }
+    [data-theme="dark"] { color-scheme: dark; }
+
+    *, *::before, *::after { box-sizing: border-box; }
+    * { margin: 0; padding: 0; }
+    html { scroll-behavior: smooth; scroll-padding-top: 76px; }
+    @media (prefers-reduced-motion: reduce) { html { scroll-behavior: auto; } * { transition: none !important; } }
+    body {
+      min-height: 100vh;
+      background: var(--bg);
+      color: var(--text);
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', system-ui, sans-serif;
+      font-size: 14px;
+      line-height: 1.55;
+      -webkit-font-smoothing: antialiased;
+    }
+    button, input, select { font: inherit; color: inherit; }
+    code, kbd, .mono { font-family: 'Cascadia Code', 'Fira Code', ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
+    a { color: var(--brand); text-underline-offset: 2px; }
+    a:hover { color: var(--brand-strong); }
+    :focus-visible { outline: 2px solid var(--focus-ring); outline-offset: 2px; }
+    [hidden] { display: none !important; }
+    .visually-hidden {
+      position: absolute !important; width: 1px; height: 1px; padding: 0; margin: -1px;
+      overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; border: 0;
+    }
+    .skip-link { position: absolute; left: 12px; top: -48px; z-index: 20; padding: 8px 12px; border-radius: var(--r-md); background: var(--brand); color: var(--on-brand); font-weight: 700; }
+    .skip-link:focus { top: 12px; }
+
+    /* ---------- header ---------- */
+    .header {
+      position: sticky; top: 0; z-index: 10;
+      display: flex; align-items: center; gap: 12px;
+      padding: 12px 24px;
+      background: var(--surface);
+      border-bottom: 1px solid var(--border);
+      box-shadow: var(--shadow-sm);
+    }
+    .brand-mark {
+      width: 36px; height: 36px; flex-shrink: 0;
+      display: inline-flex; align-items: center; justify-content: center;
+      border-radius: var(--r-md);
+      background: var(--brand-soft); color: var(--brand);
+    }
+    .brand-mark svg { width: 20px; height: 20px; }
+    .brand { flex: 1; min-width: 0; }
+    .brand h1 { font-size: 16px; font-weight: 700; letter-spacing: -0.01em; color: var(--text-strong); }
+    .brand-sub { font-size: 12px; color: var(--text-muted); }
+    .save-status {
+      flex-shrink: 0;
+      display: inline-flex; align-items: center; gap: 6px;
+      padding: 4px 11px;
+      border-radius: var(--r-pill);
+      font-size: 12px; font-weight: 700;
+      background: var(--success-soft); color: var(--success);
+      border: 1px solid transparent;
+    }
+    .save-status:empty { visibility: hidden; }
+    .save-status[data-tone="error"] { background: var(--danger-soft); color: var(--danger); border-color: var(--danger); }
+    .save-status[data-tone="info"] { background: var(--info-soft); color: var(--info); }
+
+    /* ---------- layout ---------- */
+    .layout { display: grid; grid-template-columns: 200px minmax(0, 1fr); gap: 28px; max-width: 1040px; margin: 0 auto; padding: 24px; }
+    .toc { position: sticky; top: 84px; align-self: start; }
+    .toc ul { list-style: none; display: flex; flex-direction: column; gap: 2px; }
+    .toc a {
+      display: block; padding: 7px 10px; border-radius: var(--r-md);
+      color: var(--text-muted); font-size: 13px; font-weight: 600; text-decoration: none;
+    }
+    .toc a:hover { background: var(--hover); color: var(--text-strong); }
+    main { display: flex; flex-direction: column; gap: 20px; min-width: 0; }
+    @media (max-width: 760px) {
+      .layout { grid-template-columns: minmax(0, 1fr); padding: 16px; gap: 16px; }
+      .toc { position: static; }
+      .toc ul { flex-direction: row; flex-wrap: wrap; }
+      .header { padding: 10px 16px; }
+    }
+
+    /* ---------- cards ---------- */
+    .card {
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: var(--r-lg);
+      box-shadow: var(--shadow-sm);
+      padding: 20px 22px;
+    }
+    .card > h2 { font-size: 15px; font-weight: 700; color: var(--text-strong); display: flex; align-items: center; gap: 8px; }
+    .card > h2 .icon { width: 18px; height: 18px; color: var(--brand); }
+    .card-intro { color: var(--text-muted); font-size: 13px; margin-top: 4px; }
+    .group { margin-top: 18px; padding-top: 16px; border-top: 1px solid var(--border); }
+    .group:first-of-type { border-top: none; padding-top: 0; }
+    .group h3 { font-size: 11px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.07em; color: var(--text-muted); margin-bottom: 10px; }
+    .hint { color: var(--text-muted); font-size: 12px; }
+
+    /* ---------- toggles (native checkboxes, drawn as switches) ---------- */
+    .toggle { display: flex; align-items: flex-start; gap: 12px; padding: 10px 0; cursor: pointer; }
+    .toggle + .toggle { border-top: 1px dashed var(--border); }
+    .toggle input[type="checkbox"] {
+      -webkit-appearance: none; appearance: none;
+      position: relative; flex-shrink: 0;
+      width: 36px; height: 20px; margin-top: 2px;
+      border-radius: var(--r-pill);
+      background: var(--surface-3);
+      border: 1px solid var(--border-strong);
+      cursor: pointer;
+      transition: background .16s ease, border-color .16s ease;
+    }
+    .toggle input[type="checkbox"]::after {
+      content: ''; position: absolute; top: 2px; left: 2px;
+      width: 14px; height: 14px; border-radius: 50%;
+      background: var(--surface); box-shadow: 0 1px 2px rgba(0,0,0,.25);
+      transition: transform .16s ease;
+    }
+    .toggle input[type="checkbox"]:checked { background: var(--brand); border-color: var(--brand); }
+    .toggle input[type="checkbox"]:checked::after { transform: translateX(16px); background: var(--on-brand); }
+    .toggle-text { display: flex; flex-direction: column; min-width: 0; }
+    .toggle-title { font-weight: 600; color: var(--text-strong); }
+    .toggle-desc { font-size: 12px; color: var(--text-muted); }
+
+    /* ---------- form fields ---------- */
+    .field { display: flex; flex-direction: column; gap: 4px; }
+    .field label, .field-label { font-size: 12px; font-weight: 700; color: var(--text-strong); }
+    .fields-row { display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 14px; }
+    .input, .select {
+      height: 36px; width: 100%;
+      padding: 0 10px;
+      border: 1px solid var(--border-strong);
+      border-radius: var(--r-md);
+      background: var(--canvas);
+      color: var(--text);
+    }
+    .input.mono { font-size: 13px; }
+    .input:hover, .select:hover { border-color: var(--text-faint); }
+    .input[aria-invalid="true"] { border-color: var(--danger); background: var(--danger-soft); }
+    .field-error { color: var(--danger); font-size: 12px; font-weight: 600; }
+    .field-error:empty { display: none; }
+
+    /* ---------- buttons ---------- */
+    .btn {
+      display: inline-flex; align-items: center; justify-content: center; gap: 6px;
+      min-height: 34px; padding: 6px 14px;
+      border: 1px solid var(--border-strong);
+      border-radius: var(--r-md);
+      background: var(--surface);
+      color: var(--text-strong);
+      font-size: 13px; font-weight: 600;
+      cursor: pointer;
+      transition: background .16s ease, border-color .16s ease;
+    }
+    .btn:hover { background: var(--hover); }
+    .btn:disabled { opacity: .5; cursor: not-allowed; }
+    .btn-primary { background: var(--brand); border-color: var(--brand); color: var(--on-brand); }
+    .btn-primary:hover { background: var(--brand-strong); border-color: var(--brand-strong); }
+    .btn-danger { color: var(--danger); border-color: var(--danger); }
+    .btn-danger:hover { background: var(--danger-soft); }
+    .btn-icon { min-height: 30px; width: 30px; padding: 0; font-size: 14px; }
+    .btn-row { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
+
+    /* ---------- attribute editor ---------- */
+    .chips { list-style: none; display: flex; flex-wrap: wrap; gap: 6px; }
+    .chip {
+      display: inline-flex; align-items: center; gap: 6px;
+      padding: 3px 10px;
+      border-radius: var(--r-pill);
+      background: var(--surface-2); border: 1px solid var(--border);
+      font-size: 12px; color: var(--text-muted);
+    }
+    .attr-list { list-style: none; display: flex; flex-direction: column; gap: 6px; margin-bottom: 10px; counter-reset: attr; }
+    .attr-row {
+      display: flex; align-items: center; gap: 8px;
+      padding: 6px 8px 6px 12px;
+      border: 1px solid var(--border);
+      border-radius: var(--r-md);
+      background: var(--canvas);
+    }
+    .attr-row::before { counter-increment: attr; content: counter(attr); min-width: 18px; color: var(--text-faint); font-size: 12px; font-weight: 700; }
+    .attr-name { flex: 1; min-width: 0; overflow-wrap: anywhere; font-size: 13px; color: var(--text-strong); }
+    .attr-empty { padding: 10px 12px; border: 1px dashed var(--border-strong); border-radius: var(--r-md); color: var(--text-muted); font-size: 13px; margin-bottom: 10px; }
+    .attr-add { display: flex; gap: 8px; align-items: flex-start; }
+    .attr-add .field { flex: 1; }
+    .attr-add .btn { margin-top: 22px; }
+    .priority { list-style: none; display: flex; flex-wrap: wrap; align-items: center; gap: 4px; font-size: 12px; }
+    .priority li { display: inline-flex; align-items: center; gap: 4px; }
+    .priority li + li::before { content: '›'; color: var(--text-faint); margin-right: 2px; }
+    .priority code { padding: 2px 7px; border-radius: var(--r-sm); background: var(--code-bg); color: var(--code-text); border: 1px solid var(--border); }
+    .priority .custom code { background: var(--brand-soft); border-color: var(--brand-soft-2); color: var(--brand-strong); }
+
+    /* ---------- notices ---------- */
+    .notice {
+      display: flex; flex-direction: column; align-items: flex-start; gap: 8px;
+      margin-top: 8px; padding: 10px 12px;
+      border: 1px solid var(--warn); border-radius: var(--r-md);
+      background: var(--warn-soft); color: var(--warn); font-size: 13px;
+    }
+    .notice-info { border-color: var(--info); background: var(--info-soft); color: var(--info); }
+    .code-sample {
+      display: block; margin-top: 6px; padding: 10px 12px;
+      border-radius: var(--r-md); border: 1px solid var(--border);
+      background: var(--code-bg); color: var(--code-text);
+      font-size: 12px; overflow-x: auto; white-space: pre;
+    }
+
+    /* ---------- shortcuts ---------- */
+    .shortcut-list { list-style: none; display: flex; flex-direction: column; }
+    .shortcut-row { display: flex; flex-wrap: wrap; align-items: center; gap: 10px; padding: 10px 0; }
+    .shortcut-row + .shortcut-row { border-top: 1px dashed var(--border); }
+    .shortcut-desc { flex: 1 1 220px; min-width: 0; }
+    .shortcut-desc strong { display: block; color: var(--text-strong); font-weight: 600; }
+    .shortcut-desc small { color: var(--text-faint); font-size: 11px; }
+    kbd {
+      display: inline-block; padding: 2px 8px;
+      border: 1px solid var(--border-strong); border-bottom-width: 2px;
+      border-radius: var(--r-sm);
+      background: var(--surface-2); color: var(--text-strong);
+      font-size: 12px; font-weight: 600;
+    }
+    .not-set { color: var(--text-faint); font-style: italic; font-size: 12px; }
+    .shortcut-edit { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; }
+    .shortcut-edit .input { width: 170px; }
+    .shortcut-row .field-error { flex-basis: 100%; }
+
+    /* ---------- data ---------- */
+    .data-row { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 10px; padding: 10px 0; }
+    .data-row + .data-row { border-top: 1px dashed var(--border); }
+    .data-row .data-text { flex: 1 1 260px; min-width: 0; }
+    .data-row .data-text strong { display: block; color: var(--text-strong); font-weight: 600; }
+    .import-errors { margin: 6px 0 0 18px; color: var(--danger); font-size: 12px; }
+
+    .about-grid { display: grid; grid-template-columns: max-content 1fr; gap: 6px 16px; font-size: 13px; }
+    .about-grid dt { color: var(--text-muted); }
+    .about-grid dd { color: var(--text-strong); overflow-wrap: anywhere; }
+  </style>
+</head>
+
+<body>
+  <a class="skip-link" href="#main">Skip to settings</a>
+
+  <header class="header">
+    <div class="brand-mark" aria-hidden="true">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="7"/><path d="m21 21-4.3-4.3"/></svg>
+    </div>
+    <div class="brand">
+      <h1>Locatra settings</h1>
+      <div class="brand-sub">Changes save automatically and apply to every open tab and panel.</div>
+    </div>
+    <div id="saveStatus" class="save-status" role="status" aria-live="polite" aria-atomic="true"></div>
+  </header>
+
+  <div class="layout">
+    <nav class="toc" aria-label="Settings sections">
+      <ul>
+        <li><a href="#locators">Locators</a></li>
+        <li><a href="#output">Output</a></li>
+        <li><a href="#recorder">Recorder</a></li>
+        <li><a href="#health">Locator health</a></li>
+        <li><a href="#shortcuts">Keyboard shortcuts</a></li>
+        <li><a href="#data">Data</a></li>
+        <li><a href="#about">About</a></li>
+      </ul>
+    </nav>
+
+    <main id="main" tabindex="-1">
+      <!-- Locators -->
+      <section class="card" id="locators" aria-labelledby="locatorsTitle">
+        <h2 id="locatorsTitle">
+          <svg class="icon" aria-hidden="true" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="8"/><path d="M12 2v3M12 19v3M2 12h3M19 12h3"/><circle cx="12" cy="12" r="2" fill="currentColor"/></svg>
+          Locators
+        </h2>
+        <p class="card-intro">Test-id attributes are the most stable locators. Locatra tries yours first, in this order, then the built-in ones.</p>
+
+        <div class="group">
+          <h3 id="customAttrsTitle">Your test-id attributes</h3>
+          <div id="migrationNotice" class="notice notice-info" role="status" hidden></div>
+          <ol id="testAttrList" class="attr-list" aria-labelledby="customAttrsTitle"></ol>
+          <p id="testAttrEmpty" class="attr-empty">No custom attributes yet — the built-in ones below are used.</p>
+          <div class="attr-add">
+            <div class="field">
+              <label for="testAttrInput">Add an attribute</label>
+              <input id="testAttrInput" class="input mono" type="text" autocomplete="off" spellcheck="false"
+                placeholder="data-qa-id" maxlength="100" aria-describedby="testAttrHelp testAttrError">
+              <span id="testAttrHelp" class="hint">An HTML attribute name, e.g. <code>data-qa-id</code>. Up to 20.</span>
+              <span id="testAttrError" class="field-error" role="alert"></span>
+            </div>
+            <button type="button" id="testAttrAddBtn" class="btn btn-primary">Add</button>
+          </div>
+        </div>
+
+        <div class="group">
+          <h3 id="builtinAttrsTitle">Built in</h3>
+          <ul id="builtinAttrList" class="chips" aria-labelledby="builtinAttrsTitle"></ul>
+        </div>
+
+        <div class="group">
+          <h3 id="priorityTitle">Resulting priority</h3>
+          <ol id="attrPriority" class="priority" aria-labelledby="priorityTitle"></ol>
+        </div>
+      </section>
+
+      <!-- Output -->
+      <section class="card" id="output" aria-labelledby="outputTitle">
+        <h2 id="outputTitle">
+          <svg class="icon" aria-hidden="true" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><path d="m8 7-5 5 5 5M16 7l5 5-5 5"/></svg>
+          Output
+        </h2>
+        <p class="card-intro">The framework and language for copied locators and generated tests. The side panel's selector uses the same setting.</p>
+        <div class="group">
+          <div class="fields-row">
+            <div class="field">
+              <label for="outFramework">Framework</label>
+              <select id="outFramework" class="select"></select>
+            </div>
+            <div class="field">
+              <label for="outLanguage">Language</label>
+              <select id="outLanguage" class="select"></select>
+            </div>
+          </div>
+          <p class="hint" style="margin-top: 10px;">Example locator (<span id="outExt"></span>):</p>
+          <code id="outPreview" class="code-sample" aria-label="Example locator in the selected framework and language"></code>
+        </div>
+      </section>
+
+      <!-- Recorder -->
+      <section class="card" id="recorder" aria-labelledby="recorderTitle">
+        <h2 id="recorderTitle">
+          <svg class="icon" aria-hidden="true" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="8"/><circle cx="12" cy="12" r="3" fill="currentColor"/></svg>
+          Recorder
+        </h2>
+        <div class="group">
+          <label class="toggle">
+            <input type="checkbox" id="setAutoAssertions" aria-describedby="setAutoAssertionsDesc">
+            <span class="toggle-text"><span class="toggle-title">Suggest assertions</span>
+              <span class="toggle-desc" id="setAutoAssertionsDesc">Propose URL and feedback-message checks while recording. They wait for your review.</span></span>
+          </label>
+          <label class="toggle">
+            <input type="checkbox" id="setStepScreenshots" aria-describedby="setStepScreenshotsDesc">
+            <span class="toggle-text"><span class="toggle-title">Step screenshots</span>
+              <span class="toggle-desc" id="setStepScreenshotsDesc">Keep a small screenshot of each step. Stored only in this browser.</span></span>
+          </label>
+          <div id="shotPermNotice" class="notice" role="status" hidden>
+            <span>Step screenshots need permission to capture pages.</span>
+            <span id="shotPermDeclined" class="hint" hidden>Without it, thumbnails appear only on pages where Locatra was opened from the toolbar.</span>
+            <button type="button" id="shotPermGrantBtn" class="btn">Grant access</button>
+          </div>
+          <label class="toggle">
+            <input type="checkbox" id="setVariables" aria-describedby="setVariablesDesc">
+            <span class="toggle-text"><span class="toggle-title">Test-data variables</span>
+              <span class="toggle-desc" id="setVariablesDesc">Generated tests keep typed values in one <code>testData</code> object instead of repeating literals.</span></span>
+          </label>
+        </div>
+        <div class="group">
+          <h3>Secret variable names</h3>
+          <p class="hint" style="margin-bottom: 10px;">Passwords and other sensitive fields are never recorded. Generated tests read them from these environment variables.</p>
+          <div class="fields-row">
+            <div class="field">
+              <label for="secretPassword">Password fields</label>
+              <input id="secretPassword" class="input mono" type="text" autocomplete="off" spellcheck="false" maxlength="64"
+                aria-describedby="secretPasswordHelp secretPasswordError">
+              <span id="secretPasswordHelp" class="hint">Default <code>LOCATRA_PASSWORD</code></span>
+              <span id="secretPasswordError" class="field-error" role="alert"></span>
+            </div>
+            <div class="field">
+              <label for="secretSecret">Other sensitive fields</label>
+              <input id="secretSecret" class="input mono" type="text" autocomplete="off" spellcheck="false" maxlength="64"
+                aria-describedby="secretSecretHelp secretSecretError">
+              <span id="secretSecretHelp" class="hint">One-time codes, card numbers. Default <code>LOCATRA_SECRET</code></span>
+              <span id="secretSecretError" class="field-error" role="alert"></span>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <!-- Locator health -->
+      <section class="card" id="health" aria-labelledby="healthTitle">
+        <h2 id="healthTitle">
+          <svg class="icon" aria-hidden="true" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><path d="M3 12h4l3-8 4 16 3-8h4"/></svg>
+          Locator health
+        </h2>
+        <p class="card-intro">Watch locators from the side panel and Locatra tells you when they stop matching.</p>
+        <div class="group">
+          <label class="toggle">
+            <input type="checkbox" id="setHealthAutoCheck" aria-describedby="setHealthAutoCheckDesc">
+            <span class="toggle-text"><span class="toggle-title">Check watched locators automatically</span>
+              <span class="toggle-desc" id="setHealthAutoCheckDesc">Re-check once when the side panel opens on a page with watched locators, or when you move to one.</span></span>
+          </label>
+        </div>
+      </section>
+
+      <!-- Keyboard shortcuts -->
+      <section class="card" id="shortcuts" aria-labelledby="shortcutsTitle">
+        <h2 id="shortcutsTitle">
+          <svg class="icon" aria-hidden="true" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="6" width="20" height="12" rx="2"/><path d="M6 10h.01M10 10h.01M14 10h.01M18 10h.01M7 14h10"/></svg>
+          Keyboard shortcuts
+        </h2>
+        <p id="shortcutsHint" class="card-intro"></p>
+        <div class="group">
+          <ul id="shortcutList" class="shortcut-list" aria-labelledby="shortcutsTitle"></ul>
+          <p id="shortcutsEmpty" class="hint" hidden>Shortcuts are not available in this browser.</p>
+          <div class="btn-row" style="margin-top: 10px;">
+            <button type="button" id="shortcutsManageBtn" class="btn" hidden>Change shortcuts…</button>
+          </div>
+          <p id="shortcutsManageError" class="field-error" role="alert"></p>
+        </div>
+      </section>
+
+      <!-- Data -->
+      <section class="card" id="data" aria-labelledby="dataTitle">
+        <h2 id="dataTitle">
+          <svg class="icon" aria-hidden="true" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><ellipse cx="12" cy="5" rx="8" ry="3"/><path d="M4 5v14c0 1.7 3.6 3 8 3s8-1.3 8-3V5M4 12c0 1.7 3.6 3 8 3s8-1.3 8-3"/></svg>
+          Data
+        </h2>
+        <p class="card-intro">Everything Locatra keeps lives in this browser's extension storage.</p>
+        <div class="group">
+          <h3>Settings</h3>
+          <div class="data-row">
+            <div class="data-text"><strong>Export or import settings</strong>
+              <span class="hint">A JSON file with everything on this page. Importing replaces the current settings.</span></div>
+            <div class="btn-row">
+              <button type="button" id="exportBtn" class="btn">⬇ Export</button>
+              <button type="button" id="importBtn" class="btn">⬆ Import…</button>
+              <input type="file" id="importInput" class="visually-hidden" accept=".json,application/json" tabindex="-1" aria-hidden="true">
+            </div>
+          </div>
+          <div id="importErrorBox" class="notice" role="alert" hidden>
+            <span id="importErrorTitle"></span>
+            <ul id="importErrors" class="import-errors"></ul>
+          </div>
+          <div class="data-row">
+            <div class="data-text"><strong>Reset to defaults</strong>
+              <span class="hint">Every setting on this page goes back to how Locatra ships.</span></div>
+            <button type="button" id="resetBtn" class="btn btn-danger">Reset settings</button>
+          </div>
+        </div>
+        <div class="group">
+          <h3>Stored data</h3>
+          <div class="data-row">
+            <div class="data-text"><strong>Recorder timelines</strong>
+              <span class="hint" id="timelineCount">Saved recordings, one per browser window.</span></div>
+            <button type="button" id="clearTimelinesBtn" class="btn btn-danger">Clear timelines</button>
+          </div>
+          <div class="data-row">
+            <div class="data-text"><strong>Step screenshots</strong>
+              <span class="hint">Thumbnails kept for recorded steps.</span></div>
+            <button type="button" id="clearShotsBtn" class="btn btn-danger">Clear screenshots</button>
+          </div>
+          <div class="data-row">
+            <div class="data-text"><strong>Watched locators</strong>
+              <span class="hint" id="watchedCount">Locators the health check watches.</span></div>
+            <button type="button" id="clearWatchedBtn" class="btn btn-danger">Clear watched locators</button>
+          </div>
+        </div>
+      </section>
+
+      <!-- About -->
+      <section class="card" id="about" aria-labelledby="aboutTitle">
+        <h2 id="aboutTitle">
+          <svg class="icon" aria-hidden="true" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"/><path d="M12 11v6M12 7.5h.01"/></svg>
+          About
+        </h2>
+        <div class="group">
+          <dl class="about-grid">
+            <dt>Extension</dt><dd id="aboutName">Locatra</dd>
+            <dt>Version</dt><dd id="aboutVersion">–</dd>
+            <dt>Privacy</dt><dd><a id="privacyLink" href="https://github.com/yogesh-bhatttk/Locator_Lens/blob/master/PRIVACY_POLICY.md" target="_blank" rel="noopener noreferrer">Privacy policy</a> — Locatra runs locally in your browser.</dd>
+          </dl>
+        </div>
+      </section>
+    </main>
+  </div>
+
+  <script src="codegen.js"></script>
+  <script src="codegen-java.js"></script>
+  <script src="codegen-csharp.js"></script>
+  <script src="codegen-wdio.js"></script>
+  <script src="options.js"></script>
+</body>
+
+</html>

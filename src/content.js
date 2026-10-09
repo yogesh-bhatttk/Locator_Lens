@@ -68,7 +68,13 @@
   let traversalBar = null;
   let lastRightClickedEl = null;
   let lastPickedEl = null; // last element the user actually picked (survives stop-inspect for Stress Test)
-  let customTestAttributes = ['data-testid', 'data-qa', 'data-cy', 'data-test', 'data-automation-id', 'data-e2e'];
+  // Test-id attributes the engine tries first, highest priority first: the ones the
+  // user configured (llSettings.testIdAttributes, then the legacy customAttributes
+  // key), then the built-ins. src/options.js shows BUILTIN_TEST_ATTRIBUTES read-only.
+  const BUILTIN_TEST_ATTRIBUTES = ['data-testid', 'data-qa', 'data-cy', 'data-test', 'data-automation-id', 'data-e2e'];
+  let customTestAttributes = BUILTIN_TEST_ATTRIBUTES.slice();
+  let settingsTestAttributes = [];
+  let legacyTestAttributes = [];
 
   // Recorder modes (driven by the side panel via messages)
   let isPaused = false;       // pause/resume while recording
@@ -126,13 +132,17 @@
     return String((el.getAttribute && el.getAttribute('autocomplete')) || '').toLowerCase().split(/\s+/).filter(Boolean);
   }
 
-  /** null for ordinary fields, otherwise the env-var name the generated test reads. */
+  /**
+   * null for ordinary fields, otherwise the env-var name the generated test reads:
+   * llSettings.secretNames.password for password fields, .secret for the other
+   * sensitive ones (validated identifiers, else the defaults).
+   */
   function sensitiveSecretName(el) {
     if (!el || el.nodeType !== Node.ELEMENT_NODE || el.tagName.toLowerCase() !== 'input') return null;
     const type = (el.getAttribute('type') || '').toLowerCase();
     const tokens = autocompleteTokens(el);
-    if (type === 'password' || tokens.some((t) => PASSWORD_AUTOCOMPLETE.includes(t))) return 'LOCATRA_PASSWORD';
-    if (tokens.some((t) => SENSITIVE_AUTOCOMPLETE.includes(t))) return 'LOCATRA_SECRET';
+    if (type === 'password' || tokens.some((t) => PASSWORD_AUTOCOMPLETE.includes(t))) return llSettings.secretNames.password;
+    if (tokens.some((t) => SENSITIVE_AUTOCOMPLETE.includes(t))) return llSettings.secretNames.secret;
     return null;
   }
 
@@ -759,10 +769,41 @@
   // shows them apart and nothing uses them until the user accepts one. Two sources:
   // the URL settling somewhere new, and feedback (a toast, an alert, a dialog)
   // appearing after a submit. Off with llSettings.autoAssertions === false.
-  let llSettings = { autoAssertions: true, stepScreenshots: true };
+  // llSettings (edited on the options page and in the panel): a missing key or field
+  // means its default.
+  const SECRET_NAME_RE = /^[A-Za-z_][A-Za-z0-9_]*$/;
+  const TEST_ATTR_NAME_RE = /^[a-zA-Z_:][-a-zA-Z0-9_:.]*$/;
+  const MAX_TEST_ATTRIBUTES = 20;
+  const DEFAULT_SECRET_NAMES = { password: 'LOCATRA_PASSWORD', secret: 'LOCATRA_SECRET' };
+  let llSettings = { autoAssertions: true, stepScreenshots: true, secretNames: Object.assign({}, DEFAULT_SECRET_NAMES) };
+
+  /** Valid, distinct attribute names (at most MAX_TEST_ATTRIBUTES), order kept. */
+  function cleanTestAttributes(list) {
+    if (!Array.isArray(list)) return [];
+    const out = [];
+    for (const a of list) {
+      if (typeof a !== 'string' || a.length > 100 || !TEST_ATTR_NAME_RE.test(a) || out.indexOf(a) !== -1) continue;
+      out.push(a);
+      if (out.length >= MAX_TEST_ATTRIBUTES) break;
+    }
+    return out;
+  }
+
+  function rebuildTestAttributes() {
+    customTestAttributes = [...new Set([...settingsTestAttributes, ...legacyTestAttributes, ...BUILTIN_TEST_ATTRIBUTES])];
+  }
+
   function applySettings(v) {
     const o = v && typeof v === 'object' ? v : {};
-    llSettings = { autoAssertions: o.autoAssertions !== false, stepScreenshots: o.stepScreenshots !== false };
+    const names = o.secretNames && typeof o.secretNames === 'object' ? o.secretNames : {};
+    const secretName = (k) => (typeof names[k] === 'string' && SECRET_NAME_RE.test(names[k]) ? names[k] : DEFAULT_SECRET_NAMES[k]);
+    llSettings = {
+      autoAssertions: o.autoAssertions !== false,
+      stepScreenshots: o.stepScreenshots !== false,
+      secretNames: { password: secretName('password'), secret: secretName('secret') }
+    };
+    settingsTestAttributes = cleanTestAttributes(o.testIdAttributes);
+    rebuildTestAttributes();
     if (!llSettings.autoAssertions) stopFeedbackWatch();
   }
 
@@ -1337,11 +1378,9 @@
   if (ownChrome.storage && ownChrome.storage.local) {
     ownChrome.storage.local.get(['customAttributes', 'llFramework', 'llLanguage', 'llDebug', 'llSettings'], (res) => {
       if (ownChrome.runtime.lastError) return;
-      if (res && res.customAttributes && res.customAttributes.length > 0) {
-        customTestAttributes = [...res.customAttributes, ...customTestAttributes];
-        // Remove duplicates
-        customTestAttributes = [...new Set(customTestAttributes)];
-      }
+      // The legacy key (migrated into llSettings.testIdAttributes by the options
+      // page) still counts until it is gone.
+      legacyTestAttributes = cleanTestAttributes(res && res.customAttributes);
       if (res && res.llFramework) llFramework = res.llFramework;
       if (res && res.llLanguage) llLanguage = res.llLanguage;
       llDebug = !!(res && res.llDebug);
@@ -1354,9 +1393,8 @@
   function onStorageChanged(changes, namespace) {
     if (tornDown || namespace !== 'local') return;
     if (changes.customAttributes) {
-      let newAttrs = changes.customAttributes.newValue || [];
-      customTestAttributes = [...newAttrs, 'data-testid', 'data-qa', 'data-cy', 'data-test', 'data-automation-id', 'data-e2e'];
-      customTestAttributes = [...new Set(customTestAttributes)];
+      legacyTestAttributes = cleanTestAttributes(changes.customAttributes.newValue);
+      rebuildTestAttributes();
     }
     if (changes.llFramework) llFramework = changes.llFramework.newValue || 'playwright';
     if (changes.llLanguage) llLanguage = changes.llLanguage.newValue || 'typescript';
@@ -3124,6 +3162,7 @@
       entry.code = loc.code;
       entry.matchCount = loc.matchCount;
       entry.unique = loc.unique;
+      try { entry.fingerprint = fingerprintOf(el); } catch (err) { entry.fingerprint = null; }
       elements.push(entry);
     }
     const tag = region.tagName.toLowerCase();
@@ -3197,6 +3236,268 @@
     sendPomResult(region);
   }
 
+  // ── Element fingerprint + locator health check (E) ─────────────────────────
+  // A fingerprint is what the side panel keeps next to a watched locator: enough
+  // about the element to recognise it again after the locator stops matching.
+  // Values only — never a field's typed value.
+  //   { tag, id, testId, testAttr, role, name, label, placeholder, text, type, href,
+  //     alt, title, classes }
+  // name is the name attribute (as elementData.name), label the accessible name,
+  // text the normalised text content (≤ 80 chars, null for form controls), classes
+  // up to five stable classes. Absent values are null.
+  const FP_ATTR_MAX = 200;
+  const FP_LABEL_MAX = 120;
+  const FP_TEXT_MAX = 80;
+  const FP_MAX_CLASSES = 5;
+
+  function fpClip(v, max) {
+    const t = normText(v);
+    return t ? t.slice(0, max) : null;
+  }
+
+  function fpAttr(el, name) {
+    const v = el.getAttribute(name);
+    return v ? String(v).slice(0, FP_ATTR_MAX) : null;
+  }
+
+  function fpTestAttr(el) {
+    for (const a of customTestAttributes) {
+      if (/^data-(ll|locatra)-/.test(a)) continue;
+      const v = fpAttr(el, a);
+      if (v) return { attr: a, value: v };
+    }
+    return null;
+  }
+
+  function fpAccessibleName(el) {
+    const E = globalThis.__LocatorLensEngine;
+    try { return fpClip(E && E.getAccessibleName(el), FP_LABEL_MAX); } catch (err) { return null; }
+  }
+
+  function fpRole(el) {
+    const E = globalThis.__LocatorLensEngine;
+    try { return (E && E.getRole(el)) || null; } catch (err) { return null; }
+  }
+
+  function fpText(el) {
+    if (/^(input|textarea|select)$/i.test(el.tagName)) return null;
+    return fpClip(el.textContent, FP_TEXT_MAX);
+  }
+
+  function fpClasses(el) {
+    const E = globalThis.__LocatorLensEngine;
+    const raw = el.getAttribute('class') || '';
+    return raw.trim().split(/\s+/).filter((c) => {
+      if (!c || /^(ll-|locatra-)/.test(c)) return false;
+      try { return !(E && E.isUnstableClass && E.isUnstableClass(c)); } catch (err) { return false; }
+    }).slice(0, FP_MAX_CLASSES);
+  }
+
+  function fingerprintOf(el) {
+    if (!el || el.nodeType !== Node.ELEMENT_NODE) return null;
+    const tag = el.tagName.toLowerCase();
+    const test = fpTestAttr(el);
+    const type = fpAttr(el, 'type');
+    const href = tag === 'a' || tag === 'area' ? fpAttr(el, 'href') : null;
+    return {
+      tag,
+      id: typeof el.id === 'string' && el.id ? el.id.slice(0, FP_ATTR_MAX) : null,
+      testId: test ? test.value : null,
+      testAttr: test ? test.attr : null,
+      role: fpRole(el),
+      name: fpAttr(el, 'name'),
+      label: fpAccessibleName(el),
+      placeholder: fpAttr(el, 'placeholder'),
+      text: fpText(el),
+      type: type ? type.toLowerCase() : null,
+      href: href == null ? null : redactUrl(href),
+      alt: fpAttr(el, 'alt'),
+      title: fpAttr(el, 'title'),
+      classes: fpClasses(el)
+    };
+  }
+
+  /** Adds elementData.fingerprint to a generateLocators() result for `el`. */
+  function withFingerprint(result, el) {
+    if (result && result.elementData && typeof result.elementData === 'object') {
+      try { result.elementData.fingerprint = fingerprintOf(el); } catch (err) { result.elementData.fingerprint = null; }
+    }
+    return result;
+  }
+
+  // BACKGROUND runs globalThis.__LocatraHealthCheck(items) in every frame of the tab
+  // (chrome.scripting.executeScript, this script's world). Each frame answers for
+  // every item: owned:false for targets that live in another frame (ownership is
+  // decided exactly as for REPLAY_STEP), otherwise how many elements the locator
+  // resolves to now — ok (1), broken (0), ambiguous (>1) — and, for broken or
+  // ambiguous ones, the element the fingerprint points at (a clear winner only)
+  // with the engine's best unique locator for it, wrapped in the original frames.
+  // Synchronous, with a 2 s budget for the whole call.
+  const HEALTH_BUDGET_MS = 2000;
+  const HEALTH_MAX_ITEMS = 2000;
+  const HEALTH_MAX_CANDIDATES = 5000;
+  const HEALTH_MIN_SCORE = 5;
+  const HEALTH_MIN_LEAD = 3;
+  const HEALTH_BUDGET_ERROR = 'the health check ran out of time';
+
+  function sameText(a, b) {
+    const x = normText(a).toLowerCase();
+    return !!x && x === normText(b).toLowerCase();
+  }
+
+  /** How strongly `el` looks like the element `fp` was taken from. */
+  function fingerprintScore(fp, el) {
+    let score = 0;
+    if (fp.testId && fp.testAttr && fpAttr(el, fp.testAttr) === fp.testId) score += 10;
+    if (fp.id && el.id === fp.id) score += 8;
+    if (fp.name && fpAttr(el, 'name') === fp.name) score += 6;
+    if (fp.placeholder && sameText(fpAttr(el, 'placeholder'), fp.placeholder)) score += 5;
+    if (fp.label && sameText(fpAccessibleName(el), fp.label)) score += 5;
+    if (fp.text) {
+      const t = fpText(el);
+      const a = normText(t).toLowerCase();
+      const b = normText(fp.text).toLowerCase();
+      if (a && a === b) score += 4;
+      else if (a && Math.min(a.length, b.length) >= 3 && (a.includes(b) || b.includes(a))) score += 2;
+    }
+    if (fp.alt && sameText(fpAttr(el, 'alt'), fp.alt)) score += 5;
+    if (fp.href && fpAttr(el, 'href') != null && redactUrl(fpAttr(el, 'href')) === fp.href) score += 3;
+    if (fp.title && sameText(fpAttr(el, 'title'), fp.title)) score += 3;
+    if (fp.role && fpRole(el) === fp.role) score += 1;
+    if (fp.type) {
+      const ty = (el.getAttribute('type') || '').toLowerCase();
+      score += ty === fp.type ? 1 : -4; // a checkbox is never the text field it replaced
+    }
+    if (Array.isArray(fp.classes) && fp.classes.length) {
+      const mine = (el.getAttribute('class') || '').split(/\s+/);
+      score += Math.min(2, fp.classes.filter((c) => typeof c === 'string' && c && mine.indexOf(c) !== -1).length);
+    }
+    return score;
+  }
+
+  /** The one element of fp.tag that clearly matches the fingerprint, or null. */
+  function findByFingerprint(fp, deadline) {
+    const E = globalThis.__LocatorLensEngine;
+    if (!fp || typeof fp !== 'object' || typeof fp.tag !== 'string' || !/^[a-z][a-z0-9-]*$/i.test(fp.tag)) return null;
+    let candidates = null;
+    try {
+      candidates = E && E.deepQueryAll
+        ? E.deepQueryAll(fp.tag, document, HEALTH_MAX_CANDIDATES)
+        : Array.from(document.querySelectorAll(fp.tag)).slice(0, HEALTH_MAX_CANDIDATES);
+    } catch (err) {
+      candidates = null;
+    }
+    if (!candidates) return null;
+    let best = null;
+    let bestScore = -Infinity;
+    let second = -Infinity;
+    for (const el of candidates) {
+      if (Date.now() > deadline) return null; // an unfinished ranking has no clear winner
+      if (isOwnArtifact(el)) continue;
+      const score = fingerprintScore(fp, el);
+      if (score > bestScore) {
+        second = bestScore;
+        bestScore = score;
+        best = el;
+      } else if (score > second) {
+        second = score;
+      }
+    }
+    if (!best || bestScore < HEALTH_MIN_SCORE || bestScore - second < HEALTH_MIN_LEAD) return null;
+    return best;
+  }
+
+  /** `inner` wrapped in the frame levels of `original`, outermost first. */
+  function rewrapInFrames(original, inner) {
+    const levels = [];
+    let t = original;
+    let guard = 0;
+    while (t && t.kind === 'frame' && guard++ < 16) {
+      levels.push(t);
+      t = t.child;
+    }
+    let wrapped = inner;
+    for (let i = levels.length - 1; i >= 0; i--) {
+      const f = { kind: 'frame', selector: levels[i].selector || null, index: typeof levels[i].index === 'number' ? levels[i].index : 0, child: wrapped };
+      if (Array.isArray(levels[i].shadowPath)) f.shadowPath = levels[i].shadowPath.slice();
+      wrapped = f;
+    }
+    return wrapped;
+  }
+
+  /** The engine's best locator that resolves to `el` alone, framed like `original`. */
+  function healSuggestion(el, original) {
+    const E = globalThis.__LocatorLensEngine;
+    let result = null;
+    try { result = E.generateLocators(el, customTestAttributes); } catch (err) { result = null; }
+    const locs = (result && result.locators) || [];
+    for (const l of locs) {
+      if (!l || !l.target || l.unique !== true) continue;
+      const nodes = resolveReplayTarget(l.target);
+      if (!nodes || nodes.length !== 1 || nodes[0] !== el) continue;
+      const inner = Object.assign({}, l.target, { matchCount: 1, unique: true });
+      const target = rewrapInFrames(original, inner);
+      let code = '';
+      try { code = window.LLCodegen ? window.LLCodegen.locatorExpr(target, 'playwright', 'typescript') : ''; } catch (err) { code = ''; }
+      return { target, code: code || l.code || '' };
+    }
+    return null;
+  }
+
+  /** Phase 1 for one item: ownership and the current match count. */
+  function checkHealthItem(item, isTop, deadline) {
+    const id = item && typeof item === 'object' && item.id != null ? item.id : null;
+    if (!item || typeof item !== 'object') return { id, owned: isTop, count: 0, status: 'error', error: 'not a watched locator' };
+    const target = item.target;
+    let owned = false;
+    try { owned = ownsReplayStep({ action: 'healthCheck', target }); } catch (err) { owned = false; }
+    if (!owned) return { id, owned: false, count: 0, status: 'frame-missing' };
+    if (!target || typeof target !== 'object') return { id, owned: true, count: 0, status: 'error', error: 'the watched locator has no target' };
+    if (Date.now() > deadline) return { id, owned: true, count: 0, status: 'error', error: HEALTH_BUDGET_ERROR };
+    const E = globalThis.__LocatorLensEngine;
+    const inner = innerTargetOf(target);
+    if (!inner || typeof inner !== 'object') return { id, owned: true, count: 0, status: 'error', error: 'the watched locator has no target inside its frame' };
+    const nodes = resolveReplayTarget(inner);
+    if (!nodes || (!nodes.length && E && typeof E.countTargetMatches === 'function' && E.countTargetMatches(inner) === null)) {
+      return { id, owned: true, count: 0, status: 'error', error: `cannot evaluate locator ${locatorLabel(target)}` };
+    }
+    const count = nodes.length;
+    return { id, owned: true, count, status: count === 1 ? 'ok' : (count === 0 ? 'broken' : 'ambiguous') };
+  }
+
+  /** Phase 2 for one broken/ambiguous item: a suggestion from its fingerprint. */
+  function healHealthItem(item, entry, deadline) {
+    if (entry.status !== 'broken' && entry.status !== 'ambiguous') return;
+    if (!item.fingerprint || !globalThis.__LocatorLensEngine || Date.now() > deadline) return;
+    const el = findByFingerprint(item.fingerprint, deadline);
+    const suggestion = el && Date.now() <= deadline ? healSuggestion(el, item.target) : null;
+    if (suggestion) entry.suggestion = suggestion;
+  }
+
+  function healthCheck(items) {
+    if (tornDown) return null;
+    const list = Array.isArray(items) ? items.slice(0, HEALTH_MAX_ITEMS) : [];
+    const isTop = window === window.top;
+    const deadline = Date.now() + HEALTH_BUDGET_MS;
+    const errorFor = (item, err) => ({
+      id: item && typeof item === 'object' && item.id != null ? item.id : null,
+      owned: true,
+      count: 0,
+      status: 'error',
+      error: (err && err.message) || String(err)
+    });
+    // Every count first (cheap), then heals with whatever budget is left, so a slow
+    // heal can never cost another locator its status.
+    const out = list.map((item) => {
+      try { return checkHealthItem(item, isTop, deadline); } catch (err) { return errorFor(item, err); }
+    });
+    out.forEach((entry, i) => {
+      try { healHealthItem(list[i], entry, deadline); } catch (err) { /* no suggestion */ }
+    });
+    return out;
+  }
+  globalThis.__LocatraHealthCheck = healthCheck;
+
   // ── Event handlers ─────────────────────────────────────────────────────────
   function onMouseOver(e) {
     if (!isInspecting) return;
@@ -3236,7 +3537,7 @@
   function pickElement(el) {
     lastPickedEl = el; // remember for Stress Test even after inspect stops
 
-    const result = generateLocators(el);
+    const result = withFingerprint(generateLocators(el), el);
 
     const bestCode = result.locators[0] ? copyLocatorCode(result.locators[0]) : '';
     if (bestCode) {
@@ -3426,6 +3727,7 @@
     if (styles) styles.remove();
     try { ownChrome.runtime.onMessage.removeListener(onMessage); } catch (err) { /* dead context */ }
     try { ownChrome.storage.onChanged.removeListener(onStorageChanged); } catch (err) { /* dead context */ }
+    if (globalThis.__LocatraHealthCheck === healthCheck) delete globalThis.__LocatraHealthCheck;
     if (window.__LocatorLensInstance === instanceHandle) delete window.__LocatorLensInstance;
     lastPickedEl = null;
     lastRightClickedEl = null;
@@ -3504,6 +3806,7 @@
       }
 
       if (isInspecting) {
+        withFingerprint(result, target);
         result.pickId = nextRecordEventId();
         Object.assign(result, pageInfo());
         safeSend({ type: 'ELEMENT_PICKED', data: result });
