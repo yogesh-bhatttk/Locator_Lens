@@ -43,7 +43,13 @@ MISSION_SELECTOR_LAB.md
 /.tmp-screenshot-profile/
 /.tmp-smoke-profile/
 /.tmp-smoke-pom-profile/
+/.tmp-smoke-settings-profile/
+/.tmp-smoke-data-health-profile/
 /.tmp-smoke-shots-*/
 
 # Generated scripts and logs from `npm run test:exports`.
 /.tmp-exports/
+
+# Python bytecode from the export runners
+__pycache__/
+*.pyc

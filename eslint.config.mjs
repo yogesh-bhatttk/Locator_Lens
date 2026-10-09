@@ -21,6 +21,8 @@ export default [
       'coverage/',
       '.tmp-smoke-profile/',
       '.tmp-smoke-pom-profile/',
+      '.tmp-smoke-settings-profile/',
+      '.tmp-smoke-data-health-profile/',
       '.tmp-smoke-shots-*/',
       '.tmp-screenshot-profile/',
       '**/.*/',

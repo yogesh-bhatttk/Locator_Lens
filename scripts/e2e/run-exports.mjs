@@ -25,17 +25,26 @@
 //   npm run test:exports -- --flow canonical
 //   npm run test:exports -- --flow canonical --fixture my-state.json   # a stored state
 //   npm run test:exports -- --require all      # CI: a skipped runner is a failure
+//   npm run test:exports -- --literals         # values as literals, not test-data variables
 //
 // Runners that are not installed are SKIPPED with the reason and how to fix it
 // (Python packages: `npm run test:exports:setup-python`; Cypress:
 // `npm run test:exports:setup-cypress`). Generated files are kept in .tmp-exports/.
 
 import { spawn, spawnSync } from 'node:child_process';
-import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync, copyFileSync } from 'node:fs';
+import {
+  existsSync,
+  mkdirSync,
+  readFileSync,
+  readdirSync,
+  rmSync,
+  writeFileSync,
+  copyFileSync,
+} from 'node:fs';
 import { createRequire } from 'node:module';
 import { delimiter, dirname, join, relative, resolve } from 'node:path';
 import process from 'node:process';
-import { fileURLToPath } from 'node:url';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 import vm from 'node:vm';
 
 import { resolveChromium } from './browsers.mjs';
@@ -70,6 +79,8 @@ function parseArgs(argv) {
     require: [],
     port: 4175,
     fixture: join(E2E, 'fixtures/checkout-flow.json'),
+    // Typed values as test-data variables, as the panel exports them by default.
+    variables: true,
   };
   const list = (v) =>
     v === 'all'
@@ -87,6 +98,7 @@ function parseArgs(argv) {
     else if (flag === '--flow') opts.flows = value === 'all' ? ['canonical', 'recorded'] : value.split(',');
     else if (flag === '--port') opts.port = Number(value);
     else if (flag === '--fixture') opts.fixture = resolve(value);
+    else if (flag === '--literals') opts.variables = false;
     else if (flag === '--help' || flag === '-h') opts.help = true;
     else throw new Error(`unknown argument ${argv[i]}`);
   }
@@ -101,11 +113,21 @@ function parseArgs(argv) {
 // ── codegen and the flows ─────────────────────────────────────────────────────────
 
 /** A fresh copy of the shipping codegen, loaded the way the extension loads it. */
+// codegen.js plus every target module (src/codegen-*.js), loaded the way the
+// extension loads them: classic scripts sharing one global, core first.
+export function codegenFiles() {
+  const extra = readdirSync(join(ROOT, 'src'))
+    .filter((f) => /^codegen-[\w-]+\.js$/.test(f))
+    .sort();
+  return ['src/codegen.js', ...extra.map((f) => `src/${f}`)];
+}
+
 function loadCodegen() {
   const sandbox = {};
-  vm.runInNewContext(readFileSync(join(ROOT, 'src/codegen.js'), 'utf8'), sandbox, {
-    filename: join(ROOT, 'src/codegen.js'),
-  });
+  vm.createContext(sandbox);
+  for (const file of codegenFiles()) {
+    vm.runInContext(readFileSync(join(ROOT, file), 'utf8'), sandbox, { filename: join(ROOT, file) });
+  }
   if (!sandbox.LLCodegen) throw new Error('src/codegen.js did not define LLCodegen');
   return sandbox.LLCodegen;
 }
@@ -416,6 +438,35 @@ const RUNNERS = {
   'cypress-javascript': cypress('javascript'),
 };
 
+// ── runner plugins ───────────────────────────────────────────────────────────────
+// Each scripts/e2e/runners/<name>.mjs exports `runners`: { '<framework>-<language>':
+// (tools) => async ({ dir, script, env }) => ({ result } | { skip }) }. A plugin
+// receives the shared tools below, so adding a target never means editing this file.
+const RUNNER_TOOLS = {
+  ROOT,
+  E2E,
+  run,
+  python,
+  pythonPath,
+  pythonHas,
+  withoutStrayChromedriver,
+  withoutElectronEnv,
+};
+const RUNNERS_DIR = join(dirname(fileURLToPath(import.meta.url)), 'runners');
+if (existsSync(RUNNERS_DIR)) {
+  for (const file of readdirSync(RUNNERS_DIR)
+    .filter((f) => f.endsWith('.mjs'))
+    .sort()) {
+    const mod = await import(pathToFileURL(join(RUNNERS_DIR, file)).href);
+    for (const [id, factory] of Object.entries(mod.runners || {})) {
+      if (RUNNERS[id]) throw new Error(`runner "${id}" from runners/${file} is already defined`);
+      if (!/^[a-z]+-[a-z]+$/.test(id)) throw new Error(`runner id "${id}" must be <framework>-<language>`);
+      RUNNERS[id] = factory(RUNNER_TOOLS);
+      COMBOS.push(id);
+    }
+  }
+}
+
 // ── verification ────────────────────────────────────────────────────────────────
 
 function compareOrder(received, expected) {
@@ -455,8 +506,11 @@ async function main() {
   const password = process.env.LOCATRA_PASSWORD || 'Locatra-e2e-S3cret!';
   const env = { LOCATRA_CHROMIUM: chromium, LOCATRA_PASSWORD: password };
 
-  rmSync(WORK, { recursive: true, force: true });
-  mkdirSync(WORK, { recursive: true });
+  // One folder per port: runs started in parallel (each on its own --port) used to
+  // share .tmp-exports/ and delete each other's projects and logs mid-run.
+  const work = join(WORK, `port-${opts.port}`);
+  rmSync(work, { recursive: true, force: true });
+  mkdirSync(work, { recursive: true });
   const server = await startDemoServer({ port: opts.port });
   const vars = { BASE: server.base, LOCATRA_PASSWORD: password };
   const expectation = substitute(
@@ -492,13 +546,13 @@ async function main() {
             chromium,
             base: server.base,
             password,
-            profileDir: join(WORK, 'recording-profile'),
+            profileDir: join(work, 'recording-profile'),
             headed: process.env.LOCATRA_E2E_HEADLESS === '1' ? false : hasDisplay(),
             log: (s) => console.log(s),
           });
           notes.push(...rec.notes);
           actions = rec.state.actions;
-          writeFileSync(join(WORK, 'recorded-flow.json'), JSON.stringify(rec.state, null, 2) + '\n');
+          writeFileSync(join(work, 'recorded-flow.json'), JSON.stringify(rec.state, null, 2) + '\n');
           // The recording itself placed an order: it must be the expected one too,
           // or the recorder was driven wrong and every runner below would mislead.
           const own = compareOrder(server.orders().slice(before), expectation.order);
@@ -519,9 +573,9 @@ async function main() {
 
       for (const id of opts.only) {
         const [fw, lang] = id.split('-');
-        const dir = join(WORK, flow, id);
+        const dir = join(work, flow, id);
         mkdirSync(dir, { recursive: true });
-        const script = C.testScript(steps, fw, lang);
+        const script = C.testScript(steps, fw, lang, { variables: opts.variables });
         if (script.includes(password)) {
           rows.push({ flow, id, status: 'FAIL', detail: 'the exported script contains the password' });
           continue;
@@ -575,7 +629,7 @@ async function main() {
         ? ` (${missing.length} skipped runner(s) were required: ${[...new Set(missing.map((r) => r.id))].join(', ')})`
         : '')
   );
-  console.log(`generated scripts and logs: ${relative(ROOT, WORK)}/`);
+  console.log(`generated scripts and logs: ${relative(ROOT, work)}/`);
   return failed.length || missing.length ? 1 : 0;
 }
 

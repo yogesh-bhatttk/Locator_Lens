@@ -21,6 +21,19 @@ import { fileURLToPath } from 'node:url';
 
 import { chromium } from 'playwright';
 
+// The panel generates test-data variables by default, so a recorded value appears
+// either inline — .fill('Ada') — or as testData.<name> with `<name>: 'Ada'` declared.
+// Either way the step must use exactly the recorded value.
+function usesRecordedValue(script, method, value) {
+  const literal = `.${method}('${value}')`;
+  if (script.includes(literal)) return true;
+  const decl = script.match(/const testData = \{([\s\S]*?)\n\};/);
+  if (!decl) return false;
+  return [...script.matchAll(new RegExp(`\\.${method}\\(testData\\.(\\w+)\\)`, 'g'))].some(([, name]) =>
+    decl[1].includes(`${name}: '${value}',`)
+  );
+}
+
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const EXTENSION = join(ROOT, 'dist/chrome');
 const DEMO_HTML = join(ROOT, 'scripts/screenshots/demo-page.html');
@@ -274,8 +287,8 @@ async function main() {
     const script = await preview();
 
     check('a test script was generated', script.includes('@playwright/test'));
-    check('the fill was captured', /\.fill\('Ada'\)/.test(script));
-    check('the select was captured', /selectOption\('Ireland'\)/.test(script));
+    check('the fill was captured', usesRecordedValue(script, 'fill', 'Ada'));
+    check('the select was captured', usesRecordedValue(script, 'selectOption', 'Ireland'));
     check('checking a box records check()', /\.check\(\)/.test(script));
     check(
       'unchecking records uncheck(), not check()',

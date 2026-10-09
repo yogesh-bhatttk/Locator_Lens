@@ -108,7 +108,15 @@ async function main() {
     headless: false,
     acceptDownloads: true,
     viewport: { width: 1280, height: 800 },
-    args: [`--disable-extensions-except=${EXTENSION}`, `--load-extension=${EXTENSION}`],
+    args: [
+      `--disable-extensions-except=${EXTENSION}`,
+      `--load-extension=${EXTENSION}`,
+      // The Copy check pastes through the system clipboard. Under native Wayland the
+      // compositor ignores a copy from a window without keyboard focus, which an
+      // automated window often lacks, so the copy was dropped on some runs. X11
+      // (XWayland here, xvfb in CI) has no such rule, so prefer it when available.
+      ...(process.env.WAYLAND_DISPLAY && process.env.DISPLAY ? ['--ozone-platform=x11'] : []),
+    ],
   });
 
   try {
@@ -758,7 +766,7 @@ async function main() {
     // Read the clipboard back the way a user would: paste it (a real Ctrl+V) into a
     // blank page. navigator.clipboard.readText() needs focus and a permission grant
     // an extension origin does not reliably get, and stalls instead of failing.
-    const clip = await pasteClipboard(context);
+    const clip = await pasteClipboard(context, tsShown);
     check('the clipboard holds the code shown', clip === tsShown, clip.slice(0, 200));
 
     check(
@@ -960,18 +968,27 @@ function quietly(fn) {
 }
 
 /** What a real paste (Ctrl+V into a fresh textarea) yields. */
-async function pasteClipboard(context) {
+// On a desktop session (Wayland with XWayland, a clipboard manager) the clipboard a
+// paste reads can lag the copy by a moment and briefly still hold an older value —
+// the same build passed and failed on alternate runs that way. Paste again until the
+// expected text arrives or 4 s pass; anything else after that is a real failure.
+async function pasteClipboard(context, expected) {
   const scratch = await context.newPage();
+  let last = '';
   try {
     await scratch.setContent('<textarea id="paste" style="width:600px;height:400px"></textarea>');
     await scratch.bringToFront();
-    await scratch.focus('#paste');
-    await scratch.keyboard.press('ControlOrMeta+V');
-    await until(async () => (await scratch.inputValue('#paste')).length > 0, {
-      timeout: 3000,
-      what: 'the paste',
-    }).catch(() => {});
-    return await scratch.inputValue('#paste');
+    await until(
+      async () => {
+        await scratch.fill('#paste', '');
+        await scratch.focus('#paste');
+        await scratch.keyboard.press('ControlOrMeta+V');
+        last = await scratch.inputValue('#paste');
+        return expected === undefined ? last.length > 0 : last === expected;
+      },
+      { timeout: 4000, what: 'the paste' }
+    ).catch(() => {});
+    return last;
   } catch (err) {
     return `<<${err.message.split('\n')[0]}>>`;
   } finally {

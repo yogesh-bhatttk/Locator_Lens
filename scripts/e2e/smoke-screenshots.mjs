@@ -27,6 +27,19 @@ import { chromium } from 'playwright';
 import { computeExtensionId, resolveChromium, until, waitForServiceWorker } from './browsers.mjs';
 import { startDemoServer } from './demo-server.mjs';
 
+// The panel generates test-data variables by default, so a recorded value appears
+// either inline — .fill('Ada') — or as testData.<name> with `<name>: 'Ada'` declared.
+// Either way the step must use exactly the recorded value.
+function usesRecordedValue(script, method, value) {
+  const literal = `.${method}('${value}')`;
+  if (script.includes(literal)) return true;
+  const decl = script.match(/const testData = \{([\s\S]*?)\n\};/);
+  if (!decl) return false;
+  return [...script.matchAll(new RegExp(`\\.${method}\\(testData\\.(\\w+)\\)`, 'g'))].some(([, name]) =>
+    decl[1].includes(`${name}: '${value}',`)
+  );
+}
+
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '../..');
 const EXTENSION = join(ROOT, 'dist/chrome');
 const PORT = 4182;
@@ -343,7 +356,10 @@ async function phaseA(context, extensionId, base) {
 
   await s.openRecorder();
   const preview = await s.panel.evaluate(() => document.getElementById('codePreview')?.innerText ?? '');
-  check('the script is still generated', /\.fill\('Ada'\)/.test(preview) && /\.check\(\)/.test(preview));
+  check(
+    'the script is still generated',
+    usesRecordedValue(preview, 'fill', 'Ada') && /\.check\(\)/.test(preview)
+  );
   check(
     'the timeline shows no thumbnail',
     (await s.panel.locator('#recorderTimeline .ll-thumb-btn').count()) === 0

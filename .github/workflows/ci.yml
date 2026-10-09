@@ -90,6 +90,12 @@ jobs:
       - name: Smoke test step screenshots
         run: xvfb-run -a npm run smoke:screenshots
 
+      - name: Smoke test settings, shortcuts, health check and the Edge package
+        run: xvfb-run -a npm run smoke:settings
+
+      - name: Smoke test test-data variables and the Health tab
+        run: xvfb-run -a npm run smoke:data-health
+
   # The exported tests, run for real. Unit suites only prove generated code parses;
   # these run every Playwright and Selenium export (TypeScript, JavaScript, Python)
   # in its own real runner against the demo checkout, for a canonical stored flow
@@ -194,5 +200,156 @@ jobs:
         uses: actions/upload-artifact@v7
         with:
           name: exports-cypress
+          path: .tmp-exports/
+          if-no-files-found: ignore
+
+  # Java exports (Playwright for Java, Selenium for Java) run under JUnit 5 through
+  # Maven, in a throwaway project around the unmodified generated file.
+  exports-java:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-node@v5
+        with:
+          node-version-file: .nvmrc
+          cache: npm
+
+      # No `cache: maven`: there is no pom.xml in the repo for it to key on.
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '21'
+
+      - run: npm ci
+
+      - name: Cache Playwright browsers
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/ms-playwright
+          key: ms-playwright-${{ runner.os }}-${{ hashFiles('package-lock.json') }}
+
+      - name: Cache the Maven repository
+        uses: actions/cache@v4
+        with:
+          path: node_modules/.cache/locatra-e2e/java/m2
+          key: m2-${{ runner.os }}-${{ hashFiles('scripts/e2e/setup-java.mjs') }}
+
+      - name: Install Chromium for Playwright
+        run: npx playwright install --with-deps chromium
+
+      - name: Resolve the Java test dependencies
+        run: npm run test:exports:setup-java
+
+      - run: npm run build
+
+      - name: Run the Java exports for real
+        run: >-
+          xvfb-run -a npm run test:exports --
+          --only playwright-java,selenium-java
+          --require playwright-java,selenium-java
+
+      - name: Upload generated scripts and runner logs
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: exports-java
+          path: .tmp-exports/
+          if-no-files-found: ignore
+
+  # C# exports (Playwright for .NET, Selenium for C#) run under NUnit with
+  # `dotnet test`, in a throwaway project around the unmodified generated file.
+  exports-csharp:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-node@v5
+        with:
+          node-version-file: .nvmrc
+          cache: npm
+
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '10.0.x'
+
+      - run: npm ci
+
+      - name: Cache Playwright browsers
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/ms-playwright
+          key: ms-playwright-${{ runner.os }}-${{ hashFiles('package-lock.json') }}
+
+      - name: Cache NuGet packages
+        uses: actions/cache@v4
+        with:
+          path: node_modules/.cache/locatra-e2e/nuget
+          key: nuget-${{ runner.os }}-${{ hashFiles('scripts/e2e/runners/csharp.mjs') }}
+
+      - name: Install Chromium for Playwright
+        run: npx playwright install --with-deps chromium
+
+      - run: npm run build
+
+      - name: Run the C# exports for real
+        run: >-
+          xvfb-run -a npm run test:exports --
+          --only playwright-csharp,selenium-csharp
+          --require playwright-csharp,selenium-csharp
+
+      - name: Upload generated scripts and runner logs
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: exports-csharp
+          path: .tmp-exports/
+          if-no-files-found: ignore
+
+  # WebdriverIO exports (v9 + Mocha) run through the real wdio CLI, with packages
+  # installed into a cache folder so the repo's package.json stays untouched.
+  exports-webdriverio:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-node@v5
+        with:
+          node-version-file: .nvmrc
+          cache: npm
+
+      - run: npm ci
+
+      - name: Cache Playwright browsers
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/ms-playwright
+          key: ms-playwright-${{ runner.os }}-${{ hashFiles('package-lock.json') }}
+
+      - name: Cache the WebdriverIO packages and ChromeDriver
+        uses: actions/cache@v4
+        with:
+          path: node_modules/.cache/locatra-e2e/wdio
+          key: wdio-${{ runner.os }}-${{ hashFiles('scripts/e2e/setup-webdriverio.mjs') }}
+
+      - name: Install Chromium for Playwright
+        run: npx playwright install --with-deps chromium
+
+      - name: Install the WebdriverIO packages
+        run: npm run test:exports:setup-webdriverio
+
+      - run: npm run build
+
+      - name: Run the WebdriverIO exports for real
+        run: >-
+          xvfb-run -a npm run test:exports --
+          --only webdriverio-typescript,webdriverio-javascript
+          --require webdriverio-typescript,webdriverio-javascript
+
+      - name: Upload generated scripts and runner logs
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: exports-webdriverio
           path: .tmp-exports/
           if-no-files-found: ignore

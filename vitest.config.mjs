@@ -55,6 +55,14 @@ export default defineConfig({
         'src/sidepanel.js': { statements: 92, branches: 79, functions: 96, lines: 96 },
         // 98.40 / 91.54 / 97.61 / 97.91
         'src/thumbs-store.js': { statements: 97, branches: 90, functions: 96, lines: 96 },
+        // 99.25 / 95.58 / 100 / 99.87
+        'src/options.js': { statements: 98, branches: 94, functions: 99, lines: 99 },
+        // 99.31 / 96.58 / 100 / 99.42
+        'src/codegen-java.js': { statements: 98, branches: 95, functions: 99, lines: 98 },
+        // 100 / 99.06 / 100 / 100
+        'src/codegen-csharp.js': { statements: 99, branches: 98, functions: 99, lines: 99 },
+        // 98.43 / 95.63 / 100 / 100
+        'src/codegen-wdio.js': { statements: 97, branches: 94, functions: 99, lines: 99 },
       },
     },
   },

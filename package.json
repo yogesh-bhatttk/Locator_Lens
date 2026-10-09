@@ -27,6 +27,7 @@
     "build": "node scripts/build.mjs all",
     "build:chrome": "node scripts/build.mjs chrome",
     "build:firefox": "node scripts/build.mjs firefox",
+    "build:edge": "node scripts/build.mjs edge",
     "verify": "npm run version:check && npm run format:check && npm run lint && npm run test:coverage && npm run build",
     "prepare": "husky",
     "screenshots": "node scripts/screenshots/capture.mjs",
@@ -34,9 +35,14 @@
     "smoke": "node scripts/smoke.mjs",
     "smoke:pom": "node scripts/e2e/smoke-pom.mjs",
     "smoke:screenshots": "node scripts/e2e/smoke-screenshots.mjs",
-    "smoke:all": "npm run smoke && npm run smoke:pom && npm run smoke:screenshots",
+    "smoke:settings": "node scripts/e2e/smoke-settings.mjs",
+    "smoke:data-health": "node scripts/e2e/smoke-panel-data-health.mjs",
+    "smoke:all": "npm run smoke && npm run smoke:pom && npm run smoke:screenshots && npm run smoke:settings && npm run smoke:data-health",
     "test:exports": "node scripts/e2e/run-exports.mjs",
     "test:exports:setup-python": "python3 -m pip install --target node_modules/.cache/locatra-e2e/pylib -r tests/e2e/requirements.txt",
+    "test:exports:setup-java": "node scripts/e2e/setup-java.mjs",
+    "test:exports:setup-csharp": "node scripts/e2e/setup-csharp.mjs",
+    "test:exports:setup-webdriverio": "node scripts/e2e/setup-webdriverio.mjs",
     "test:exports:setup-cypress": "npm install --no-save cypress@15.21.1 cypress-real-events@1.15.1 typescript@5.9.3"
   },
   "devDependencies": {
