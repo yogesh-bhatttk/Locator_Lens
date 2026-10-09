@@ -15,9 +15,11 @@ jobs:
     steps:
       - uses: actions/checkout@v5
 
+      # Pinned by .nvmrc. The archive hash depends on Node's bundled zlib, so CI and
+      # a release build must use the same major for their hashes to match.
       - uses: actions/setup-node@v5
         with:
-          node-version: 22
+          node-version-file: .nvmrc
           cache: npm
 
       - run: npm ci
@@ -39,9 +41,15 @@ jobs:
       - run: npm run test:coverage
 
       # Builds both packages and fails on any store-policy violation
-      # (remote code, eval, stray files, missing manifest references).
+      # (remote code, eval, network APIs, unused permissions, missing references).
       - name: Build store packages
         run: npm run build
+
+      # Mozilla's own validator (the one AMO runs on upload) over the Firefox tree.
+      # Fetched on demand rather than as a devDependency: it is large and only this
+      # step needs it. Warnings fail too — the package is currently clean.
+      - name: Validate the Firefox package with web-ext lint
+        run: npm run lint:firefox
 
       - name: Upload store packages
         uses: actions/upload-artifact@v7
@@ -59,9 +67,11 @@ jobs:
     steps:
       - uses: actions/checkout@v5
 
+      # Pinned by .nvmrc. The archive hash depends on Node's bundled zlib, so CI and
+      # a release build must use the same major for their hashes to match.
       - uses: actions/setup-node@v5
         with:
-          node-version: 22
+          node-version-file: .nvmrc
           cache: npm
 
       - run: npm ci

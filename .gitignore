@@ -38,4 +38,7 @@ MISSION_SELECTOR_LAB.md
 # Store listing images are tracked: they are release artefacts, and having the
 # exact bytes that were uploaded in git makes a rejection reviewable. Regenerate
 # with `npm run screenshots`.
-.tmp-screenshot-profile/
+
+# Throwaway browser profiles created by `npm run screenshots` / `npm run smoke`.
+/.tmp-screenshot-profile/
+/.tmp-smoke-profile/
