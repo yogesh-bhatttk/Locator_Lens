@@ -134,10 +134,11 @@
     /* ---------- reset ---------- */
     *, *::before, *::after { box-sizing: border-box; }
     * { margin: 0; padding: 0; }
+    /* No min-width: Firefox sidebars can be dragged down to ~200px, and a fixed
+       320px floor clipped the right edge (Copy buttons, badges) off-screen. */
     html, body {
       height: 100%;
       width: 100%;
-      min-width: 320px;
       overflow: hidden;
       background: var(--bg);
       color: var(--text);
@@ -243,12 +244,12 @@
     /* ---------- output target (framework + language) ---------- */
     .output-bar {
       flex-shrink: 0;
-      display: flex; gap: 8px;
+      display: flex; flex-wrap: wrap; gap: 8px;
       padding: 8px 12px;
       background: var(--canvas);
       border-bottom: 1px solid var(--border);
     }
-    .output-field { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 3px; }
+    .output-field { flex: 1 1 90px; min-width: 0; display: flex; flex-direction: column; gap: 3px; }
     .output-label { font-size: 9px; font-weight: 700; text-transform: uppercase; letter-spacing: 0.06em; color: var(--text-muted); padding-left: 2px; }
     .output-select {
       width: 100%; height: 30px;
@@ -263,7 +264,7 @@
     .output-select:hover { border-color: var(--border-strong); }
 
     /* ---------- content ---------- */
-    .scroll-content { flex: 1; min-height: 0; overflow-y: auto; padding: 14px 0 24px; }
+    .scroll-content { flex: 1; min-height: 0; overflow-y: auto; overflow-x: auto; padding: 14px 0 24px; }
     .tab-content { display: none; }
     .tab-content.active { display: block; }
 
@@ -272,7 +273,7 @@
       font-size: 10px; font-weight: 700;
       text-transform: uppercase; letter-spacing: 0.08em;
       color: var(--text-muted);
-      display: flex; align-items: center; gap: 10px;
+      display: flex; flex-wrap: wrap; align-items: center; gap: 10px;
     }
     .sec-label::after { content: ''; flex: 1; height: 1px; background: var(--border); }
 
@@ -393,7 +394,7 @@
     .card.r1 { border-color: var(--brand-soft-2); box-shadow: var(--shadow); }
     .card.r1 .rank-num { background: var(--brand); color: var(--on-brand); }
     .card:hover { border-color: var(--brand-soft-2); }
-    .card-head { display: flex; align-items: center; justify-content: space-between; gap: 10px; padding: 12px 14px; }
+    .card-head { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 10px; padding: 12px 14px; }
     .card-left { display: flex; align-items: center; gap: 12px; min-width: 0; }
     .rank-num {
       width: 24px; height: 24px;
@@ -413,7 +414,7 @@
       border-radius: var(--r-pill);
       white-space: nowrap;
     }
-    .card-badges { display: flex; flex-direction: column; align-items: flex-end; gap: 4px; flex-shrink: 0; }
+    .card-badges { display: flex; flex-direction: column; align-items: flex-end; gap: 4px; flex-shrink: 0; flex-wrap: wrap; }
     .uniq { font-size: 9px; font-weight: 700; padding: 2px 7px; border-radius: var(--r-pill); white-space: nowrap; }
     .uniq-ok { color: var(--success); background: var(--success-soft); border: 1px solid var(--success-soft); }
     .uniq-warn { color: var(--warn); background: var(--warn-soft); border: 1px solid var(--warn-soft); }
@@ -425,11 +426,12 @@
     .card-code {
       background: var(--code-bg);
       padding: 10px 14px;
-      display: flex; align-items: center; justify-content: space-between; gap: 10px;
+      display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 10px;
       border-top: 1px solid var(--border);
     }
     .code-txt {
-      flex: 1;
+      flex: 1 1 120px;
+      min-width: 0;
       font-family: 'Cascadia Code', 'Fira Code', ui-monospace, monospace;
       font-size: 11px;
       color: var(--code-text);
@@ -553,7 +555,7 @@
       box-shadow: var(--shadow-sm);
       line-height: 1.45;
     }
-    #recorderTimeline .ll-rec-step-head { display: flex; justify-content: space-between; align-items: center; gap: 8px; padding: 10px 12px 6px; }
+    #recorderTimeline .ll-rec-step-head { display: flex; flex-wrap: wrap; justify-content: space-between; align-items: center; gap: 8px; padding: 10px 12px 6px; }
     #recorderTimeline .ll-rec-step-label { font-weight: 700; color: var(--brand); font-size: 11px; flex: 1; min-width: 0; }
     #recorderTimeline .ll-rec-step-actions { display: flex; gap: 4px; flex-shrink: 0; }
     /* per-step action buttons carry .clear-btn (width:100%) — re-scope them to compact, auto-width */
@@ -640,8 +642,51 @@
     #recorderTimeline .ll-rec-step.is-assert .ll-rec-step-label { color: var(--accent); }
     #recorderTimeline .ll-rec-empty-filter { padding: 16px; text-align: center; color: var(--text-muted); font-size: 11px; }
 
+    /* ---------- inline status lines (errors / results instead of alert()) ---------- */
+    .panel-status {
+      flex-shrink: 0;
+      margin: 0;
+      padding: 7px 14px;
+      font-size: 11px; line-height: 1.45;
+      background: var(--info-soft); color: var(--info);
+      border-bottom: 1px solid var(--border);
+      overflow-wrap: anywhere;
+    }
+    .panel-status.err { background: var(--danger-soft); color: var(--danger); }
+    .panel-status[hidden], .stress-result[hidden], .ll-script-stale[hidden] { display: none; }
+    .stress-result {
+      margin: 0 16px 12px; padding: 8px 10px;
+      font-size: 11px; line-height: 1.45;
+      border: 1px solid var(--border); border-radius: var(--r-md);
+      background: var(--surface-2); color: var(--text);
+      overflow-wrap: anywhere;
+    }
+    .stress-result.ok { background: var(--success-soft); color: var(--success); }
+    .stress-result.warn { background: var(--warn-soft); color: var(--warn); }
+    .stress-result.err { background: var(--danger-soft); color: var(--danger); }
+    .ll-script-stale {
+      display: flex; flex-wrap: wrap; align-items: center; gap: 8px;
+      margin: 0 16px 10px; padding: 7px 10px;
+      font-size: 11px; color: var(--warn);
+      background: var(--warn-soft); border: 1px solid var(--border); border-radius: var(--r-md);
+    }
+    .ll-script-stale span { flex: 1 1 140px; min-width: 0; }
+    .ll-script-stale .clear-btn { width: auto; min-height: 26px; padding: 3px 10px; font-size: 10px; }
+    .el-chip-url { max-width: 100%; overflow-wrap: anywhere; }
+    #recorderTimeline:focus { outline: none; }
+
     @media (max-width: 360px) {
       .tab .tab-label { display: none; }
+    }
+    /* Very narrow sidebars (Firefox allows ~200px): tighten gutters, let rows wrap. */
+    @media (max-width: 260px) {
+      .header, .btn-wrap { padding-left: 10px; padding-right: 10px; }
+      .selector-lab, .hint-row, .idle-state, .el-bar, #a11yContainer, .avoid-sec, .pro-tip, .stress-result, .ll-script-stale { margin-left: 8px; margin-right: 8px; }
+      .cards, .clear-btn-wrap, .ll-rec-controls, .ll-rec-filter-wrap, #recorderTimeline.ll-rec-timeline { padding-left: 8px; padding-right: 8px; }
+      .sec-label { padding-left: 8px; padding-right: 8px; }
+      #codePreview.code-preview-editor { width: calc(100% - 16px); margin-left: 8px; margin-right: 8px; }
+      .brand-sub, .fw-playwright-badge { display: none; }
+      .match-attr { max-width: 100%; }
     }
   </style>
 </head>
@@ -688,6 +733,8 @@
       </label>
     </div>
 
+    <div id="panelStatus" class="panel-status" role="status" aria-live="polite" hidden></div>
+
     <div class="scroll-content">
       <div class="tab-content active" id="tab-inspector">
         <!-- SELECTOR LAB MODULE -->
@@ -718,8 +765,9 @@
         </div>
 
         <div id="resultsState" style="display:none">
-          <div class="sec-label">Target metadata <button id="stressTestBtn" class="copy-btn"
+          <div class="sec-label">Target metadata <button type="button" id="stressTestBtn" class="copy-btn"
               style="margin-left: auto;">💥 Stress Test</button></div>
+          <div id="stressResult" class="stress-result" role="status" aria-live="polite" hidden></div>
           <div class="el-bar" id="elBar"></div>
 
           <div class="sec-label" id="a11yLabel" style="display:none">Accessibility &amp; Semantics</div>
@@ -783,7 +831,7 @@
           <input type="text" id="recFilterInput" class="ll-rec-filter-input" placeholder="Filter actions…" autocomplete="off" spellcheck="false" aria-label="Filter recorded actions">
           <button type="button" id="recFilterClear" class="ll-rec-filter-clear" title="Clear filter" aria-label="Clear filter" style="display: none;">✕</button>
         </div>
-        <div class="cards ll-rec-timeline" id="recorderTimeline" aria-live="polite" style="display: none;">
+        <div class="cards ll-rec-timeline" id="recorderTimeline" aria-live="polite" tabindex="-1" style="display: none;">
           <div class="ll-rec-empty">🎬 Hit <strong>Start Recording</strong> then use the page. Clicks, typing, hovers (Alt+click), and assertions are captured.</div>
         </div>
 
@@ -794,6 +842,10 @@
         </div>
         <div id="codePreview" class="code-preview-editor" contenteditable="true" spellcheck="false"
           role="textbox" aria-multiline="true" aria-label="Generated test script (editable)" style="display: none;"></div>
+        <div id="scriptStaleNotice" class="ll-script-stale" role="status" aria-live="polite" hidden>
+          <span id="scriptStaleText"></span>
+          <button type="button" class="clear-btn" id="scriptStaleSyncBtn" title="Replace the editor with freshly generated code from the timeline (discards your edits)">↻ Sync from timeline</button>
+        </div>
 
         <!-- Actions -->
         <div class="clear-btn-wrap" style="margin-top: 12px;">

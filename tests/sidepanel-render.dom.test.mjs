@@ -85,6 +85,68 @@ describe('safeRender', () => {
     expect(host.querySelector('#ok').getAttribute('href')).toBe('https://example.com');
   });
 
+  it('drops <style>, <form>, <meta>, <base>, <link> and SVG animation/script outright', () => {
+    safeRender(
+      host,
+      '<div id="keep">ok' +
+        '<style>body{display:none}</style>' +
+        '<form action="https://evil.test"><input name="q"></form>' +
+        '<meta http-equiv="refresh" content="0;url=https://evil.test">' +
+        '<base href="https://evil.test/">' +
+        '<link rel="stylesheet" href="https://evil.test/x.css">' +
+        '<svg><animate attributeName="href" to="javascript:alert(1)"/><set attributeName="onload" to="x"/><script>globalThis.__pwned=1</script></svg>' +
+        '<template><img src=x onerror="globalThis.__pwned=1"></template>' +
+        '</div>'
+    );
+    for (const sel of [
+      'style',
+      'form',
+      'input',
+      'meta',
+      'base',
+      'link',
+      'svg',
+      'animate',
+      'set',
+      'script',
+      'template',
+    ]) {
+      expect(host.querySelector(sel), sel).toBeNull();
+    }
+    expect(host.querySelector('#keep').textContent).toBe('ok');
+    expect(globalThis.__pwned).toBeUndefined();
+  });
+
+  it('strips dangerous attributes: formaction, srcdoc, xlink:href, obfuscated javascript: URLs', () => {
+    safeRender(
+      host,
+      '<button formaction="javascript:alert(1)">b</button>' +
+        '<a id="x" xlink:href="javascript:alert(1)" href="java\tscript:alert(1)">x</a>' +
+        '<a id="y" href=" JaVaScRiPt:alert(1)">y</a>' +
+        '<img id="z" srcdoc="<script>1</script>" src="data:image/svg+xml,<svg onload=alert(1)>">' +
+        '<div id="s" style="background:url(javascript:alert(1))">s</div>'
+    );
+    expect(host.querySelector('button').hasAttribute('formaction')).toBe(false);
+    expect(host.querySelector('#x').attributes).toHaveLength(1); // only id survives
+    expect(host.querySelector('#y').hasAttribute('href')).toBe(false);
+    expect(host.querySelector('#z').hasAttribute('srcdoc')).toBe(false);
+    expect(host.querySelector('#z').hasAttribute('src')).toBe(false);
+    expect(host.querySelector('#s').hasAttribute('style')).toBe(false);
+  });
+
+  it('keeps the attributes the panel templates rely on', () => {
+    safeRender(
+      host,
+      '<button type="button" class="copy-btn" data-code="a&amp;b" aria-label="Copy" aria-expanded="false" title="t" style="animation-delay:0.1s">Copy</button>'
+    );
+    const b = host.querySelector('button');
+    expect(b.getAttribute('data-code')).toBe('a&b');
+    expect(b.getAttribute('aria-label')).toBe('Copy');
+    expect(b.getAttribute('aria-expanded')).toBe('false');
+    expect(b.getAttribute('style')).toContain('animation-delay');
+    expect(b.className).toBe('copy-btn');
+  });
+
   it('replaces previous content rather than appending to it', () => {
     safeRender(host, '<p>first</p>');
     safeRender(host, '<p>second</p>');
@@ -207,6 +269,46 @@ describe('output target translation', () => {
       expect(line, `${fw}/${lang}`).toContain('row-2');
       expect(line, `${fw}/${lang}`).not.toContain('undefined');
     }
+  });
+});
+
+// A step recorded before structured targets existed only has the recorder's
+// Playwright-TS fullCode. Pasting that verbatim into a Selenium/Cypress/Python file
+// made the whole generated script unparseable.
+describe('steps that cannot be converted', () => {
+  const setOutput = (fw, lang) =>
+    vm.runInThisContext(`outFramework = ${JSON.stringify(fw)}; outLanguage = ${JSON.stringify(lang)};`);
+  afterEach(() => setOutput('playwright', 'typescript'));
+
+  const legacy = {
+    action: 'click',
+    code: "page.locator('#go')",
+    fullCode: "await page.locator('#go').click();",
+  };
+
+  it('keeps the Playwright line for Playwright JS/TS', () => {
+    setOutput('playwright', 'typescript');
+    expect(buildActionCode(legacy)).toBe(legacy.fullCode);
+  });
+
+  it('emits a language-appropriate TODO comment everywhere else', () => {
+    for (const [fw, lang, prefix] of [
+      ['selenium', 'python', '# TODO: could not convert step: click'],
+      ['playwright', 'python', '# TODO: could not convert step: click'],
+      ['selenium', 'javascript', '// TODO: could not convert step: click'],
+      ['cypress', 'typescript', '// TODO: could not convert step: click'],
+    ]) {
+      setOutput(fw, lang);
+      const line = buildActionCode(legacy);
+      expect(line.startsWith(prefix), `${fw}/${lang}: ${line}`).toBe(true);
+      expect(line).not.toContain('await ');
+      expect(line).not.toMatch(/[\r\n]/);
+    }
+  });
+
+  it('never leaks a newline out of the comment', () => {
+    setOutput('selenium', 'python');
+    expect(buildActionCode({ action: 'hover', code: "page.locator('a')\nimport os" })).not.toMatch(/\n/);
   });
 });
 
