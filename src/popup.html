@@ -98,6 +98,15 @@
     }
     .hint-row span { color: var(--brand); font-weight: 600; }
 
+    .popup-msg {
+      margin: 0 14px 10px;
+      padding: 8px 10px;
+      background: var(--surface-2); border: 1px solid var(--border); border-radius: var(--r-md);
+      color: var(--text-muted); font-size: 11px; line-height: 1.45;
+    }
+    .popup-msg.error { background: var(--danger-soft); border-color: var(--danger); color: var(--danger); }
+    .popup-msg[hidden] { display: none; }
+
     .capabilities {
       margin: 0 14px 14px;
       background: var(--surface); border: 1px solid var(--border); border-radius: var(--r-lg);
@@ -138,6 +147,7 @@
       <span id="panelBtnText">Open Results Panel</span>
     </button>
   </div>
+  <div class="popup-msg" id="popupMsg" role="status" aria-live="polite" hidden></div>
   <div class="hint-row" id="hintRow">
     Select a target · <span>▲▼ arrow to navigate</span> · <span>Esc to abort</span>
   </div>

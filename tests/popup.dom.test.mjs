@@ -19,6 +19,11 @@ const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 let sent; // every runtime.sendMessage the popup makes
 let responders; // type -> canned response, as the worker would answer
 let messageListeners;
+let calls; // ordered log of side-panel API calls and messages, to check the gesture path
+let sidePanelResult; // () => promise returned by chrome.sidePanel.open/close
+
+const WINDOW = 7;
+const flush = () => new Promise((r) => setTimeout(r, 0));
 
 beforeAll(() => {
   globalThis.chrome = {
@@ -26,10 +31,20 @@ beforeAll(() => {
       lastError: null,
       sendMessage: (msg, cb) => {
         sent.push(msg);
+        calls.push(`send:${msg.type}`);
         if (cb && responders[msg.type]) cb(responders[msg.type]);
       },
       onMessage: { addListener: (fn) => messageListeners.push(fn) },
       getManifest: () => ({ version: '1.3.0' }),
+    },
+    windows: {
+      getCurrent: (cb) => cb({ id: WINDOW }),
+    },
+    sidePanel: {
+      open: (arg) => {
+        calls.push(`open:${JSON.stringify(arg)}`);
+        return sidePanelResult();
+      },
     },
   };
   vm.runInThisContext(readFileSync(join(ROOT, 'src/popup.js'), 'utf8'), { filename: 'popup.js' });
@@ -54,15 +69,18 @@ beforeEach(() => {
   sent = [];
   responders = {};
   messageListeners = [];
+  calls = [];
+  sidePanelResult = () => Promise.resolve();
+  delete globalThis.chrome.sidePanel.close;
   mountPopup();
-  // popup.js is evaluated once, so its top-level `isInspecting` survives between
-  // tests. It is a global lexical binding, which is assignable from the same realm.
-  vm.runInThisContext('isInspecting = false;');
+  // popup.js is evaluated once, so its top-level state survives between tests.
+  // These are global lexical bindings, assignable from the same realm.
+  vm.runInThisContext('isInspecting = false; panelOpen = false; popupWindowId = null;');
 });
 
 describe('markup contract', () => {
   it('has every element popup.js reaches for', () => {
-    for (const id of ['inspectBtn', 'statusDot', 'btnIcon', 'btnText', 'hintRow', 'panelBtn']) {
+    for (const id of ['inspectBtn', 'statusDot', 'btnIcon', 'btnText', 'hintRow', 'panelBtn', 'popupMsg']) {
       expect(document.getElementById(id), id).not.toBeNull();
     }
     // openPanel() addresses the label as the second <span> of the button.
@@ -81,10 +99,10 @@ describe('version display', () => {
 });
 
 describe('opening the popup', () => {
-  it('asks the worker for both pieces of state it renders', () => {
+  it('asks the worker for both pieces of state it renders, for its own window', () => {
     open();
-    expect(types()).toContain('GET_INSPECT_STATE');
-    expect(types()).toContain('GET_PANEL_STATE');
+    expect(sent).toContainEqual({ type: 'GET_INSPECT_STATE', windowId: WINDOW });
+    expect(sent).toContainEqual({ type: 'GET_PANEL_STATE', windowId: WINDOW });
   });
 
   it('shows the idle state when nothing is active', () => {
@@ -123,8 +141,29 @@ describe('the inspect button', () => {
     open();
     sent.length = 0;
     document.getElementById('inspectBtn').click();
-    expect(types()).toEqual(['START_INSPECT']);
+    expect(sent).toEqual([{ type: 'START_INSPECT', windowId: WINDOW }]);
     expect(btnText()).toBe('Stop Inspecting');
+  });
+
+  // The worker used to open the panel after an async tab query, by which point the
+  // click's user gesture was gone and open() was rejected (C8).
+  it('opens the panel inside the click itself, before asking the worker to inspect', async () => {
+    open();
+    calls.length = 0;
+    document.getElementById('inspectBtn').click();
+    expect(calls).toEqual([`open:{"windowId":${WINDOW}}`, 'send:START_INSPECT']);
+    await flush();
+    expect(panelLabel()).toContain('Close');
+  });
+
+  it('goes back to idle and says why when the page refuses to be inspected', () => {
+    responders.START_INSPECT = { ok: false, error: "Locatra can't run on this page." };
+    open();
+    document.getElementById('inspectBtn').click();
+    expect(btnText()).toBe('Start Inspecting');
+    const msg = document.getElementById('popupMsg');
+    expect(msg.hidden).toBe(false);
+    expect(msg.textContent).toMatch(/can't run on this page/);
   });
 
   it('stops inspecting on a second click', () => {
@@ -150,6 +189,17 @@ describe('the inspect button', () => {
     expect(btnText()).toBe('Stop Inspecting');
   });
 
+  it("ignores another window's inspect changes, and pages' own broadcasts", () => {
+    responders.GET_INSPECT_STATE = { active: true };
+    open();
+    messageListeners.forEach((fn) => fn({ type: 'STOP_INSPECT', windowId: WINDOW + 1 }, {}));
+    expect(btnText()).toBe('Stop Inspecting');
+    messageListeners.forEach((fn) => fn({ type: 'STOP_INSPECT' }, { tab: { id: 3, windowId: WINDOW + 1 } }));
+    expect(btnText()).toBe('Stop Inspecting');
+    messageListeners.forEach((fn) => fn({ type: 'STOP_INSPECT', windowId: WINDOW }, {}));
+    expect(btnText()).toBe('Start Inspecting');
+  });
+
   it('ignores broadcasts it has no business acting on', () => {
     open();
     expect(() => messageListeners.forEach((fn) => fn({ type: 'RECORDED_ACTION', data: {} }))).not.toThrow();
@@ -158,39 +208,91 @@ describe('the inspect button', () => {
 });
 
 describe('the panel button', () => {
-  it('asks the worker to open the panel', () => {
+  it('opens the panel itself, synchronously, and only then says "Close"', async () => {
     open();
-    sent.length = 0;
+    calls.length = 0;
     document.getElementById('panelBtn').click();
-    expect(types()).toEqual(['OPEN_SIDE_PANEL']);
+    expect(calls).toEqual([`open:{"windowId":${WINDOW}}`]); // no worker hop
+    expect(panelLabel()).toContain('Open'); // not claimed before the browser agrees
+    await flush();
     expect(panelLabel()).toContain('Close');
   });
 
-  it('explains that Chrome cannot close the panel programmatically', () => {
-    // Chrome exposes no API for this, so the honest thing is to say so rather than
-    // send a message nothing will act on.
-    const alerts = [];
-    window.alert = (m) => alerts.push(m);
+  it('keeps offering "Open" and explains when the browser refuses', async () => {
+    sidePanelResult = () => Promise.reject(new Error('may only be called in response to a user gesture'));
     open();
-    document.getElementById('panelBtn').click(); // -> "Close ..."
-    sent.length = 0;
-    document.getElementById('panelBtn').click(); // -> asks to close
-
-    expect(sent).toHaveLength(0);
-    expect(alerts).toHaveLength(1);
-    expect(alerts[0]).toMatch(/does not support closing/i);
+    document.getElementById('panelBtn').click();
+    await flush();
+    expect(panelLabel()).toContain('Open');
+    expect(document.getElementById('popupMsg').textContent).toMatch(/user gesture/);
   });
 
-  it('closes the sidebar on Firefox, where the API exists', () => {
-    globalThis.browser = { sidebarAction: { close: () => {}, open: () => {} } };
+  it('closes the panel with chrome.sidePanel.close where Chrome has it', async () => {
+    const closed = [];
+    globalThis.chrome.sidePanel.close = (arg) => {
+      closed.push(arg);
+      return Promise.resolve();
+    };
+    responders.GET_PANEL_STATE = { active: true };
+    open();
+    document.getElementById('panelBtn').click();
+    expect(closed).toEqual([{ windowId: WINDOW }]);
+    await flush();
+    expect(panelLabel()).toContain('Open');
+  });
+
+  it('explains inline, without alert(), when Chrome cannot close the panel', () => {
+    const alerts = [];
+    window.alert = (m) => alerts.push(m);
+    responders.GET_PANEL_STATE = { active: true };
+    open();
+    sent.length = 0;
+    document.getElementById('panelBtn').click();
+
+    expect(sent).toHaveLength(0);
+    expect(alerts).toHaveLength(0);
+    const msg = document.getElementById('popupMsg');
+    expect(msg.hidden).toBe(false);
+    expect(msg.textContent).toMatch(/can't close the side panel/i);
+    expect(panelLabel()).toContain('Close');
+  });
+
+  it('opens and closes the sidebar on Firefox, where the API exists', async () => {
+    const log = [];
+    globalThis.browser = {
+      sidebarAction: {
+        open: () => {
+          log.push('open');
+          return Promise.resolve();
+        },
+        close: () => {
+          log.push('close');
+          return Promise.resolve();
+        },
+      },
+    };
     try {
       open();
-      document.getElementById('panelBtn').click(); // -> "Close ..."
-      sent.length = 0;
       document.getElementById('panelBtn').click();
-
-      expect(types()).toEqual(['CLOSE_SIDE_PANEL']);
+      await flush();
+      expect(panelLabel()).toContain('Close');
+      document.getElementById('panelBtn').click();
+      await flush();
+      expect(log).toEqual(['open', 'close']);
       expect(panelLabel()).toContain('Open');
+      expect(types()).not.toContain('OPEN_SIDE_PANEL');
+      expect(types()).not.toContain('CLOSE_SIDE_PANEL');
+    } finally {
+      delete globalThis.browser;
+    }
+  });
+
+  it("trusts Firefox's own answer about whether this window's sidebar is open", async () => {
+    globalThis.browser = { sidebarAction: { isOpen: (arg) => Promise.resolve(arg.windowId === WINDOW) } };
+    try {
+      open();
+      await flush();
+      expect(panelLabel()).toContain('Close');
     } finally {
       delete globalThis.browser;
     }
