@@ -20,7 +20,7 @@
 import { createHash } from 'node:crypto';
 import { existsSync, mkdirSync, readdirSync, readFileSync, rmSync } from 'node:fs';
 import { createServer } from 'node:http';
-import { dirname, join, resolve } from 'node:path';
+import { dirname, join, relative, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 import { chromium } from 'playwright';
@@ -28,7 +28,11 @@ import { chromium } from 'playwright';
 const HERE = dirname(fileURLToPath(import.meta.url));
 const ROOT = resolve(HERE, '../..');
 const EXTENSION = join(ROOT, 'dist/chrome');
-const OUT = join(ROOT, 'screenshots/store');
+// LOCATRA_SCREENSHOT_DIR captures somewhere other than the tracked images, e.g. to
+// check the script still works without touching the release artefacts.
+const OUT = process.env.LOCATRA_SCREENSHOT_DIR
+  ? resolve(process.env.LOCATRA_SCREENSHOT_DIR)
+  : join(ROOT, 'screenshots/store');
 
 // The demo is served over HTTP rather than opened as a file:// URL. The recorder
 // writes the page address into the generated test, and a file:// path would put
@@ -86,8 +90,8 @@ async function main() {
 
     // Note: the bodies passed to worker.evaluate / page.evaluate below are
     // serialised and run inside the browser, so they see `chrome` and `document`
-    // rather than any Node global. ESLint is told about those in .eslintrc.json.
-    const worker = await getServiceWorker(context);
+    // rather than any Node global. ESLint is told about those in eslint.config.mjs.
+    const worker = await getServiceWorker(context, extensionId);
     const toDemo = (message) =>
       worker.evaluate(async (msg) => {
         const tabs = await chrome.tabs.query({});
@@ -183,7 +187,11 @@ async function main() {
     await panel.click('[data-target="tab-inspector"]').catch(() => {});
     await page.bringToFront();
     // Routed through the worker, which is what injects into sub-frames.
-    await panel.evaluate(() => chrome.runtime.sendMessage({ type: 'START_INSPECT' }));
+    const windowId = await panel.evaluate(async () => (await chrome.windows.getCurrent()).id);
+    await panel.evaluate((msg) => chrome.runtime.sendMessage(msg).catch(() => undefined), {
+      type: 'START_INSPECT',
+      windowId,
+    });
     await page.waitForTimeout(700);
 
     const cardField = page.frameLocator('#payment-frame').locator('#card');
@@ -221,7 +229,7 @@ async function main() {
     await compose(composer, 'store-04-codegen.png', '06-lab-highlight.png', '08-generated-test.png');
     await compose(composer, 'store-05-iframes.png', '10-iframe-overlay.png', '11-iframe-locators.png');
 
-    console.log(`\n✓ written to ${OUT.replace(ROOT + '/', '')}/`);
+    console.log(`\n✓ written to ${relative(ROOT, OUT) || OUT}/`);
     console.log('  store-*.png are the 1280x800 images to upload; the rest are the raw captures.');
   } finally {
     await context.close();
@@ -312,10 +320,11 @@ function computeExtensionId(absolutePath) {
 }
 
 /** The background service worker, started by loading any extension page. */
-async function getServiceWorker(context) {
-  const [existing] = context.serviceWorkers();
+async function getServiceWorker(context, extensionId) {
+  const ours = (w) => w.url().startsWith(`chrome-extension://${extensionId}/`);
+  const existing = context.serviceWorkers().find(ours);
   if (existing) return existing;
-  return context.waitForEvent('serviceworker', { timeout: 15_000 });
+  return context.waitForEvent('serviceworker', { predicate: ours, timeout: 15_000 });
 }
 
 async function resolveExtensionId(context) {

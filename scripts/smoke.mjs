@@ -70,15 +70,25 @@ async function main() {
     page.on('console', (m) => m.type() === 'error' && pageErrors.push(m.text()));
 
     await page.goto(DEMO, { waitUntil: 'load' });
-    await page.waitForTimeout(500);
 
     const panel = await context.newPage();
     await panel.setViewportSize({ width: 460, height: 900 });
-    await panel.goto(`chrome-extension://${extensionId}/src/sidepanel.html`);
-    await panel.waitForTimeout(700);
+    await panel.goto(`chrome-extension://${extensionId}/src/sidepanel.html`, { waitUntil: 'load' });
 
-    const [worker] = context.serviceWorkers();
+    // An MV3 worker starts lazily and may not exist yet when the first extension
+    // page finishes loading; reading context.serviceWorkers() once raced that.
+    const worker = await waitForServiceWorker(context, extensionId);
     check('extension loads and the service worker is running', Boolean(worker));
+    if (!worker) throw new Error('no service worker — nothing further can be driven');
+
+    // The window the panel tab and the demo tab share. Messages sent the way the
+    // real panel sends them carry it, so the worker resolves the right active tab.
+    const windowId = await panel.evaluate(async () => (await chrome.windows.getCurrent()).id);
+    const viaWorker = (message) =>
+      panel.evaluate((msg) => chrome.runtime.sendMessage(msg).catch(() => undefined), {
+        ...message,
+        windowId,
+      });
 
     const toDemo = (message) =>
       worker.evaluate(async (msg) => {
@@ -91,22 +101,52 @@ async function main() {
         return true;
       }, message);
 
+    /** Resolve once the demo tab's top frame has a content script listening. */
+    const contentScriptReady = () =>
+      until(
+        () =>
+          worker.evaluate(async () => {
+            const tabs = await chrome.tabs.query({});
+            const t = tabs.find((x) => (x.url || '').includes('localhost:4174'));
+            if (!t) return false;
+            // "Receiving end does not exist" means no content script yet. Any
+            // other outcome — an answer, or a listener that did not reply — means
+            // one is there.
+            return chrome.tabs
+              .sendMessage(t.id, { type: 'PING' }, { frameId: 0 })
+              .then(() => true)
+              .catch((e) => !/Receiving end does not exist/i.test(String(e?.message ?? e)));
+          }),
+        { timeout: 10_000, what: 'content script in the demo page' }
+      );
+
+    const lastPick = () =>
+      worker.evaluate(async () => (await chrome.storage.local.get('lastElement')).lastElement);
+    const preview = () => panel.evaluate(() => document.getElementById('codePreview')?.innerText ?? '');
+
+    await contentScriptReady();
+
     console.log('\ninspect');
     await toDemo({ type: 'START_INSPECT' });
     await page.bringToFront();
-    await page.waitForTimeout(300);
+    // Inspect mode is live once its overlay exists; hovering earlier is a no-op.
+    await page.waitForSelector('#ll-overlay', { state: 'attached', timeout: 3000 }).catch(() => {});
 
     await page.locator('#email').hover();
     // Wait for the overlay to actually be positioned rather than sleeping: it is
     // created with a 1px border, so isVisible() is true before updateOverlay() has
     // ever run and a fixed delay races the first mouseover.
+    // Wait for it to sit over the target itself — an earlier pointer position can
+    // leave it over some other element first.
     await page
       .waitForFunction(
-        () => (document.getElementById('ll-overlay')?.getBoundingClientRect().width ?? 0) > 20,
+        () => {
+          const o = document.getElementById('ll-overlay')?.getBoundingClientRect();
+          const t = document.getElementById('email')?.getBoundingClientRect();
+          return Boolean(o && t && Math.abs(o.width - t.width) < 4 && Math.abs(o.y - t.y) < 4);
+        },
         null,
-        {
-          timeout: 5000,
-        }
+        { timeout: 5000 }
       )
       .catch(() => {});
 
@@ -124,11 +164,12 @@ async function main() {
 
     // A real click, hit-tested through document.elementFromPoint.
     await page.locator('#email').click();
-    await page.waitForTimeout(700);
+    await until(async () => (await lastPick())?.elementData?.id === 'email', {
+      timeout: 5000,
+      what: 'the pick to be stored',
+    }).catch(() => {});
 
-    const picked = await worker.evaluate(
-      async () => (await chrome.storage.local.get('lastElement')).lastElement
-    );
+    const picked = await lastPick();
     check(
       'clicking picks the element and stores the result',
       picked?.elementData?.id === 'email',
@@ -152,15 +193,21 @@ async function main() {
     check('ArrowUp walks to the parent element', await page.locator('#ll-overlay').isVisible());
 
     await page.keyboard.press('Escape');
-    await page.waitForTimeout(400);
+    await page
+      .waitForFunction(() => !document.getElementById('ll-overlay'), null, { timeout: 3000 })
+      .catch(() => {});
     check('Escape tears the overlay down', (await page.locator('#ll-overlay').count()) === 0);
 
     console.log('\nselector lab');
     await toDemo({ type: 'LAB_VALIDATE', selector: "page.getByRole('button', { name: 'Place order' })" });
-    await page.waitForTimeout(500);
+    await page
+      .waitForFunction(() => document.querySelectorAll('[data-locatra-lab]').length > 0, null, {
+        timeout: 3000,
+      })
+      .catch(() => {});
     check(
       'a pasted Playwright locator highlights its match',
-      (await page.locator('.ll-lab-highlight').count()) === 1
+      (await page.locator('[data-locatra-lab]').count()) === 1
     );
     check(
       'the highlight stylesheet is present without inspecting first',
@@ -168,33 +215,56 @@ async function main() {
     );
 
     await toDemo({ type: 'LAB_CLEAR' });
-    await page.waitForTimeout(300);
-    check('clear removes every highlight', (await page.locator('.ll-lab-highlight').count()) === 0);
+    await page
+      .waitForFunction(() => document.querySelectorAll('[data-locatra-lab]').length === 0, null, {
+        timeout: 3000,
+      })
+      .catch(() => {});
+    check('clear removes every highlight', (await page.locator('[data-locatra-lab]').count()) === 0);
 
     console.log('\nrecorder');
     await panel.bringToFront();
     await panel.click('[data-target="tab-recorder"]');
-    await panel.waitForTimeout(300);
+    // Addressed to the content script directly; the navigation check below covers
+    // the service-worker path.
     await toDemo({ type: 'START_RECORDING' });
-    await panel.waitForTimeout(300);
-
     await page.bringToFront();
+
     await page.click('#first-name');
     await page.fill('#first-name', 'Ada');
     await page.waitForTimeout(700);
-    await page.selectOption('#country', 'Ireland');
+    // page.selectOption() sets the value from script and dispatches untrusted
+    // events, which the recorder deliberately ignores (page scripts and input masks
+    // fire them too). ArrowDown on the focused, closed <select> is a real keystroke:
+    // Chromium moves to the next option and fires a trusted change.
+    await page.focus('#country');
+    await page.keyboard.press('ArrowDown');
     await page.waitForTimeout(500);
     await page.check('#gift-wrap');
     await page.waitForTimeout(500);
     await page.uncheck('#save-details');
     await page.waitForTimeout(500);
-    await page.click('[data-testid="place-order"]');
+    // A password field is added at runtime: the demo page is also the screenshot
+    // page, and a login form would not belong in the store images.
+    await page.evaluate(() => {
+      const input = document.createElement('input');
+      input.type = 'password';
+      input.id = 'smoke-password';
+      input.setAttribute('aria-label', 'Account password');
+      document.querySelector('[data-testid="place-order"]').before(input);
+    });
+    await page.fill('#smoke-password', 'hunter2-SMOKE');
     await page.waitForTimeout(700);
+    await page.click('[data-testid="place-order"]');
+    await page.waitForTimeout(300);
     await toDemo({ type: 'STOP_RECORDING' });
 
     await panel.bringToFront();
-    await panel.waitForTimeout(600);
-    const script = await panel.evaluate(() => document.getElementById('codePreview')?.innerText ?? '');
+    await until(async () => /place-order|Place order/.test(await preview()), {
+      timeout: 5000,
+      what: 'the last step to reach the script',
+    }).catch(() => {});
+    const script = await preview();
 
     check('a test script was generated', script.includes('@playwright/test'));
     check('the fill was captured', /\.fill\('Ada'\)/.test(script));
@@ -205,6 +275,16 @@ async function main() {
       /\.uncheck\(\)/.test(script),
       'the pointer handler used to emit check() before the control toggled'
     );
+
+    check(
+      'a typed password never reaches the script',
+      !script.includes('hunter2-SMOKE') && /process\.env\.LOCATRA_PASSWORD/.test(script),
+      script.slice(0, 600)
+    );
+    const stored = await panel.evaluate(
+      () => new Promise((resolve) => chrome.storage.local.get(null, (all) => resolve(JSON.stringify(all))))
+    );
+    check('a typed password is never written to storage', !stored.includes('hunter2-SMOKE'));
 
     const checkCalls = (script.match(/\.check\(\)/g) || []).length;
     check('a single tick produces exactly one step', checkCalls === 1, `found ${checkCalls} .check() calls`);
@@ -232,33 +312,74 @@ async function main() {
       );
     }
 
+    // Selenium can't reuse Playwright's getBy* engine, so its locators are XPath/CSS
+    // translations — and those once matched nothing for any labelled form field.
+    // Evaluate exactly what the Selenium export says, against the same live page.
+    console.log('\nselenium locators actually resolve');
+    panel.on('dialog', (d) => d.accept().catch(() => {}));
+    await panel.selectOption('#fwSelect', 'selenium');
+    await panel.selectOption('#langSelect', 'javascript');
+    await until(async () => /By\.(xpath|css)/.test(await preview()), {
+      timeout: 5000,
+      what: 'the Selenium script',
+    }).catch(() => {});
+    const seleniumScript = await preview();
+    const seleniumLocators = [
+      ...seleniumScript.matchAll(/By\.(xpath|css)\(((['"])(?:\\.|(?!\3)[^\\])*\3)\)/g),
+    ].map(([, by, literal]) => ({
+      by,
+      // eslint-disable-next-line no-new-func -- decoding our own generated string literal
+      selector: new Function(`return ${literal}`)(),
+    }));
+    check('Selenium locators were found', seleniumLocators.length >= 5, `found ${seleniumLocators.length}`);
+    for (const { by, selector } of seleniumLocators) {
+      const count = await page.evaluate(
+        ({ by, selector }) => {
+          if (by === 'css') return document.querySelectorAll(selector).length;
+          const r = document.evaluate(
+            selector,
+            document,
+            null,
+            7 /* XPathResult.ORDERED_NODE_SNAPSHOT_TYPE */,
+            null
+          );
+          return r.snapshotLength;
+        },
+        { by, selector }
+      );
+      check(`By.${by}(${selector.slice(0, 50)}) matches exactly 1 element`, count === 1, `matched ${count}`);
+    }
+    await panel.selectOption('#fwSelect', 'playwright');
+    await panel.selectOption('#langSelect', 'typescript');
+
     // Recording a real flow means navigating. Capture on the new page is re-armed by
     // the service worker from its own tab set, and nothing until now exercised that
     // hand-off end to end — a break here silently truncates every multi-page recording.
     console.log('\nrecording across a navigation');
     await panel.bringToFront();
     await panel.click('#clearTimelineBtn');
-    await panel.waitForTimeout(300);
-    // Drive this one through the service worker, exactly as the panel's Record
-    // button does: the worker is what remembers which tab is recording, and that
-    // memory is the whole mechanism being tested. Messaging the content script
-    // directly (as toDemo does) would skip it entirely.
+    // The worker is what remembers which tab is recording, and that memory is the
+    // whole mechanism being tested. Messaging the content script directly (as
+    // toDemo does) would skip it entirely.
     await page.bringToFront();
-    await panel.evaluate(() => chrome.runtime.sendMessage({ type: 'START_RECORDING' }));
-    await page.waitForTimeout(400);
+    await viaWorker({ type: 'START_RECORDING' });
 
     await page.click('[data-testid="account-menu"]');
     await page.waitForTimeout(400);
     await page.goto(`http://localhost:${PORT}/confirmation`, { waitUntil: 'load' });
-    await page.waitForTimeout(1200); // document_idle re-injection + the worker's re-arm
+    await contentScriptReady(); // document_idle injection on the new page
+    await page.waitForTimeout(400); // the worker's re-arm message follows the injection
     await page.click('#last-name');
     await page.fill('#last-name', 'Lovelace');
-    await page.waitForTimeout(800);
-    await panel.evaluate(() => chrome.runtime.sendMessage({ type: 'STOP_RECORDING' }));
+    await page.waitForTimeout(800); // the fill debounce
+    await viaWorker({ type: 'STOP_RECORDING' });
 
     await panel.bringToFront();
-    await panel.waitForTimeout(600);
-    const multiPage = await panel.evaluate(() => document.getElementById('codePreview')?.innerText ?? '');
+    await until(async () => /Lovelace/.test(await preview()), {
+      timeout: 5000,
+      what: 'the post-navigation fill',
+    }).catch(() => {});
+    const multiPage = await preview();
     check('the step before the navigation is kept', /account-menu/.test(multiPage), multiPage.slice(0, 400));
     check('capture resumes on the page navigated to', /Lovelace/.test(multiPage), multiPage.slice(0, 400));
 
@@ -269,16 +390,23 @@ async function main() {
     // frame-qualified, and Playwright is handed the result to resolve for real.
     console.log('\niframes');
     await page.bringToFront();
-    await panel.evaluate(() => chrome.runtime.sendMessage({ type: 'START_INSPECT' }));
-    await page.waitForTimeout(600);
+    await viaWorker({ type: 'START_INSPECT' });
+    // The worker injects into every frame; wait until the payment frame has it.
+    await page
+      .frameLocator('#payment-frame')
+      .locator('#ll-styles, #ll-overlay')
+      .first()
+      .waitFor({ state: 'attached', timeout: 5000 })
+      .catch(() => page.waitForTimeout(600));
 
     const cardField = page.frameLocator('#payment-frame').locator('#card');
     await cardField.click();
-    await page.waitForTimeout(700);
+    await until(async () => (await lastPick())?.elementData?.id === 'card', {
+      timeout: 5000,
+      what: 'the iframe pick to be stored',
+    }).catch(() => {});
 
-    const framePick = await worker.evaluate(
-      async () => (await chrome.storage.local.get('lastElement')).lastElement
-    );
+    const framePick = await lastPick();
     check(
       'an element inside an iframe can be picked at all',
       framePick?.elementData?.id === 'card',
@@ -315,6 +443,113 @@ async function main() {
       check(`${frameExpr.slice(0, 60)} matches exactly 1 element`, frameCount === 1, `matched ${frameCount}`);
     }
 
+    // Web components (Lit, Stencil — payment and chat widgets) render their iframe
+    // into a shadow root, where the document's MutationObserver and its capture
+    // `load` listener see nothing. The frame is added after Inspect is already on,
+    // so only the content script's own watcher can get it injected. Its title and
+    // src duplicate #payment-frame's, so the selector has to be structural — and
+    // it has to resolve through the shadow root the way Playwright resolves CSS.
+    console.log('\niframes inside shadow DOM');
+    await page.evaluate(() => {
+      const win = document.defaultView; // the eslint env for page bodies only knows `document`
+      win.customElements.define(
+        'smoke-pay-widget',
+        class extends win.HTMLElement {
+          connectedCallback() {
+            const root = this.shadowRoot || this.attachShadow({ mode: 'open' });
+            // Rendered a little later, the way component libraries batch their first render.
+            setTimeout(() => {
+              root.innerHTML =
+                '<div class="frame-wrap"><iframe title="Payment details" src="/payment-frame" ' +
+                'style="width: 100%; height: 150px; border: 0"></iframe></div>';
+            }, 50);
+          }
+        }
+      );
+      document.getElementById('payment-frame').after(document.createElement('smoke-pay-widget'));
+    });
+    await worker.evaluate(() => chrome.storage.local.remove('lastElement'));
+
+    const shadowFrame = page.frameLocator('smoke-pay-widget iframe');
+    let shadowInjected = true;
+    await shadowFrame
+      .locator('#ll-styles')
+      .waitFor({ state: 'attached', timeout: 8000 })
+      .catch(() => (shadowInjected = false));
+    check(
+      'an iframe added inside a shadow root after Inspect started gets the content script',
+      shadowInjected
+    );
+
+    await shadowFrame.locator('#card').click();
+    await until(async () => (await lastPick())?.elementData?.id === 'card', {
+      timeout: 5000,
+      what: 'the shadow-hosted iframe pick to be stored',
+    }).catch(() => {});
+    const shadowPick = await lastPick();
+    check(
+      'an element inside a shadow-hosted iframe can be picked',
+      shadowPick?.elementData?.id === 'card',
+      `picked ${JSON.stringify(shadowPick?.elementData?.id)}`
+    );
+
+    const shadowFrameSelector = shadowPick?.locators?.[0]?.target?.selector ?? '';
+    let addressesShadowFrame = false;
+    try {
+      const hits = page.locator(shadowFrameSelector);
+      addressesShadowFrame =
+        (await hits.count()) === 1 &&
+        (await hits.evaluate((el) => el.getRootNode().host?.localName)) === 'smoke-pay-widget';
+    } catch {
+      addressesShadowFrame = false;
+    }
+    check(
+      'the frame selector addresses exactly the shadow-hosted <iframe>',
+      addressesShadowFrame,
+      `selector ${JSON.stringify(shadowFrameSelector)}`
+    );
+
+    // Selenium and Cypress do not pierce shadow roots: they walk shadowPath one tree
+    // at a time (findElement → getShadowRoot(), cy.get → .shadow().find). Each hop
+    // must match exactly one element in its own tree, ending at this iframe.
+    const shadowPath = shadowPick?.locators?.[0]?.target?.shadowPath;
+    const walked = await page.evaluate((path) => {
+      if (!Array.isArray(path) || path.length < 2) return 'no shadowPath';
+      let scope = document;
+      let el = null;
+      for (let i = 0; i < path.length; i++) {
+        if (i > 0) scope = el.shadowRoot;
+        if (!scope) return `hop ${i}: no open shadow root`;
+        const hits = scope.querySelectorAll(path[i]);
+        if (hits.length !== 1) return `hop ${i} (${path[i]}) matched ${hits.length}`;
+        el = hits[0];
+      }
+      return el.localName === 'iframe' && el.getRootNode().host?.localName === 'smoke-pay-widget'
+        ? 'ok'
+        : 'ended elsewhere';
+    }, shadowPath);
+    check(
+      'the per-tree shadowPath for Selenium/Cypress walks to that <iframe>',
+      walked === 'ok',
+      `${walked} — ${JSON.stringify(shadowPath)}`
+    );
+
+    const shadowExpr = shadowPick?.locators?.[0]?.code ?? '';
+    let shadowCount = -1;
+    try {
+      // eslint-disable-next-line no-eval -- resolving our own generated locator is the point
+      shadowCount = await eval(shadowExpr).count();
+    } catch (err) {
+      check(`${shadowExpr.slice(0, 70)} resolves`, false, err.message.split('\n')[0]);
+    }
+    if (shadowCount !== -1) {
+      check(
+        `${shadowExpr.slice(0, 60)} matches exactly 1 element`,
+        shadowCount === 1,
+        `matched ${shadowCount}`
+      );
+    }
+
     await page.keyboard.press('Escape');
     await page.waitForTimeout(300);
 
@@ -325,9 +560,12 @@ async function main() {
       pageErrors.slice(0, 3).join(' | ')
     );
 
-    await panel.reload();
-    await panel.waitForTimeout(800);
-    const restored = await panel.evaluate(() => document.getElementById('codePreview')?.innerText ?? '');
+    await panel.reload({ waitUntil: 'load' });
+    await until(async () => (await preview()).includes('@playwright/test'), {
+      timeout: 5000,
+      what: 'the restored script',
+    }).catch(() => {});
+    const restored = await preview();
     check('the recording survives reopening the panel', restored.includes('@playwright/test'));
   } finally {
     await context.close();
@@ -338,6 +576,27 @@ async function main() {
   const passed = results.length - failures;
   console.log(`\n${failures ? '✗' : '✓'} ${passed}/${results.length} checks passed`);
   if (failures) process.exit(1);
+}
+
+/**
+ * Poll an async condition until it holds. Rejects after `timeout` ms; callers that
+ * go on to assert the same condition catch that and let check() report it.
+ */
+async function until(fn, { timeout = 5000, interval = 100, what = 'condition' } = {}) {
+  const deadline = Date.now() + timeout;
+  for (;;) {
+    if (await fn().catch(() => false)) return;
+    if (Date.now() > deadline) throw new Error(`timed out after ${timeout}ms waiting for ${what}`);
+    await new Promise((r) => setTimeout(r, interval));
+  }
+}
+
+/** The extension's service worker: already running, or the next one to start. */
+async function waitForServiceWorker(context, extensionId, timeout = 15_000) {
+  const ours = (w) => w.url().startsWith(`chrome-extension://${extensionId}/`);
+  const existing = context.serviceWorkers().find(ours);
+  if (existing) return existing;
+  return context.waitForEvent('serviceworker', { predicate: ours, timeout }).catch(() => null);
 }
 
 function computeExtensionId(absolutePath) {

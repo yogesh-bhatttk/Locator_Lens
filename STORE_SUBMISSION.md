@@ -9,7 +9,8 @@ and addons.mozilla.org, plus the permission justifications reviewers ask for.
 
 ```bash
 npm ci
-npm run verify     # version check + lint + tests + build
+npm run verify     # version + format check, lint, tests with coverage, build
+npm run lint:firefox   # Mozilla's web-ext lint over dist/firefox (CI runs it too)
 ```
 
 `npm run build` writes to `dist/`:
@@ -21,8 +22,14 @@ npm run verify     # version check + lint + tests + build
 | `dist/locatra-chrome-<version>.zip`  | upload to the Chrome Web Store                            |
 | `dist/locatra-firefox-<version>.zip` | upload to AMO                                             |
 
-The build prints a SHA-256 for each archive. Builds are byte-reproducible, so the
-same commit always yields the same hash — record it with the submission.
+The build prints a SHA-256 for each archive, preceded by the Node and zlib versions
+that produced it. Archives are reproducible: file order, timestamps and permissions
+are fixed, so **the same commit built with the same Node major version (and
+therefore the same bundled zlib) yields the same hash**. A different zlib can
+compress the same bytes differently, so a hash may legitimately differ across Node
+majors even though the extracted files are identical. `.nvmrc` pins Node 22, which
+is what CI uses — record the hash and the printed `node`/`zlib` line with the
+submission.
 
 **Never zip the repository root.** `scripts/build.mjs` selects files from an
 explicit allowlist (`SHIP`) and refuses to produce a package that violates store
@@ -33,16 +40,31 @@ loaded a library from `unpkg.com` — remote code, and an automatic rejection.
 
 `scripts/build.mjs` fails, rather than warns, on:
 
-- a `<script>` or `<link>` pointing at an `http(s)` URL (remote code)
-- `eval()`, `new Function()`, `importScripts()` (dynamic code execution)
-- `fetch` / `XMLHttpRequest` (contradicts the "runs locally, no network" claim)
-- a manifest that references a file the package does not contain
+- remote code or resources: markup (`<script>`, `<link>`, `<iframe>`, `<img>`, …)
+  pointing at an `http(s)` or protocol-relative (`//cdn…`) URL, `import()` /
+  `import … from` a URL, `.src = 'https://…'` / `setAttribute('src', …)`, and CSS
+  `@import` / `url()` of a remote URL
+- dynamic code execution: `eval()`, `new Function()`, `importScripts()`, and
+  `setTimeout` / `setInterval` called with a string
+- network APIs: `fetch()`, `XMLHttpRequest`, `navigator.sendBeacon()`,
+  `WebSocket`, `EventSource` (they contradict the "runs locally, no network" claim)
+- a manifest, page or injection that references a file the package does not
+  contain — manifest keys (including `web_accessible_resources`), `<script src>` /
+  `<link href>` in the HTML pages, and the files `background.js` passes to
+  `scripting.executeScript`
 - **a permission nothing in the code uses**, an explicitly banned permission
   (`tabs`), or a permission with no evidence rule at all — the check fails closed,
-  so adding a permission requires a deliberate edit to `PERMISSION_EVIDENCE`
+  so adding a permission requires a deliberate edit to `PERMISSION_EVIDENCE`. The
+  same applies to `optional_permissions`; any host pattern outside `http://*/*` and
+  `https://*/*` (in host permissions, optional host permissions, content-script
+  matches or web-accessible-resource matches) is refused too
 
-`tests/package.test.mjs` re-asserts all of it against the built output, so CI
-catches a regression before an upload does.
+Comments are stripped before scanning, so a comment can neither trip a rule nor
+count as evidence that a permission is used. The rules live in
+`scripts/lib/policy.mjs`; `tests/package.test.mjs` drives them with fixtures that
+must fail, re-runs them over freshly built packages, and reads the archives back
+with independent zip readers (`unzip -t`, Python's `zipfile`, and a CRC-checking
+reader of its own).
 
 ### Prior rejection on record
 
@@ -98,15 +120,15 @@ maintained separately.
 
 **Data use** — answer every Chrome Web Store disclosure with _no collection_:
 
-| Question                     | Answer | Why                                                                                                     |
-| ---------------------------- | ------ | ------------------------------------------------------------------------------------------------------- |
-| Personally identifiable info | No     | none is read, derived or stored                                                                         |
-| Health, financial, auth info | No     | the extension never reads input values except the one it records into a test, which stays on the device |
-| Personal communications      | No     |                                                                                                         |
-| Location                     | No     |                                                                                                         |
-| Web history                  | No     | the recorded page URL is written into the generated script and stored locally, never transmitted        |
-| User activity                | No     | recording is explicit, local, and user-initiated                                                        |
-| Website content              | No     | page structure is read in-memory to compute a locator; nothing leaves the browser                       |
+| Question                     | Answer | Why                                                                                                                                                                     |
+| ---------------------------- | ------ | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Personally identifiable info | No     | none is read, derived or stored                                                                                                                                         |
+| Health, financial, auth info | No     | password, one-time-code and card fields are recorded without their value (tests read it from `LOCATRA_PASSWORD` / `LOCATRA_SECRET`); secret URL parameters are redacted |
+| Personal communications      | No     |                                                                                                                                                                         |
+| Location                     | No     |                                                                                                                                                                         |
+| Web history                  | No     | the recorded page URL (secret parameters redacted) is written into the generated script and stored locally, never transmitted                                           |
+| User activity                | No     | recording is explicit, local, and user-initiated                                                                                                                        |
+| Website content              | No     | page structure is read in-memory to compute a locator; nothing leaves the browser                                                                                       |
 
 Certify all three: no unauthorised use, no unauthorised transfer, no
 creditworthiness use. The package contains no network API at all, which
@@ -118,14 +140,14 @@ rather than merely asserted.
 Paste these into the Chrome Web Store "Privacy practices" tab. Each permission is
 exercised by the feature named; there are no unused permissions.
 
-| Permission                                   | Justification                                                                                                                                                                                                                             |
-| -------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `activeTab`                                  | Grants access to the tab the user is on at the moment they click Inspect, Record, Validate or Stress Test, so those actions work even when the user has restricted the extension's site access to "on click".                             |
-| `scripting`                                  | The inspector, recorder and Selector Lab are content scripts. When a page loaded before the extension did — or after an extension update — `chrome.scripting.executeScript` re-injects them so the user does not have to reload the page. |
-| `storage`                                    | Persists the user's framework/language choice, custom test-id attribute list, the last inspected element and the in-progress recording timeline. Local only; nothing is transmitted.                                                      |
-| `contextMenus`                               | Adds the right-click "Copy Best Locator" and "Open/Close Results Panel" entries.                                                                                                                                                          |
-| `sidePanel` (Chrome)                         | The results panel is the extension's primary UI surface.                                                                                                                                                                                  |
-| `host_permissions: http://*/* + https://*/*` | See below.                                                                                                                                                                                                                                |
+| Permission                                   | Justification                                                                                                                                                                                                                                                                                                                                                            |
+| -------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `activeTab`                                  | Grants access to the tab the user is on at the moment they click Inspect, Record, Validate or Stress Test (or use the context menu), so those actions keep working when the user has set the extension's site access to "on click" in Chrome or revoked its host permission in Firefox.                                                                                  |
+| `scripting`                                  | The inspector, recorder and Selector Lab are content scripts. When a page loaded before the extension did — or after an extension update — `chrome.scripting.executeScript` re-injects them so the user does not have to reload the page.                                                                                                                                |
+| `storage`                                    | `chrome.storage.local` keeps the user's framework/language choice, the last inspected element and the in-progress recording (timeline and script draft); `chrome.storage.session` keeps the service worker's inspect/recording state and steps recorded while the panel was closed. Passwords and one-time codes are never recorded. Local only; nothing is transmitted. |
+| `contextMenus`                               | Adds the right-click "Copy Best Locator" and "Open/Close Results Panel" entries.                                                                                                                                                                                                                                                                                         |
+| `sidePanel` (Chrome)                         | The results panel is the extension's primary UI surface.                                                                                                                                                                                                                                                                                                                 |
+| `host_permissions: http://*/* + https://*/*` | See below.                                                                                                                                                                                                                                                                                                                                                               |
 
 ### Broad host access
 
@@ -137,11 +159,17 @@ exercised by the feature named; there are no unused permissions.
 > The grant is narrowed to `http://*/*` and `https://*/*` rather than `<all_urls>`:
 > the extension analyses web pages, so it has no use for `file://`, `ftp://` or any
 > other scheme, and does not ask for them.
-> The extension reads the DOM of a page only while the user has explicitly started
-> Inspect, Record or Selector Lab on it, uses the result solely to generate locator
-> text shown in the side panel, and transmits nothing: there is no backend, no
+> The content script is declared for http(s) pages and loads at `document_idle`.
+> Until the user starts a feature it only reads the extension's own settings from
+> local storage, listens for right-clicks (so "Copy Best Locator" knows its
+> target), and tells the extension's service worker it is ready so an in-progress
+> recording can continue after a navigation — it reads no page content. Element
+> details are read only while the user runs Inspect, Record, Selector Lab, Stress
+> Test or Copy Best Locator, are used solely to generate locator and test code
+> shown in the side panel, and are never transmitted: there is no backend, no
 > analytics and no network request of any kind. This is verifiable — the packaged
-> code contains no `fetch` or `XMLHttpRequest`, which the build enforces.
+> code contains no `fetch`, `XMLHttpRequest`, `sendBeacon`, `WebSocket` or
+> `EventSource`, which the build enforces.
 
 ### Data handling declarations
 
@@ -170,7 +198,7 @@ Every image is a real capture — nothing is drawn or mocked up.
 | `store-03-recorder.png`     | 1280×800 | ✅ the recorder timeline                                            |
 | `store-04-codegen.png`      | 1280×800 | ✅ the generated test script                                        |
 | `store-05-iframes.png`      | 1280×800 | ✅ a field inside a payment iframe, addressed with `frameLocator()` |
-| `01`–`09-*.png`             | native   | raw captures — source material, and fine for AMO                    |
+| `01`–`11-*.png`             | native   | raw captures — source material, and fine for AMO                    |
 
 The `store-*` images place the real page capture and the real panel capture at the
 geometry Chrome uses with a side panel docked (820 + 460 = 1280). They are a layout
@@ -197,11 +225,12 @@ feature that exists.
 - [ ] permission justifications from §4 pasted in
 - [ ] privacy policy URL set and reachable
 - [ ] data-collection questions all answered "no"
-- [ ] upload the four `store-*.png` images from §5 (1280×800, real captures)
+- [ ] upload the five `store-*.png` images from §5 (1280×800, real captures), and
+      the two `promo-*.png` tiles (`npm run promo`)
 
 ## 7. AMO checklist
 
-- [ ] `npm run verify` and `npm run smoke` pass
+- [ ] `npm run verify`, `npm run lint:firefox` and `npm run smoke` pass
 - [ ] version strictly greater than the currently listed one
 - [ ] upload `dist/locatra-firefox-<version>.zip`
 - [ ] source code is unminified and unbundled — the package ships the same files as

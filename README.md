@@ -1,7 +1,7 @@
 # Locatra — locator inspector & test recorder
 
 [![Chrome](https://img.shields.io/badge/Chrome-Available-green?logo=google-chrome&logoColor=white)](https://chromewebstore.google.com/detail/locatorlens-%E2%80%93-smart-locat/amnagildbdfgfcjijilomhelgdbpgmeb)
-[![Firefox](https://img.shields.io/badge/Firefox-Ready-orange?logo=firefox-browser&logoColor=white)]()
+![Firefox](https://img.shields.io/badge/Firefox-Ready-orange?logo=firefox-browser&logoColor=white)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 
 **Locatra** is a browser extension for end-to-end test authoring: inspect any element to get **ranked, uniqueness-checked locators**, validate selectors, and **record a flow into a runnable test** — all from the side panel. Output targets **Playwright, Selenium, or Cypress** in **TypeScript, JavaScript, or Python** (Cypress is JS/TS only).
@@ -59,7 +59,8 @@ with `package.json` and both browser manifests by `node scripts/version.mjs`.
 
 ### Recorder (side panel)
 
-- Captures clicks, typing (debounced fills), selects, key presses, **hovers** (Alt+click), and **assertions** (visible / has-text / has-value / enabled / checked).
+- Captures clicks, typing (debounced fills), selects, key presses, file **uploads** (`setInputFiles`), **hovers** (Alt+click), and **assertions** (visible / has-text / has-value / enabled / checked).
+- **Secrets stay out of tests:** password and one-time-code fields are recorded without their value — the generated script reads `process.env.LOCATRA_PASSWORD` / `LOCATRA_SECRET` (or the framework's equivalent) instead — and secret-looking URL parameters (`password`, `token`, `api_key`, …) are written as `REDACTED`.
 - **Pause/resume**, **undo/redo**, a **filterable, collapsible timeline**, and recording that **survives full-page navigation**.
 - Produces an editable, **syntax-highlighted** test script in your chosen framework + language; copy or download.
 
@@ -87,24 +88,34 @@ npm run build          # writes dist/chrome/, dist/firefox/ and a .zip for each
 1. Open `about:debugging#/runtime/this-firefox`.
 2. **Load Temporary Add-on…** → select **`dist/firefox/manifest.json`**.
 
-To load straight from the source tree instead, run `./setup.sh chrome`
-(or `setup.bat chrome` on Windows) to put the right manifest at the project root,
-then load the root folder. Use `dist/` for anything you intend to submit — see
+To load straight from the source tree in Chrome instead, load the repository root:
+the root `manifest.json` is always the Chrome manifest. Firefox has no equivalent —
+its manifest differs — so `./setup.sh firefox` (or `setup.bat firefox` on Windows)
+builds `dist/firefox/` and tells you what to load; it never rewrites tracked files.
+Use `dist/` for anything you intend to submit — see
 [STORE_SUBMISSION.md](STORE_SUBMISSION.md).
 
 ---
 
 ## Development
 
-| Command                 | What it does                                                                                                           |
-| ----------------------- | ---------------------------------------------------------------------------------------------------------------------- |
-| `npm run lint`          | ESLint over `src/`, `scripts/`, `tests/`                                                                               |
-| `npm test`              | Vitest — 271 tests across codegen, locator engine, content scripts, the service worker, rendering and package contents |
-| `npm run build`         | Reproducible Chrome + Firefox packages in `dist/`                                                                      |
-| `npm run version:check` | Assert `package.json` and all three manifests agree                                                                    |
-| `npm run screenshots`   | Capture store listing images from the built extension                                                                  |
-| `npm run smoke`         | Drive the built extension in a real browser (27 end-to-end checks)                                                     |
-| `npm run verify`        | Version check + lint + tests + build — run this before submitting                                                      |
+| Command                 | What it does                                                                                                 |
+| ----------------------- | ------------------------------------------------------------------------------------------------------------ |
+| `npm run lint`          | ESLint (flat config, `eslint.config.mjs`) over `src/`, `scripts/`, `tests/`                                  |
+| `npm run format:check`  | Prettier check over scripts, tests, configs and docs (`src/` is excluded — see `.prettierignore`)            |
+| `npm test`              | Vitest suites for codegen, the locator engine, content scripts, the service worker, the panels and packaging |
+| `npm run test:coverage` | The same suites with V8 coverage and the thresholds in `vitest.config.mjs` enforced                          |
+| `npm run build`         | Reproducible Chrome + Firefox packages in `dist/`                                                            |
+| `npm run lint:firefox`  | Mozilla's `web-ext lint` over `dist/firefox` (fetched on demand with `npx`; run after `npm run build`)       |
+| `npm run version:check` | Assert `package.json`, the lockfile and all three manifests agree                                            |
+| `npm run screenshots`   | Capture store listing images from the built extension                                                        |
+| `npm run smoke`         | Drive the built extension end to end in a real Chromium                                                      |
+| `npm run verify`        | Version check + format check + lint + tests with coverage + build — run this before submitting               |
+
+CI runs the version check, format check, lint, coverage, build, `web-ext lint` and
+the smoke test (under `xvfb`) on every push and pull request. A pre-commit hook runs Prettier and ESLint over staged files via
+`lint-staged`. Use the Node version in `.nvmrc` (22) — see
+[STORE_SUBMISSION.md](STORE_SUBMISSION.md) for why it matters to reproducible builds.
 
 `npm run build` selects files from an explicit allowlist and **fails** if the result
 would contain remote code, `eval`, a network API, a stray file, a manifest reference
@@ -141,7 +152,7 @@ all generated by `npm run screenshots` from the built extension.
 ├── tests/                      # Vitest suites
 ├── screenshots/store/          # Store listing images (regenerable)
 ├── icons/
-└── manifest.json               # Primary manifest — a copy of one manifests/ variant
+└── manifest.json               # Root manifest — always identical to manifests/manifest.chrome.json
 ```
 
 Also: [STORE_SUBMISSION.md](STORE_SUBMISSION.md) (submission process and permission
@@ -154,18 +165,18 @@ justifications), [build_process.md](build_process.md) (architecture),
 
 Locatra requests only what it needs to inspect pages and drive the side panel locally — there is no network/host call to any Locatra server.
 
-| Permission                                        | Why it’s needed                                                            |
-| ------------------------------------------------- | -------------------------------------------------------------------------- |
-| `activeTab`                                       | act on the tab you’re currently viewing                                    |
-| `scripting` + host access (`<all_urls>`)          | inject the inspector/recorder content scripts into the page you’re testing |
-| `storage`                                         | remember your last pick, recorder timeline, and framework/language choice  |
-| `contextMenus`                                    | the right-click “Copy Best Locator” / “Open Panel” entries                 |
-| `sidePanel` (Chrome) · `sidebar_action` (Firefox) | the side-panel / sidebar surface                                           |
+| Permission                                              | Why it’s needed                                                                                |
+| ------------------------------------------------------- | ---------------------------------------------------------------------------------------------- |
+| `activeTab`                                             | act on the tab you’re using when you invoke a feature, even with site access set to “on click” |
+| `scripting` + host access (`http://*/*`, `https://*/*`) | inject the inspector/recorder content scripts into the page you’re testing                     |
+| `storage`                                               | remember your last pick, recorder timeline, and framework/language choice — on device          |
+| `contextMenus`                                          | the right-click “Copy Best Locator” / panel entries                                            |
+| `sidePanel` (Chrome) · `sidebar_action` (Firefox)       | the side-panel / sidebar surface                                                               |
 
 `tabs` is deliberately **not** requested — everything the extension does with
 `chrome.tabs` works without it, and the build fails if it ever reappears.
 
-Cross-browser: the same `src/` runs on both; Chrome loads a service-worker background, Firefox a module background script, and the Firefox manifest declares `gecko.id`, `strict_min_version: 142.0`, and `data_collection_permissions: none`. See `build_process.md` §11 for the full breakdown.
+Cross-browser: the same `src/` runs on both (Chrome 116+, Firefox 142+); Chrome loads a service-worker background, Firefox a module background script, and the Firefox manifest declares `gecko.id`, `strict_min_version: 142.0`, and `data_collection_permissions: none`. See `build_process.md` §11 for the full breakdown.
 
 ## Engineering notes
 

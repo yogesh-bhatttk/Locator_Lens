@@ -46,6 +46,7 @@ This document describes how the extension is structured and how distribution fol
 
 - Recorded actions (with their structured `target`) live in **`chrome.storage.local`** (`llRecorderState`) and render in a **filterable, collapsible** timeline.
 - Captures clicks, fills, selects, key presses, **hover** (Alt+click), and **assertions** (visible / has-text / has-value / enabled / checked); supports **pause/resume** and **undo/redo**, and **re-arms after full-page navigation** (background tracks recording tabs).
+- **Secrets are never recorded:** a fill into a password / one-time-code / card field is stored with an empty value and `sensitive: true`, and codegen emits a read of `LOCATRA_PASSWORD` or `LOCATRA_SECRET` from the environment instead. Credential-like URL parameters are replaced with `REDACTED` before a URL is stored or emitted. File inputs record an **upload** step (file names only) that becomes `setInputFiles` / `send_keys` / `selectFile`.
 - **generateTestScript** runs each step through `codegen` and wraps it in the right scaffold for the chosen framework/language; the editable, syntax-highlighted editor's current text is what **Copy** / **Download** use.
 
 ---
@@ -54,8 +55,13 @@ This document describes how the extension is structured and how distribution fol
 
 `npm run build` (`scripts/build.mjs`) is the only supported way to produce a package.
 It writes `dist/chrome/` and `dist/firefox/` plus a versioned `.zip` for each, and
-prints a SHA-256 per archive. Builds are byte-reproducible: the same commit always
-yields the same hash.
+prints a SHA-256 per archive, preceded by the Node and zlib versions used. Archives
+are reproducible — sorted entries, a fixed timestamp, fixed Unix permissions — so the
+same commit built with the same Node major (and so the same bundled zlib) yields the
+same hash. Deflate output can differ between zlib releases, so hashes are only
+comparable across machines on the same Node major; `.nvmrc` pins Node 22, as CI does.
+`--out-dir <dir>` (or `LOCATRA_OUT_DIR`) writes somewhere other than `dist/`; the test
+suite uses it so `npm test` never touches your real packages.
 
 The shipping file set is an **allowlist** (the `SHIP` array in the script), not an
 ignore list. Adding a file to a package has to be a deliberate edit. This replaced a
@@ -63,13 +69,19 @@ flow that swapped `manifest.json` at the repo root and zipped the whole director
 which had no file selection at all, and so shipped a generated report page that
 loaded a library from a CDN. Remote code is an automatic rejection on both stores.
 
-The build refuses to emit a package containing remote `<script>`/`<link>` URLs,
-`eval` / `new Function` / `importScripts`, `fetch` / `XMLHttpRequest`, or a manifest
-reference it cannot resolve. `tests/package.test.mjs` re-checks all of it against the
-built output in CI.
+The build refuses to emit a package containing remote code or resources (markup,
+`import()`, `.src` assignments or CSS pointing at `http(s)://` or `//` URLs), dynamic
+code (`eval`, `new Function`, `importScripts`, string `setTimeout`/`setInterval`), a
+network API (`fetch`, `XMLHttpRequest`, `sendBeacon`, `WebSocket`, `EventSource`), a
+reference it cannot resolve (manifest keys, `<script src>`/`<link href>` in the pages,
+`executeScript` files), or a permission or host pattern outside the reviewed policy.
+Comments are stripped before any of this is scanned. The rules live in
+`scripts/lib/policy.mjs`; `tests/package.test.mjs` unit-tests them with fixtures that
+must fail and re-runs them against freshly built packages.
 
-`setup.sh` / `setup.bat` remain for local unpacked loading from the repo root; they
-only copy a manifest variant to `manifest.json` and produce nothing submittable.
+`setup.sh` / `setup.bat` are development helpers and never modify tracked files: for
+Chrome they point you at the repository root (whose `manifest.json` is always the
+Chrome manifest); for Firefox they build `dist/firefox/` and print the path to load.
 
 Full submission process and permission justifications: **`STORE_SUBMISSION.md`**.
 
@@ -133,19 +145,20 @@ The **💥 Stress Test** button (next to the target metadata) checks whether the
 
 `src/` is shared by both browsers; only the manifest differs. There are exactly
 three manifests — the root one plus the two in `manifests/` — and `scripts/version.mjs`
-keeps their versions in step. `setup.sh` / `setup.bat` copy one of the variants over
-the root `manifest.json` for the load-from-root workflow.
+keeps their versions in step. The root `manifest.json` is always byte-identical to
+`manifests/manifest.chrome.json` (a test enforces it), so Chrome can load the
+repository root directly. The Chrome manifest sets `minimum_chrome_version: "116"`.
 
 **Declared permissions and why they are needed**
 
-| Permission / key                             | Used by                                                                                                                                                                                                                                                     |
-| -------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `activeTab`                                  | Host access to the tab the user is on at the moment they invoke a feature. Keeps Inspect / Record / Lab / Stress Test working for users who restrict the extension's site access to "on click". It gates no API, so there is no call signature to point at. |
-| `scripting` + `host_permissions: <all_urls>` | `chrome.scripting.executeScript` (inject content scripts on demand for the Lab relay, Stress Test, context-menu copy) and content-script messaging on any page                                                                                              |
-| `storage`                                    | `chrome.storage.local` (last picked element, recorder state, framework/language, custom test attributes)                                                                                                                                                    |
-| `contextMenus`                               | the “Copy Best Locator” / “Open/Close Panel” entries                                                                                                                                                                                                        |
-| `sidePanel` + `side_panel` (Chrome)          | the side-panel surface                                                                                                                                                                                                                                      |
-| `sidebar_action` (Firefox)                   | the sidebar surface — Firefox has **no** `sidePanel` permission; `background.js` detects this and falls back from `chrome.sidePanel` to `browser.sidebarAction`                                                                                             |
+| Permission / key                                          | Used by                                                                                                                                                                                                                                                                                                                                  |
+| --------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `activeTab`                                               | Host access to the tab the user is on at the moment they invoke a feature. Keeps Inspect / Record / Lab / Stress Test working for users who set Chrome site access to "on click" or revoke Firefox host permissions. It gates no API, so there is no call signature to point at (`HOST_ACCESS_PERMISSIONS` in `scripts/lib/policy.mjs`). |
+| `scripting` + `host_permissions: http://*/*, https://*/*` | `chrome.scripting.executeScript` (inject content scripts on demand — pages that loaded before the extension, sub-frames for Inspect/Record, the Lab relay, Stress Test, context-menu copy) and content-script messaging on any web page                                                                                                  |
+| `storage`                                                 | `chrome.storage.local` (last picked element, recorder timeline and script draft, framework/language) and `chrome.storage.session` (worker state, steps buffered while the panel is closed)                                                                                                                                               |
+| `contextMenus`                                            | the “Copy Best Locator” / panel entries                                                                                                                                                                                                                                                                                                  |
+| `sidePanel` + `side_panel` (Chrome)                       | the side-panel surface                                                                                                                                                                                                                                                                                                                   |
+| `sidebar_action` (Firefox)                                | the sidebar surface — Firefox has **no** `sidePanel` permission; `background.js` detects this and falls back from `chrome.sidePanel` to `browser.sidebarAction`                                                                                                                                                                          |
 
 ### The `tabs` permission is deliberately **not** requested
 
@@ -178,20 +191,24 @@ cannot quietly stop being true.
 
 ## 12. Tests and CI
 
-`npm test` runs five Vitest suites (152 tests). They drive the real shipping files —
+`npm test` runs the Vitest suites below. They drive the real shipping files —
 nothing is duplicated or re-implemented for testability.
 
-| Suite                                 | Environment | Covers                                                                                                                                                                                          |
-| ------------------------------------- | ----------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `tests/codegen.test.mjs`              | node        | Every framework × language combination, action and assertion statements, script scaffolding, and escaping of values containing quotes, backslashes and newlines                                 |
-| `tests/locator-engine.dom.test.mjs`   | jsdom       | Role resolution, accessible-name computation, ranking and stability, live uniqueness counts, the a11y audit, and CSS-special identifiers                                                        |
-| `tests/content-script.dom.test.mjs`   | jsdom       | Loads all three content scripts in manifest order behind a `chrome` stub and drives them through the background's message API — inspect lifecycle, Selector Lab, Stress Test, recorder controls |
-| `tests/sidepanel-render.dom.test.mjs` | jsdom       | `esc` / `hl` / `safeRender`, including that inline event handlers, `<script>` and `javascript:` URLs never survive rendering                                                                    |
-| `tests/package.test.mjs`              | node        | Builds both packages and asserts the store contract against the built bytes                                                                                                                     |
+| Suite                                 | Environment | Covers                                                                                                                                                                                                                                                 |
+| ------------------------------------- | ----------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `tests/codegen.test.mjs`              | node        | Every framework × language combination, action and assertion statements, script scaffolding, and escaping of values containing quotes, backslashes and newlines                                                                                        |
+| `tests/locator-engine.dom.test.mjs`   | jsdom       | Role resolution, accessible-name computation, ranking and stability, live uniqueness counts, the a11y audit, and CSS-special identifiers                                                                                                               |
+| `tests/content-script.dom.test.mjs`   | jsdom       | Loads all three content scripts in manifest order behind a `chrome` stub and drives them through the background's message API — inspect lifecycle, Selector Lab, Stress Test, recorder controls                                                        |
+| `tests/sidepanel-render.dom.test.mjs` | jsdom       | `esc` / `hl` / `safeRender`, including that inline event handlers, `<script>` and `javascript:` URLs never survive rendering, plus panel startup, recorder timeline and script-editor behaviour                                                        |
+| `tests/background.test.mjs`           | node        | The service worker, run in fresh `node:vm` contexts over a shared `chrome` stub — message routing, injection and recording state across worker eviction                                                                                                |
+| `tests/popup.dom.test.mjs`            | jsdom       | The popup launcher's buttons and its state sync with the service worker                                                                                                                                                                                |
+| `tests/package.test.mjs`              | node        | The store-policy rules (`scripts/lib/policy.mjs`) against fixtures that must fail; both packages built into a temp dir and checked; archives read back with `unzip -t`, Python `zipfile` and a CRC-checking reader; docs checked against the manifests |
 
-`.github/workflows/ci.yml` runs version check → lint → tests → build on every push
-and pull request, and uploads both `.zip` files as artifacts. A pre-commit hook runs
-ESLint over staged files.
+`.github/workflows/ci.yml` runs version check → format check → lint → tests with
+coverage → build → `web-ext lint` (Mozilla's validator, over `dist/firefox`) on every
+push and pull request and uploads both `.zip` files as artifacts; a second job runs
+the browser smoke test below under `xvfb`. A pre-commit hook runs Prettier and ESLint
+over staged files via `lint-staged`.
 
 jsdom has no layout, so `document.elementFromPoint` (the picker's hit test),
 `innerText` semantics and the real message plumbing between content script, service
@@ -204,7 +221,7 @@ The side panel's HTML and CSS are still not tested; only its rendering helpers a
 Loads the **built** extension into Chromium and drives the whole product against
 the demo page — inspect and pick by real mouse hit test, keyboard traversal, Escape
 teardown, Selector Lab, and a recording that exercises fill / select / check /
-uncheck. 27 assertions.
+uncheck.
 
 The last group is the useful one: it extracts the locators the extension just wrote
 into the generated script and **runs them back through Playwright against the same
@@ -214,8 +231,8 @@ but does not resolve fails the run.
 It also asserts the content script writes nothing to the page console, and that a
 recording survives reopening the panel.
 
-Requires a display, so it is not part of `npm run verify` or CI. Run it before
-submitting:
+Requires a display, so it is not part of `npm run verify`; CI runs it under `xvfb`
+in its own job. Run it locally before submitting too:
 
 ```bash
 npm run build && npm run smoke

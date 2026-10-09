@@ -10,6 +10,10 @@
 // The store icon is the canonical identity; the tiles follow it, not the reverse.
 //
 //   node scripts/screenshots/promo.mjs
+//   LOCATRA_SCREENSHOT_DIR=/tmp/promo node scripts/screenshots/promo.mjs   # elsewhere
+//
+// The wordmark is a single colour: "Locatra" has no natural split the way the old
+// two-word name did, and the green accent rule beneath it carries the second tone.
 //
 // Store requirements honoured here: exact canvas sizes, 24-bit PNG with no alpha
 // channel, artwork bleeding to every edge (no letterboxing), and restrained text —
@@ -43,7 +47,11 @@ function resolveChromium() {
 }
 
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '../..');
-const OUT = join(ROOT, 'screenshots', 'store');
+// LOCATRA_SCREENSHOT_DIR renders somewhere other than the tracked images, e.g. to
+// check the script still works without touching the release artefacts.
+const OUT = process.env.LOCATRA_SCREENSHOT_DIR
+  ? resolve(process.env.LOCATRA_SCREENSHOT_DIR)
+  : join(ROOT, 'screenshots', 'store');
 
 const NAVY_DEEP = '#15212F';
 const NAVY_LIFT = '#253347';
@@ -93,7 +101,6 @@ function shell(w, h, body) {
     }
     .wrap{position:relative;width:100%;height:100%;display:flex;align-items:center}
     .word{font-weight:700;letter-spacing:-.022em;line-height:1;white-space:nowrap}
-    .word .lens{color:${GREEN}}
     .tag{color:#93A7BD;font-weight:500;line-height:1.35}
     .rule{background:linear-gradient(90deg,${GREEN},rgba(75,208,96,0));border-radius:2px}
     code{font-family:'DejaVu Sans Mono',ui-monospace,Menlo,Consolas,monospace}
@@ -110,7 +117,7 @@ function smallTile() {
     `<div style="width:100%;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:16px;padding:0 28px">
        ${crosshair(92)}
        <div style="display:flex;flex-direction:column;align-items:center;gap:9px">
-         <div class="word" style="font-size:41px">Locator<span class="lens">Lens</span></div>
+         <div class="word" style="font-size:41px">Locatra</div>
          <div class="rule" style="width:104px;height:3px"></div>
          <div class="tag" style="font-size:15.5px;letter-spacing:.055em;text-transform:uppercase">Smart Locator Automation</div>
        </div>
@@ -129,7 +136,7 @@ function marqueeTile() {
          ${crosshair(232)}
        </div>
        <div style="flex:1 1 auto;min-width:0">
-         <div class="word" style="font-size:104px">Locator<span class="lens">Lens</span></div>
+         <div class="word" style="font-size:104px">Locatra</div>
          <div class="rule" style="width:232px;height:5px;margin:26px 0 24px"></div>
          <div class="tag" style="font-size:31px;max-width:830px">
            Inspect any element. Get ranked, uniqueness-checked locators for
