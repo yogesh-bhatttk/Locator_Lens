@@ -1217,6 +1217,19 @@ describe('step thumbnails', () => {
     expect(thumbImg(0).getAttribute('src')).toBe(urls.made[1]);
   });
 
+  it('THUMBS_CLEARED (Settings → clear screenshots) releases every thumbnail', async () => {
+    stored.set('t1', thumbRecord('t1'));
+    boot();
+    record(shot({ eventId: 't1' }));
+    await flush();
+    expect(thumbImg(0)).not.toBeNull();
+    stored.clear();
+    port({ type: 'THUMBS_CLEARED', windowId: WIN, all: true });
+    await flush();
+    expect(urls.revoked).toContain(urls.made[0]);
+    expect(thumbImg(0)).toBeNull();
+  });
+
   it('ignores STEP_THUMBNAIL for unknown steps and other windows', async () => {
     boot();
     record(shot({ eventId: 't1' }));
@@ -1422,6 +1435,13 @@ describe('step thumbnails', () => {
   it('loads thumbs-store.js before sidepanel.js', () => {
     const html = readFileSync(join(ROOT, 'src/sidepanel.html'), 'utf8');
     const scripts = [...html.matchAll(/<script src="([^"]+)"/g)].map((m) => m[1]);
-    expect(scripts).toEqual(['codegen.js', 'thumbs-store.js', 'sidepanel.js']);
+    expect(scripts).toEqual([
+      'codegen.js',
+      'codegen-java.js',
+      'codegen-csharp.js',
+      'codegen-wdio.js',
+      'thumbs-store.js',
+      'sidepanel.js',
+    ]);
   });
 });

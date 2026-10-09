@@ -443,7 +443,7 @@
     .str { color: var(--str-c); }
     .num { color: var(--num-c); }
 
-    .copy-btn {
+    .copy-btn, .watch-btn {
       flex-shrink: 0;
       min-height: 28px;
       padding: 5px 11px;
@@ -454,7 +454,7 @@
       font-size: 11px; font-weight: 600;
       transition: background .16s ease, color .16s ease, border-color .16s ease;
     }
-    .copy-btn:hover { background: var(--brand-soft); color: var(--brand); border-color: var(--brand-soft-2); }
+    .copy-btn:hover, .watch-btn:hover { background: var(--brand-soft); color: var(--brand); border-color: var(--brand-soft-2); }
     .copy-btn.done { color: var(--success); border-color: var(--success); }
 
     .why-row { padding: 6px 14px; background: var(--surface); display: flex; justify-content: flex-end; }
@@ -770,6 +770,80 @@
     .ll-pom-err { grid-column: 2; font-size: 10px; color: var(--danger); }
     .ll-pom-preview { max-height: 260px; overflow: auto; padding: 8px 10px; background: var(--code-bg); color: var(--code-text); border: 1px solid var(--border); border-radius: var(--r-md); font-size: 10px; line-height: 1.5; white-space: pre-wrap; word-break: break-word; }
 
+    /* ---------- header settings link ---------- */
+    .hdr-btn {
+      flex-shrink: 0;
+      min-width: 28px; min-height: 28px;
+      padding: 2px 7px;
+      border: 1px solid var(--border);
+      border-radius: var(--r-md);
+      background: var(--surface);
+      color: var(--text-muted);
+      font-size: 13px; line-height: 1;
+    }
+    .hdr-btn:hover { background: var(--brand-soft); color: var(--brand); border-color: var(--brand-soft-2); }
+    .ll-settings-link { align-self: flex-start; }
+    .panel-status.warn { background: var(--warn-soft); color: var(--warn); }
+
+    /* ---------- tab badge ---------- */
+    .tab-badge { min-width: 16px; padding: 0 5px; border-radius: var(--r-pill); background: var(--danger); color: var(--on-brand); font-size: 9px; font-weight: 700; line-height: 16px; text-align: center; }
+    .tab-badge[hidden] { display: none; }
+    [role="tab"]:focus-visible { outline: 2px solid var(--focus-ring); outline-offset: 2px; }
+
+    /* ---------- locator card watch button ---------- */
+    .card-actions { display: flex; flex-direction: column; gap: 4px; }
+    .watch-btn[aria-pressed="true"] { color: var(--brand); background: var(--brand-soft); border-color: var(--brand-soft-2); }
+
+    /* ---------- test data (variables) ---------- */
+    .ll-testdata { margin: 0 16px 12px; padding: 10px; background: var(--surface); border: 1px solid var(--border); border-radius: var(--r-lg); box-shadow: var(--shadow-sm); display: flex; flex-direction: column; gap: 8px; }
+    .ll-testdata[hidden], #testDataLabel[hidden], .ll-testdata-empty[hidden], .ll-testdata-status[hidden] { display: none; }
+    .ll-testdata-empty { font-size: 11px; color: var(--text-muted); line-height: 1.45; }
+    .ll-testdata-list { display: flex; flex-direction: column; gap: 6px; max-height: 280px; overflow-y: auto; }
+    .ll-td-row { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1.4fr); gap: 4px 8px; padding: 6px 8px; border: 1px solid var(--border); border-radius: var(--r-md); background: var(--canvas); }
+    .ll-td-field { display: flex; flex-direction: column; gap: 2px; min-width: 0; font-size: 9px; font-weight: 700; text-transform: uppercase; letter-spacing: .04em; color: var(--text-muted); }
+    .ll-td-field input { height: 28px; padding: 0 8px; min-width: 0; width: 100%; border: 1px solid var(--border); border-radius: var(--r-md); background: var(--surface); color: var(--text); font-size: 11px; font-weight: 400; text-transform: none; letter-spacing: 0; }
+    .ll-td-name { font-family: 'Cascadia Code', 'Fira Code', ui-monospace, monospace; }
+    .ll-td-field input[aria-invalid="true"] { border-color: var(--danger); }
+    .ll-td-meta { grid-column: 1 / -1; font-size: 10px; color: var(--text-muted); }
+    .ll-td-err { grid-column: 1 / -1; font-size: 10px; color: var(--danger); }
+    .ll-td-err[hidden] { display: none; }
+    .ll-testdata-status { font-size: 11px; padding: 6px 8px; border-radius: var(--r-md); background: var(--info-soft); color: var(--info); overflow-wrap: anywhere; }
+    .ll-testdata-status.err { background: var(--danger-soft); color: var(--danger); }
+    .ll-testdata-actions { display: flex; flex-wrap: wrap; gap: 8px; }
+    .ll-rec-ctl:disabled { opacity: .5; cursor: not-allowed; }
+
+    /* ---------- locator health ---------- */
+    .ll-health { margin: 0 16px 14px; padding: 12px; background: var(--surface); border: 1px solid var(--border); border-radius: var(--r-lg); box-shadow: var(--shadow-sm); display: flex; flex-direction: column; gap: 8px; }
+    .ll-health-page { font-size: 10px; color: var(--text-muted); overflow-wrap: anywhere; }
+    .ll-health-page strong { color: var(--text-strong); }
+    .ll-health-actions { display: flex; flex-wrap: wrap; gap: 8px; }
+    .ll-health-status { font-size: 11px; line-height: 1.45; padding: 6px 8px; border-radius: var(--r-md); background: var(--info-soft); color: var(--info); overflow-wrap: anywhere; }
+    .ll-health-status.ok { background: var(--success-soft); color: var(--success); }
+    .ll-health-status.err { background: var(--danger-soft); color: var(--danger); }
+    .ll-health-status.warn { background: var(--warn-soft); color: var(--warn); }
+    .ll-health-status[hidden], .ll-health-empty[hidden], #healthOther[hidden] { display: none; }
+    .ll-health-summary { font-size: 11px; color: var(--text-muted); }
+    .ll-health-empty { font-size: 11px; color: var(--text-muted); line-height: 1.5; padding: 10px; text-align: center; border: 1px dashed var(--border); border-radius: var(--r-md); }
+    .ll-health-list { display: flex; flex-direction: column; gap: 6px; }
+    .ll-health-row { display: flex; flex-direction: column; gap: 4px; padding: 8px; border: 1px solid var(--border); border-radius: var(--r-md); background: var(--canvas); }
+    .ll-health-row.hs-broken, .ll-health-row.hs-error, .ll-health-row.hs-frame-missing { border-color: var(--danger); }
+    .ll-health-row.hs-ambiguous { border-color: var(--warn); }
+    .ll-health-head { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; }
+    .ll-health-label { flex: 1 1 120px; min-width: 0; font-size: 11px; font-weight: 600; color: var(--text-strong); overflow-wrap: anywhere; }
+    .ll-health-badge { font-size: 9px; font-weight: 700; text-transform: uppercase; letter-spacing: .04em; padding: 2px 7px; border-radius: var(--r-pill); white-space: nowrap; background: var(--surface-2); color: var(--text-muted); }
+    .ll-health-badge.hs-ok { background: var(--success-soft); color: var(--success); }
+    .ll-health-badge.hs-broken, .ll-health-badge.hs-error, .ll-health-badge.hs-frame-missing { background: var(--danger-soft); color: var(--danger); }
+    .ll-health-badge.hs-ambiguous { background: var(--warn-soft); color: var(--warn); }
+    .ll-health-code { font-family: 'Cascadia Code', 'Fira Code', ui-monospace, monospace; font-size: 10px; color: var(--code-text); background: var(--code-bg); padding: 4px 6px; border-radius: var(--r-sm); overflow-wrap: anywhere; white-space: pre-wrap; }
+    .ll-health-meta { font-size: 10px; color: var(--text-muted); overflow-wrap: anywhere; }
+    .ll-health-suggest { display: flex; flex-direction: column; gap: 4px; padding: 6px; border: 1px dashed var(--accent); border-radius: var(--r-sm); background: var(--accent-soft); font-size: 10px; color: var(--accent); }
+    .ll-health-row-actions { display: flex; flex-wrap: wrap; gap: 6px; }
+    .ll-health-row-actions button, .ll-health-suggest button { min-height: 24px; padding: 2px 9px; font-size: 10px; }
+    .ll-health-other { font-size: 11px; color: var(--text-muted); }
+    .ll-health-other summary { cursor: pointer; font-weight: 700; }
+    .ll-health-other ul { margin: 6px 0 0 16px; display: flex; flex-direction: column; gap: 3px; }
+    .ll-health-other li { overflow-wrap: anywhere; }
+
     @media (max-width: 360px) {
       .tab .tab-label { display: none; }
     }
@@ -797,6 +871,7 @@
         <div class="brand-sub">Locator studio</div>
       </div>
       <div class="status-dot" id="statusDot" title="Inspector status"></div>
+      <button type="button" class="hdr-btn" id="openOptionsHeaderBtn" title="All settings" aria-label="All settings">⚙</button>
     </div>
 
     <div class="btn-wrap">
@@ -807,13 +882,18 @@
     </div>
 
     <div class="tab-bar" role="tablist" aria-label="Views">
-      <button class="tab active" type="button" role="tab" aria-selected="true" data-target="tab-inspector">
+      <button class="tab active" type="button" role="tab" id="tabBtnInspector" aria-selected="true" aria-controls="tab-inspector" data-target="tab-inspector">
         <span class="tab-icon" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="8"/><path d="M12 2v3M12 19v3M2 12h3M19 12h3"/><circle cx="12" cy="12" r="2" fill="currentColor"/></svg></span>
         <span class="tab-label">Inspect</span>
       </button>
-      <button class="tab" type="button" role="tab" aria-selected="false" data-target="tab-recorder">
+      <button class="tab" type="button" role="tab" id="tabBtnRecorder" aria-selected="false" aria-controls="tab-recorder" tabindex="-1" data-target="tab-recorder">
         <span class="tab-icon" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="9"/><circle cx="12" cy="12" r="3.5" fill="currentColor" stroke="none"/></svg></span>
         <span class="tab-label">Record</span>
+      </button>
+      <button class="tab" type="button" role="tab" id="tabBtnHealth" aria-selected="false" aria-controls="tab-health" tabindex="-1" data-target="tab-health">
+        <span class="tab-icon" aria-hidden="true"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75" stroke-linecap="round" stroke-linejoin="round"><path d="M3 12h4l3-7 4 14 3-7h4"/></svg></span>
+        <span class="tab-label">Health</span>
+        <span class="tab-badge" id="healthTabBadge" hidden></span>
       </button>
     </div>
 
@@ -831,7 +911,7 @@
     <div id="panelStatus" class="panel-status" role="status" aria-live="polite" hidden></div>
 
     <div class="scroll-content">
-      <div class="tab-content active" id="tab-inspector">
+      <div class="tab-content active" id="tab-inspector" role="tabpanel" aria-labelledby="tabBtnInspector">
         <!-- SELECTOR LAB MODULE -->
         <div class="selector-lab">
           <div class="lab-header">
@@ -901,6 +981,7 @@
             <div class="ll-pom-actions">
               <button type="button" id="pomCopyBtn" class="ll-rec-ctl">📋 Copy</button>
               <button type="button" id="pomDownloadBtn" class="ll-rec-ctl">⬇ Download</button>
+              <button type="button" id="pomWatchAllBtn" class="ll-rec-ctl" title="Add every included element to the Health tab">☆ Watch all</button>
               <button type="button" id="pomCloseBtn" class="ll-rec-ctl" aria-label="Close the Page Object">✕ Close</button>
             </div>
             <pre id="pomPreview" class="ll-pom-preview" aria-label="Generated Page Object" tabindex="0"></pre>
@@ -908,7 +989,7 @@
         </div>
       </div>
 
-      <div class="tab-content" id="tab-recorder">
+      <div class="tab-content" id="tab-recorder" role="tabpanel" aria-labelledby="tabBtnRecorder">
         <!-- Recording Control -->
         <div class="btn-wrap" style="padding: 12px 16px; background: transparent; border: none;">
           <button class="inspect-btn" id="recordBtn" style="background: var(--error); border-color: var(--error); color: #fff;">
@@ -996,6 +1077,23 @@
           <div class="ll-rec-empty">🎬 Hit <strong>Start Recording</strong> then use the page. Clicks, typing, hovers (Alt+click), and assertions are captured.</div>
         </div>
 
+        <!-- Test data: variables codegen extracts from the recorded values -->
+        <div class="sec-label" id="testDataLabel" hidden>
+          <span>Test data</span>
+          <span id="testDataCount" style="color: var(--primary); text-transform: none;"></span>
+        </div>
+        <div id="testDataSection" class="ll-testdata" hidden>
+          <label class="ll-setting"><input type="checkbox" id="settingVariables" checked>
+            <span>Use test-data variables in the script<small>Typed and selected values become one test-data object at the top of the test. Edit names and values here — replay uses the edited values.</small></span></label>
+          <div id="testDataEmpty" class="ll-testdata-empty">Values you type or select while recording show up here.</div>
+          <div id="testDataList" class="ll-testdata-list" role="list" aria-label="Test data variables"></div>
+          <div id="testDataStatus" class="ll-testdata-status" role="status" aria-live="polite" hidden></div>
+          <div class="ll-testdata-actions">
+            <button type="button" id="testDataCopyBtn" class="ll-rec-ctl">📋 Copy test data (JSON)</button>
+            <button type="button" id="testDataDownloadBtn" class="ll-rec-ctl">⬇ Download test data</button>
+          </div>
+        </div>
+
         <!-- Generated test script (editable; copy uses current text) -->
         <div class="sec-label" id="codePreviewLabel" style="display: none;">
           <span style="flex-shrink: 0;">Generated Test Script</span>
@@ -1031,8 +1129,32 @@
               <small class="ll-perm-declined" hidden>Without it, thumbnails appear only on pages where Locatra was opened from the toolbar.</small>
               <button type="button" id="shotPermGrantBtn" class="ll-rec-ctl ll-perm-grant">Grant access</button>
             </div>
+            <button type="button" id="openOptionsBtn" class="ll-rec-ctl ll-settings-link">⚙ All settings</button>
           </div>
         </details>
+      </div>
+
+      <div class="tab-content" id="tab-health" role="tabpanel" aria-labelledby="tabBtnHealth">
+        <div class="sec-label">Locator health</div>
+        <div class="ll-health" id="healthSection">
+          <div class="ll-health-page" id="healthPage">Checking which page is open…</div>
+          <div class="ll-health-actions">
+            <button type="button" id="healthCheckBtn" class="ll-rec-ctl ll-replay-btn" disabled>↻ Check now</button>
+            <button type="button" id="healthExportBtn" class="ll-rec-ctl">⬇ Export JSON</button>
+            <button type="button" id="healthImportBtn" class="ll-rec-ctl">⬆ Import JSON</button>
+            <input type="file" id="healthImportFile" accept=".json,application/json" hidden aria-label="Import watched locators (JSON file)">
+          </div>
+          <label class="ll-setting"><input type="checkbox" id="settingHealthAutoCheck">
+            <span>Check automatically<small>Re-check this page's watched locators when the panel opens or you switch to a watched page.</small></span></label>
+          <div id="healthStatus" class="ll-health-status" role="status" aria-live="polite" hidden></div>
+          <div id="healthSummary" class="ll-health-summary"></div>
+          <div id="healthEmpty" class="ll-health-empty">No watched locators on this page yet. Use <strong>☆ Watch</strong> on a locator card, or <strong>Watch all</strong> in the Page Object view.</div>
+          <div id="healthList" class="ll-health-list" role="list" aria-label="Watched locators on this page"></div>
+          <details id="healthOther" class="ll-health-other" hidden>
+            <summary id="healthOtherSummary">Other sites</summary>
+            <ul id="healthOtherList" aria-label="Other sites with watched locators"></ul>
+          </details>
+        </div>
       </div>
     </div>
   </div>
@@ -1050,6 +1172,9 @@
   </div>
 
   <script src="codegen.js"></script>
+  <script src="codegen-java.js"></script>
+  <script src="codegen-csharp.js"></script>
+  <script src="codegen-wdio.js"></script>
   <script src="thumbs-store.js"></script>
   <script src="sidepanel.js"></script>
 </body>

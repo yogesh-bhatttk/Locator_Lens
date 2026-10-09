@@ -473,6 +473,21 @@ describe('clipboard fallbacks', () => {
     expect($('b').textContent).toBe('Copy');
   });
 
+  // execCommand reports failure by returning false, not by throwing; the button used
+  // to say "✓ Copied" anyway.
+  it('says the copy failed when execCommand returns false', () => {
+    Object.defineProperty(navigator, 'clipboard', { value: undefined, configurable: true });
+    document.execCommand = vi.fn(() => false);
+    document.body.innerHTML = '<button id="b">Copy</button>';
+    copyToClipboard('text', $('b'));
+    expect(document.execCommand).toHaveBeenCalledWith('copy');
+    expect($('b').textContent).toBe('Copy failed');
+    expect($('b').classList.contains('done')).toBe(false);
+    expect(document.querySelector('textarea')).toBeNull();
+    vi.advanceTimersByTime(2000);
+    expect($('b').textContent).toBe('Copy');
+  });
+
   it('falls back when writeText rejects, and says so when that fails too', async () => {
     navigator.clipboard.writeText = vi.fn(() => Promise.reject(new Error('denied')));
     document.execCommand = vi.fn(() => {
@@ -482,6 +497,7 @@ describe('clipboard fallbacks', () => {
     copyToClipboard('text', $('b'));
     await flush();
     expect($('b').textContent).toBe('Copy failed');
+    expect(document.querySelector('textarea')).toBeNull();
     vi.advanceTimersByTime(2000);
     expect($('b').textContent).toBe('Copy');
   });

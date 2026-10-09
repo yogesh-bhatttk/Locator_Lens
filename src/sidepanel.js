@@ -23,7 +23,11 @@ let _recFilterTimer = null;
 // ── Feature state (declared up front: load-time callbacks can reach these) ────
 // Settings shared with the content script / worker (chrome.storage.local).
 const LL_SETTINGS_KEY = 'llSettings';
-let llSettings = { autoAssertions: true, stepScreenshots: true };
+let llSettings = { autoAssertions: true, stepScreenshots: true, variables: true, healthAutoCheck: false };
+// The stored object as read, so a save only changes the fields this panel owns and
+// keeps everything the options page writes (testIdAttributes, secretNames, …).
+let llSettingsRaw = {};
+let _settingsLoaded = false;
 // captureVisibleTab needs <all_urls> (optional, requested at runtime) or an
 // activeTab grant. null = not known yet.
 const LL_SHOT_ORIGINS = ['<all_urls>'];
@@ -127,8 +131,8 @@ function showPanelStatus(text, kind) {
   el.textContent = String(text || '');
   el.className = 'panel-status' + (kind ? ' ' + kind : '');
   el.hidden = !text;
-  // Errors stay until the next action; informational notes fade on their own.
-  if (text && kind !== 'err') {
+  // Errors and warnings stay until the next action; informational notes fade on their own.
+  if (text && kind !== 'err' && kind !== 'warn') {
     _panelStatusTimer = setTimeout(() => { el.hidden = true; el.textContent = ''; }, 6000);
   }
 }
@@ -202,6 +206,7 @@ function safeRender(el, html) {
   while (doc.body.firstChild) el.appendChild(doc.body.firstChild);
 }
 let lastResultData = null;
+let lastLocators = []; // the rendered cards' locators, by card index
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 function esc(s) {
@@ -230,9 +235,9 @@ function hl(code) {
   const strs = [];
   s = s.replace(STR_RE, (m) => { strs.push(m); return SENT; });
   s = s
-    .replace(/\b(await|const|let|var|function|return|if|else|for|while|try|catch|finally|from|import|as|with|def|assert|describe|it|test|async|not|None|True|False)\b/g, '<span class="kw">$1</span>')
-    .replace(/\b(page|browser|context|expect|driver|cy|webdriver|By|Key|Keys|Select|Builder|ActionChains)\b/g, '<span class="kw">$1</span>')
-    .replace(/\b(getBy[A-Za-z]+|get_by_[a-z_]+|locator|click|dblclick|fill|check|uncheck|selectOption|select_option|select_by_visible_text|press|hover|goto|visit|get|contains|should|trigger|find_element|findElement|send_keys|sendKeys|move_to_element|move|perform|set_viewport_size|setViewportSize|set_window_size|isDisplayed|is_displayed|isSelected|is_selected|isEnabled|is_enabled|getText|getAttribute|get_attribute|to[A-Z][A-Za-z]+|to_[a-z_]+|not_to_[a-z_]+|strictEqual|ok)\b/g, '<span class="fn">$1</span>')
+    .replace(/\b(await|const|let|var|function|return|if|else|for|while|try|catch|finally|from|import|as|with|def|assert|describe|it|test|async|not|None|True|False|public|private|static|final|void|class|new|using|namespace|throws|readonly)\b/g, '<span class="kw">$1</span>')
+    .replace(/\b(page|Page|browser|context|expect|Expect|driver|cy|webdriver|By|Key|Keys|Select|Builder|ActionChains|Assertions|PlaywrightAssertions)\b/g, '<span class="kw">$1</span>')
+    .replace(/\b(getBy[A-Za-z]+|GetBy[A-Za-z]+|[A-Z][A-Za-z]*Async|get_by_[a-z_]+|locator|click|dblclick|fill|check|uncheck|selectOption|select_option|select_by_visible_text|press|hover|goto|visit|get|contains|should|trigger|find_element|findElement|send_keys|sendKeys|move_to_element|move|perform|set_viewport_size|setViewportSize|set_window_size|isDisplayed|is_displayed|isSelected|is_selected|isEnabled|is_enabled|getText|getAttribute|get_attribute|to[A-Z][A-Za-z]+|to_[a-z_]+|not_to_[a-z_]+|strictEqual|ok)\b/g, '<span class="fn">$1</span>')
     .replace(/\b([0-9]+)\b/g, '<span class="num">$1</span>');
   let k = 0;
   s = s.replace(new RegExp(SENT, 'g'), () => '<span class="str">' + (strs[k++] || '') + '</span>');
@@ -283,23 +288,33 @@ function copyToClipboard(text, btn) {
     restoreLater();
   };
 
+  const onFailure = () => {
+    btn.textContent = 'Copy failed';
+    btn.classList.remove('done');
+    restoreLater();
+  };
+
+  // execCommand('copy') reports failure by returning false rather than throwing, so
+  // its result decides the label — it used to say "✓ Copied" either way.
   const fallbackCopy = () => {
+    let copied = false;
+    let textArea = null;
     try {
-      const textArea = document.createElement('textarea');
+      textArea = document.createElement('textarea');
       textArea.value = text;
       textArea.style.position = 'fixed';
       textArea.style.left = '-9999px';
       document.body.appendChild(textArea);
       textArea.focus();
       textArea.select();
-      document.execCommand('copy');
-      document.body.removeChild(textArea);
-      onSuccess();
+      copied = document.execCommand('copy') === true;
     } catch (e) {
-      btn.textContent = 'Copy failed';
-      btn.classList.remove('done');
-      restoreLater();
+      copied = false;
+    } finally {
+      if (textArea && textArea.parentNode) textArea.parentNode.removeChild(textArea);
     }
+    if (copied) onSuccess();
+    else onFailure();
   };
 
   if (navigator.clipboard && navigator.clipboard.writeText) {
@@ -356,7 +371,7 @@ function updateInspectUI() {
 // the engine's native strings (best fidelity incl. chained/frame); everything else
 // is translated from the structured `loc.target` via codegen.
 function formatLocator(loc, suggestedAction) {
-  if (outFramework === 'playwright' && outLanguage !== 'python') {
+  if (isPlaywrightJsTs()) {
     return { code: loc.code || '', fullCode: loc.fullCode || '' };
   }
   if (typeof LLCodegen !== 'undefined' && loc.target) {
@@ -383,13 +398,43 @@ function strategyLabel(loc) {
 }
 
 // ── Output target (framework + language) wiring ──────────────────────────────
-function recorderFileName(fw, lang) {
+/**
+ * The first class a file declares (a line starting with modifiers + "class Name"),
+ * so a comment mentioning "class" is never mistaken for the declaration.
+ */
+const CLASS_DECL_RE = /^[ \t]*(?:export\s+)?(?:(?:public|private|protected|internal|static|final|abstract|sealed|partial|default)\s+)*class\s+([A-Za-z_$][\w$]*)/m;
+function declaredClassName(code) {
+  const m = CLASS_DECL_RE.exec(String(code || ''));
+  return m ? m[1] : '';
+}
+
+/** File extension (without the dot) for a language, from codegen when it knows it. */
+function languageExt(lang) {
+  if (lang === 'typescript') return 'ts';
+  if (lang === 'javascript') return 'js';
+  if (lang === 'python') return 'py';
+  if (typeof LLCodegen !== 'undefined' && typeof LLCodegen.fileExtension === 'function') {
+    try {
+      const ext = String(LLCodegen.fileExtension(lang) || '').replace(/^\./, '');
+      if (/^[A-Za-z0-9]{1,8}$/.test(ext)) return ext;
+    } catch (e) {}
+  }
+  return 'txt';
+}
+
+/**
+ * Download name for the recorded test. Java and C# name the file after the class
+ * the script declares (javac insists the public class matches its file name).
+ */
+function recorderFileName(fw, lang, script) {
   const f = fw || outFramework;
   const l = lang || outLanguage;
   if (l === 'python') return 'test_recorded.py';
-  const ext = l === 'typescript' ? 'ts' : 'js';
+  const ext = languageExt(l);
+  if (l === 'java' || l === 'csharp') return (declaredClassName(script) || 'RecordedTest') + '.' + ext;
   if (f === 'cypress') return `recorded.cy.${ext}`;
   if (f === 'playwright') return `locatra-recorded.spec.${ext}`;
+  if (f === 'webdriverio') return `locatra-recorded.e2e.${ext}`;
   return `locatra-recorded.${ext}`;
 }
 
@@ -427,11 +472,13 @@ function populateLangOptions() {
     if (firstValid) outLanguage = firstValid.id;
   }
   langSel.textContent = '';
+  const fwInfo = (LLCodegen.FRAMEWORKS || []).find(x => x.id === outFramework);
+  const fwName = fwInfo ? fwInfo.label : outFramework;
   LLCodegen.LANGUAGES.forEach(l => {
     const ok = LLCodegen.isValidCombo(outFramework, l.id);
     const o = document.createElement('option');
     o.value = l.id;
-    o.textContent = ok ? l.label : l.label + ' — n/a in Cypress';
+    o.textContent = ok ? l.label : l.label + ' — n/a in ' + fwName;
     o.disabled = !ok;
     if (l.id === outLanguage) o.selected = true;
     langSel.appendChild(o);
@@ -452,13 +499,91 @@ function applyOutputChange() {
     const patch = {};
     patch[LL_FW_KEY] = outFramework;
     patch[LL_LANG_KEY] = outLanguage;
+    noteOwnOutputWrite(patch);
     chrome.storage.local.set(patch);
   }
+  rerenderForOutput();
+}
+
+/** Everything that shows code in the current framework/language. */
+function rerenderForOutput() {
   if (lastResultData) renderResults(lastResultData);
   renderTimeline();
   updateCodePreview();
   renderPomPreview();
+  renderHealth();
   scheduleRecorderPersist();
+}
+
+// ── Following the options page ──────────────────────────────────────────────
+// The options page edits llFramework / llLanguage too. Our own writes come back
+// through storage.onChanged a moment later; those echoes are recognised (and
+// ignored) so two quick switches here can never be undone by the first one's echo.
+const OUTPUT_ECHO_MS = 3000;
+const _ownOutputWrites = [];
+
+function noteOwnOutputWrite(patch) {
+  const now = Date.now();
+  Object.keys(patch).forEach((key) => _ownOutputWrites.push({ key: key, value: patch[key], at: now }));
+  while (_ownOutputWrites.length > 20) _ownOutputWrites.shift();
+}
+
+function isOwnOutputEcho(key, value) {
+  const now = Date.now();
+  for (let i = _ownOutputWrites.length - 1; i >= 0; i--) {
+    if (now - _ownOutputWrites[i].at > OUTPUT_ECHO_MS) _ownOutputWrites.splice(i, 1);
+  }
+  const idx = _ownOutputWrites.findIndex(w => w.key === key && w.value === value);
+  if (idx === -1) return false;
+  // This echo also stands for any older write of the same key it overtook.
+  for (let i = idx; i >= 0; i--) {
+    if (_ownOutputWrites[i].key === key) _ownOutputWrites.splice(i, 1);
+  }
+  return true;
+}
+
+function onExternalOutputChange(changes) {
+  const fwCh = changes[LL_FW_KEY];
+  const langCh = changes[LL_LANG_KEY];
+  let fw = outFramework;
+  let lang = outLanguage;
+  let touched = false;
+  if (fwCh && !isOwnOutputEcho(LL_FW_KEY, fwCh.newValue)) {
+    fw = typeof fwCh.newValue === 'string' && fwCh.newValue ? fwCh.newValue : 'playwright';
+    touched = true;
+  }
+  if (langCh && !isOwnOutputEcho(LL_LANG_KEY, langCh.newValue)) {
+    lang = typeof langCh.newValue === 'string' && langCh.newValue ? langCh.newValue : 'typescript';
+    touched = true;
+  }
+  // Before the first read the pending get() returns the new values anyway.
+  if (!touched || !_outputReady) return;
+  applyExternalOutput(fw, lang);
+}
+
+function applyExternalOutput(fw, lang) {
+  if (typeof LLCodegen === 'undefined') return;
+  // A framework this build has no generator for (a module failed to load) is ignored.
+  if (!(LLCodegen.FRAMEWORKS || []).some(f => f.id === fw)) return;
+  if (!LLCodegen.isValidCombo(fw, lang)) {
+    const first = LLCodegen.languagesFor(fw)[0];
+    if (!first) return;
+    lang = first.id;
+  }
+  if (fw === outFramework && lang === outLanguage) return;
+  if (editorHasUserEdits()) {
+    // Never throw away hand edits behind the user's back.
+    showPanelStatus(
+      `Settings changed the output to ${targetLabel(fw, lang)}. Your edited script stays on ` +
+      `${targetLabel(outFramework, outLanguage)} — choose the new output above to regenerate it (that discards your edits).`,
+      'warn'
+    );
+    return;
+  }
+  outFramework = fw;
+  outLanguage = lang;
+  syncOutputSelects();
+  rerenderForOutput();
 }
 
 /**
@@ -516,8 +641,11 @@ function initOutputSelectors() {
   });
 
   const finalize = () => {
+    // A stored framework whose generator isn't loaded falls back to the default.
+    if (!LLCodegen.FRAMEWORKS.some(f => f.id === outFramework)) outFramework = 'playwright';
     if (!LLCodegen.isValidCombo(outFramework, outLanguage)) {
-      outLanguage = LLCodegen.languagesFor(outFramework)[0].id;
+      const first = LLCodegen.languagesFor(outFramework)[0];
+      outLanguage = first ? first.id : 'typescript';
     }
     syncOutputSelects();
   };
@@ -705,6 +833,7 @@ function renderResults(data) {
   // half-drawn result with no way back short of reopening it.
   const el = data.elementData || {};
   const locators = Array.isArray(data.locators) ? data.locators.filter(Boolean) : [];
+  lastLocators = locators;
   const avoidList = Array.isArray(data.avoidList) ? data.avoidList : [];
   const proTip = data.proTip;
   const a11y = Array.isArray(data.a11y) ? data.a11y : [];
@@ -796,8 +925,11 @@ function renderResults(data) {
         </div>
         <div class="card-code">
           <div class="code-txt">${hl(code)}</div>
-          <div style="display:flex; flex-direction:column; gap:4px;">
+          <div class="card-actions">
             <button type="button" class="copy-btn" data-code="${esc(fullCode)}" aria-label="Copy locator ${i + 1}: ${esc(strategyLabel(loc))}">Copy</button>
+            ${loc.target && typeof loc.target === 'object'
+              ? `<button type="button" class="watch-btn" data-index="${i}" aria-pressed="false" aria-label="Watch locator ${i + 1}: ${esc(strategyLabel(loc))}" title="Keep an eye on this locator in the Health tab">☆ Watch</button>`
+              : ''}
           </div>
         </div>
         <div class="why-row">
@@ -806,6 +938,7 @@ function renderResults(data) {
         <div class="card-explain" id="ll-explain-${i}">${esc(loc.explanation || '')}</div>
       </div>`;
   }).join(''));
+  refreshWatchButtons();
 
   // ── Avoid section ──
   const avoidLabel = document.getElementById('avoidLabel');
@@ -974,6 +1107,35 @@ function handleRuntimeMessage(msg) {
   if (msg.type === 'POM_RESULT' && msg.data) handlePomResult(msg.data);
   if (msg.type === 'POM_PICK_CANCELLED') handlePomPickCancelled();
   if (msg.type === 'STEP_THUMBNAIL') onStepThumbnail(msg.eventId);
+  if (msg.type === 'RECORDING_STATE') handleRecordingStateRelay(msg);
+  if (msg.type === 'ACTIVATION_FAILED') handleActivationFailed(msg);
+  if (msg.type === 'THUMBS_CLEARED') {
+    // Settings → "Clear step screenshots": the stored images are gone.
+    releaseAllThumbs();
+    renderTimeline();
+  }
+}
+
+/**
+ * The worker announces every recording change (panel, popup, keyboard shortcut,
+ * tab closed) so the controls follow at once instead of on the next heartbeat.
+ */
+function handleRecordingStateRelay(msg) {
+  // Any state query still in flight was asked before this change: drop its answer.
+  _recStateEpoch++;
+  applyRecordingState(msg);
+}
+
+/** A shortcut (or another surface) couldn't switch a feature on for this window. */
+function handleActivationFailed(msg) {
+  const error = typeof msg.error === 'string' && msg.error ? msg.error : "Locatra can't run on this page.";
+  if (msg.feature === 'inspect' || !msg.feature) {
+    isInspecting = false;
+    updateInspectUI();
+  } else if (msg.feature === 'recording') {
+    refreshRecordingState();
+  }
+  showPanelStatus(error, 'err');
 }
 
 // Steps that arrive before the persisted timeline has been restored are held here
@@ -1058,10 +1220,14 @@ try {
   if (chrome.storage && chrome.storage.onChanged && typeof chrome.storage.onChanged.addListener === 'function') {
     chrome.storage.onChanged.addListener((changes, area) => {
       if (area && area !== 'local') return;
-      if (changes && changes[LL_SETTINGS_KEY]) {
-        llSettings = normalizeSettings(changes[LL_SETTINGS_KEY].newValue);
-        applySettingsUI();
-        updateScreenshotNotices();
+      if (!changes) return;
+      if (changes[LL_SETTINGS_KEY]) adoptSettings(changes[LL_SETTINGS_KEY].newValue);
+      if (changes[LL_FW_KEY] || changes[LL_LANG_KEY]) onExternalOutputChange(changes);
+      if (changes[LL_WATCHED_KEY]) {
+        watched = normalizeWatched(changes[LL_WATCHED_KEY].newValue).state;
+        _watchedLoaded = true;
+        renderHealth();
+        refreshWatchButtons();
       }
     });
   }
@@ -1137,7 +1303,9 @@ document.addEventListener('DOMContentLoaded', () => {
   // Event delegation for card buttons
   const cardsContainer = document.getElementById('cardsContainer');
   cardsContainer.addEventListener('click', (e) => {
-    if (e.target.classList.contains('copy-btn')) {
+    if (e.target.classList.contains('watch-btn')) {
+      toggleWatchLocator(parseInt(e.target.getAttribute('data-index'), 10));
+    } else if (e.target.classList.contains('copy-btn')) {
       handleCopy(e.target);
     } else if (e.target.classList.contains('toggle-explain')) {
       toggleExplain(e.target);
@@ -1220,20 +1388,46 @@ document.addEventListener('DOMContentLoaded', () => {
     sendToBackground({ type: 'LAB_CLEAR' });
   });
 
-  // ── Tab Switching Logic ──
-  const tabs = document.querySelectorAll('.tab');
+  // ── Tab Switching Logic ── (WAI-ARIA tabs: click, or arrows/Home/End on the tab list)
+  const tabs = Array.prototype.slice.call(document.querySelectorAll('.tab'));
   const tabContents = document.querySelectorAll('.tab-content');
 
-  tabs.forEach(tab => {
-    tab.addEventListener('click', () => {
-      tabs.forEach(t => { t.classList.remove('active'); t.setAttribute('aria-selected', 'false'); });
-      tabContents.forEach(c => c.classList.remove('active'));
-
-      tab.classList.add('active');
-      tab.setAttribute('aria-selected', 'true');
-      const targetId = tab.getAttribute('data-target');
-      document.getElementById(targetId).classList.add('active');
+  const activateTab = (tab, focus) => {
+    tabs.forEach(t => {
+      t.classList.remove('active');
+      t.setAttribute('aria-selected', 'false');
+      t.setAttribute('tabindex', '-1');
     });
+    tabContents.forEach(c => c.classList.remove('active'));
+
+    tab.classList.add('active');
+    tab.setAttribute('aria-selected', 'true');
+    tab.setAttribute('tabindex', '0');
+    const targetId = tab.getAttribute('data-target');
+    const panel = document.getElementById(targetId);
+    if (panel) panel.classList.add('active');
+    if (focus) tab.focus();
+    if (targetId === 'tab-health') onHealthTabShown();
+  };
+
+  tabs.forEach(tab => {
+    tab.addEventListener('click', () => activateTab(tab, false));
+    tab.addEventListener('keydown', (e) => {
+      const i = tabs.indexOf(tab);
+      let next = -1;
+      if (e.key === 'ArrowRight') next = (i + 1) % tabs.length;
+      else if (e.key === 'ArrowLeft') next = (i - 1 + tabs.length) % tabs.length;
+      else if (e.key === 'Home') next = 0;
+      else if (e.key === 'End') next = tabs.length - 1;
+      if (next === -1) return;
+      e.preventDefault();
+      activateTab(tabs[next], true);
+    });
+  });
+
+  ['openOptionsBtn', 'openOptionsHeaderBtn'].forEach((id) => {
+    const b = document.getElementById(id);
+    if (b) b.addEventListener('click', openOptionsPage);
   });
 
   // ── Framework + Language selectors ──
@@ -1250,6 +1444,8 @@ document.addEventListener('DOMContentLoaded', () => {
   const panelHeartbeatId = setInterval(() => {
     sendPanelHeartbeat();
     refreshRecordingState();
+    // Notice a navigation the tab events missed while the Health tab is on screen.
+    if (healthTabVisible()) refreshActivePage();
   }, 4000);
   window.addEventListener('beforeunload', () => {
     clearInterval(panelHeartbeatId);
@@ -1260,8 +1456,10 @@ document.addEventListener('DOMContentLoaded', () => {
   });
   window.addEventListener('pagehide', flushRecorderPersist);
   document.addEventListener('visibilitychange', () => {
-    if (document.visibilityState === 'visible') refreshRecordingState();
-    else flushRecorderPersist();
+    if (document.visibilityState === 'visible') {
+      refreshRecordingState();
+      if (healthPageMatters()) refreshActivePage();
+    } else flushRecorderPersist();
   });
 
   // ── Recorder Controls ──
@@ -1329,12 +1527,7 @@ document.addEventListener('DOMContentLoaded', () => {
         showPanelStatus('Record at least one action first — the editor stays hidden until then.', 'info');
         return;
       }
-      const blob = new Blob([script], { type: 'text/plain;charset=utf-8' });
-      const a = document.createElement('a');
-      a.href = URL.createObjectURL(blob);
-      a.download = recorderFileName();
-      a.click();
-      setTimeout(() => URL.revokeObjectURL(a.href), 2000);
+      downloadText(script, recorderFileName(outFramework, outLanguage, script));
     });
   }
 
@@ -1381,6 +1574,8 @@ document.addEventListener('DOMContentLoaded', () => {
   initSuggestionControls();
   initPomControls();
   initThumbModal();
+  initTestData();
+  initHealth();
 
   loadRecorderState();
 });
@@ -1508,6 +1703,7 @@ function renderTimeline() {
   updateSuggestionsBar();
   updateReplayUI();
   pruneThumbCache();
+  renderTestData();
 
   if (recordedActions.length === 0) {
     safeRender(timelineList, `<div class="ll-rec-empty">🎬 Hit <strong style="color: var(--primary);">Start Recording</strong> then use the page. Clicks, typing, hovers (Alt+click), and assertions are captured.</div>`);
@@ -1621,8 +1817,9 @@ function secretNameOf(act) {
     : 'LOCATRA_PASSWORD';
 }
 
+/** Playwright in JS/TS: the engine's own strings are native code for it. */
 function isPlaywrightJsTs() {
-  return outFramework === 'playwright' && outLanguage !== 'python';
+  return outFramework === 'playwright' && (outLanguage === 'typescript' || outLanguage === 'javascript');
 }
 
 /**
@@ -1684,7 +1881,16 @@ function generateTestScript() {
   if (typeof LLCodegen !== 'undefined') {
     // buildActionCode() controls per-line fidelity; wrapScript() supplies the
     // framework/language-correct file scaffold (imports, harness, indentation).
-    const steps = committedActions();
+    let steps = committedActions();
+    // Test-data variables: steps that use one carry varRef, and wrapScript declares
+    // the testData object once. Off (or codegen without the API) ⇒ literals.
+    const vars = llSettings.variables !== false ? extractTestData(steps) : [];
+    if (vars.length) {
+      const applied = applyTestData(steps, vars);
+      if (applied) {
+        return LLCodegen.wrapScript(applied.map(buildActionCode), outFramework, outLanguage, applied, { variables: vars });
+      }
+    }
     return LLCodegen.wrapScript(steps.map(buildActionCode), outFramework, outLanguage, steps);
   }
   const lines = committedActions().map(act => `  ${buildActionCode(act)}`).join('\n');
@@ -1712,9 +1918,15 @@ let lastSyncedPreviewScript = '';
 /** Dedupe keys of the steps that script was generated from (drives the "N new steps" notice). */
 let lastSyncedStepKeys = [];
 
+// Bumped when something other than the step list changes the generated script
+// (test-data edits, the variables toggle), so an edited script can say it is behind.
+let _scriptInputsVersion = 0;
+let _syncedInputsVersion = 0;
+
 function markEditorSynced(script) {
   lastSyncedPreviewScript = script;
   lastSyncedStepKeys = committedActions().map(dedupeKeyForAction);
+  _syncedInputsVersion = _scriptInputsVersion;
   updateScriptStaleNotice();
 }
 
@@ -1752,9 +1964,12 @@ function updateScriptStaleNotice() {
   const currentSet = new Set(current);
   const fresh = current.filter(k => !synced.has(k)).length;
   const gone = lastSyncedStepKeys.filter(k => !currentSet.has(k)).length;
-  if (!fresh && !gone) { box.hidden = true; return; }
+  const drift = _syncedInputsVersion !== _scriptInputsVersion;
+  if (!fresh && !gone && !drift) { box.hidden = true; return; }
   let msg;
-  if (fresh) {
+  if (!fresh && !gone) {
+    msg = 'Test data or variable settings changed since you edited the script';
+  } else if (fresh) {
     msg = `${fresh} new step${fresh === 1 ? '' : 's'} not in your edited script`;
     if (gone) msg += ` (and ${gone} removed step${gone === 1 ? '' : 's'} still in it)`;
   } else {
@@ -1833,6 +2048,8 @@ function recorderStorageKey(windowId) {
 /** A copy of a step that is safe to keep: sensitive steps never hold their value. */
 function sanitizeStep(step) {
   const out = Object.assign({}, step);
+  // varRef is derived per script (applyVariables); only the user's varName is kept.
+  delete out.varRef;
   if (out.sensitive) {
     out.value = '';
     // A fullCode from before env-var codegen would embed the literal value.
@@ -2032,6 +2249,7 @@ function applyRestoredState(s) {
       lastSyncedStepKeys = Array.isArray(s.syncedStepKeys) && s.syncedStepKeys.length
         ? s.syncedStepKeys.slice()
         : committedActions().map(dedupeKeyForAction);
+      _syncedInputsVersion = _scriptInputsVersion;
       ta.style.display = '';
       if (label) label.style.display = '';
     } else {
@@ -2166,33 +2384,97 @@ function appendToRecorder(actionData) {
 }
 
 // ══ Settings (llSettings) ═════════════════════════════════════════════════════
-// { autoAssertions, stepScreenshots } — both default on; a missing key or field
-// means the default. The content script and worker read the same key.
+// { autoAssertions, stepScreenshots, variables, healthAutoCheck, … } — a missing key
+// or field means the default. The options page owns the full object; the content
+// script and worker read the same key. This panel only ever writes the fields it
+// shows, merged into whatever is stored.
+function isPlainObject(v) {
+  return !!v && typeof v === 'object' && !Array.isArray(v);
+}
+
 function normalizeSettings(raw) {
-  const s = raw && typeof raw === 'object' ? raw : {};
+  const s = isPlainObject(raw) ? raw : {};
   return {
     autoAssertions: s.autoAssertions !== false,
-    stepScreenshots: s.stepScreenshots !== false
+    stepScreenshots: s.stepScreenshots !== false,
+    variables: s.variables !== false,
+    healthAutoCheck: s.healthAutoCheck === true
   };
+}
+
+/** Adopt a stored llSettings value (initial read or a change made elsewhere). */
+function adoptSettings(raw) {
+  const wasLoaded = _settingsLoaded;
+  const prevVariables = llSettings.variables !== false;
+  const prevAuto = llSettings.healthAutoCheck === true;
+  llSettingsRaw = isPlainObject(raw) ? Object.assign({}, raw) : {};
+  llSettings = normalizeSettings(llSettingsRaw);
+  _settingsLoaded = true;
+  applySettingsUI();
+  updateScreenshotNotices();
+  if (prevVariables !== (llSettings.variables !== false)) {
+    // A change made elsewhere leaves an edited script behind; the first read doesn't.
+    if (wasLoaded) _scriptInputsVersion++;
+    updateCodePreview();
+    updateScriptStaleNotice();
+  }
+  if (!prevAuto && llSettings.healthAutoCheck) _healthAutoCheckedKey = null;
+  maybeAutoCheckHealth();
 }
 
 function applySettingsUI() {
   const a = document.getElementById('settingAutoAssertions');
   const s = document.getElementById('settingStepScreenshots');
+  const v = document.getElementById('settingVariables');
+  const h = document.getElementById('settingHealthAutoCheck');
   if (a) a.checked = llSettings.autoAssertions;
   if (s) s.checked = llSettings.stepScreenshots;
+  if (v) v.checked = llSettings.variables !== false;
+  if (h) h.checked = llSettings.healthAutoCheck === true;
+}
+
+/** Merge `patch` into the stored settings (re-read first: the options page may have written). */
+function saveSettingsPatch(patch) {
+  llSettingsRaw = Object.assign({}, llSettingsRaw, patch);
+  llSettings = normalizeSettings(llSettingsRaw);
+  if (!chrome.storage || !chrome.storage.local) return;
+  chrome.storage.local.get(LL_SETTINGS_KEY, (res) => {
+    void chrome.runtime.lastError;
+    const stored = res && isPlainObject(res[LL_SETTINGS_KEY]) ? res[LL_SETTINGS_KEY] : {};
+    chrome.storage.local.set({ [LL_SETTINGS_KEY]: Object.assign({}, stored, patch) }, () => { void chrome.runtime.lastError; });
+  });
 }
 
 function saveSettingsFromUI() {
   const a = document.getElementById('settingAutoAssertions');
   const s = document.getElementById('settingStepScreenshots');
-  llSettings = normalizeSettings({
+  saveSettingsPatch({
     autoAssertions: a ? a.checked : llSettings.autoAssertions,
     stepScreenshots: s ? s.checked : llSettings.stepScreenshots
   });
-  if (chrome.storage && chrome.storage.local) {
-    chrome.storage.local.set({ [LL_SETTINGS_KEY]: Object.assign({}, llSettings) }, () => { void chrome.runtime.lastError; });
-  }
+}
+
+/** "⚙ All settings": the options page (a tab with it as the fallback). */
+function openOptionsPage() {
+  const fallback = () => {
+    try {
+      if (chrome.tabs && typeof chrome.tabs.create === 'function') {
+        chrome.tabs.create({ url: chrome.runtime.getURL('src/options.html') });
+        return;
+      }
+    } catch (e) {}
+    showPanelStatus("Couldn't open the settings page.", 'err');
+  };
+  try {
+    if (chrome.runtime && typeof chrome.runtime.openOptionsPage === 'function') {
+      const p = chrome.runtime.openOptionsPage(() => {
+        if (chrome.runtime.lastError) fallback();
+      });
+      if (p && typeof p.then === 'function') p.then(null, fallback);
+      return;
+    }
+  } catch (e) {}
+  fallback();
 }
 
 function initSettings() {
@@ -2214,14 +2496,29 @@ function initSettings() {
     const n = document.getElementById('shotPermTimelineNotice');
     if (n) n.hidden = true;
   });
+  const vars = document.getElementById('settingVariables');
+  if (vars) vars.addEventListener('change', () => {
+    saveSettingsPatch({ variables: !!vars.checked });
+    _scriptInputsVersion++;
+    updateCodePreview();
+    updateScriptStaleNotice();
+  });
+  const autoCheck = document.getElementById('settingHealthAutoCheck');
+  if (autoCheck) autoCheck.addEventListener('change', () => {
+    saveSettingsPatch({ healthAutoCheck: !!autoCheck.checked });
+    if (autoCheck.checked) {
+      _healthAutoCheckedKey = null;
+      maybeAutoCheckHealth();
+    }
+  });
   applySettingsUI();
   if (chrome.storage && chrome.storage.local) {
     chrome.storage.local.get(LL_SETTINGS_KEY, (res) => {
       void chrome.runtime.lastError;
-      llSettings = normalizeSettings(res && res[LL_SETTINGS_KEY]);
-      applySettingsUI();
-      updateScreenshotNotices();
+      adoptSettings(res && res[LL_SETTINGS_KEY]);
     });
+  } else {
+    _settingsLoaded = true;
   }
   checkScreenshotPermission();
 }
@@ -3035,8 +3332,8 @@ function pomCode() {
  * rather than echoing the field, keeping the file name and the class in step.
  */
 function pomClassNameFor(code, model) {
-  const m = /\bclass\s+([A-Za-z_$][\w$]*)/.exec(code || '');
-  if (m) return m[1];
+  const declared = declaredClassName(code);
+  if (declared) return declared;
   if (typeof LLCodegen !== 'undefined' && typeof LLCodegen.pageObjectClassName === 'function') {
     try { return String(LLCodegen.pageObjectClassName(model || pomExportModel())); } catch (e) {}
   }
@@ -3044,8 +3341,7 @@ function pomClassNameFor(code, model) {
 }
 
 function pomFileName(code) {
-  const ext = outLanguage === 'python' ? 'py' : (outLanguage === 'typescript' ? 'ts' : 'js');
-  return pomClassNameFor(code) + '.' + ext;
+  return pomClassNameFor(code) + '.' + languageExt(outLanguage);
 }
 
 function renderPomPreview(problem) {
@@ -3077,8 +3373,8 @@ function renderPomPreview(problem) {
   if (out) out.textContent = 'Saves as ' + pomFileName(code);
 }
 
-function downloadText(text, fileName) {
-  const blob = new Blob([text], { type: 'text/plain;charset=utf-8' });
+function downloadText(text, fileName, mime) {
+  const blob = new Blob([text], { type: (mime || 'text/plain') + ';charset=utf-8' });
   const a = document.createElement('a');
   a.href = URL.createObjectURL(blob);
   a.download = fileName;
@@ -3128,6 +3424,8 @@ function initPomControls() {
     const code = pomCode();
     if (code) downloadText(code, pomFileName(code));
   });
+  const watchAllBtn = document.getElementById('pomWatchAllBtn');
+  if (watchAllBtn) watchAllBtn.addEventListener('click', watchAllPom);
   const closeBtn = document.getElementById('pomCloseBtn');
   if (closeBtn) closeBtn.addEventListener('click', () => {
     pomModel = null;
@@ -3413,4 +3711,1302 @@ function initThumbModal() {
     }
   });
   modal.hidden = true;
+}
+
+// ══ Test data (variables) ═════════════════════════════════════════════════════
+// codegen turns each distinct typed / selected value into a variable
+// (LLCodegen.extractVariables). The panel lists them for editing: a name edit is
+// stored as `varName` on every step of that variable, a value edit rewrites those
+// steps' `value`. Both persist with the timeline, and replay uses the edited values.
+// Without the API (an older codegen) the section stays hidden and scripts keep
+// their literals.
+// Names are validated by codegen (LLCodegen.validateVariableName: identifier rules,
+// reserved words of every output language, Python key clashes), so a name accepted
+// here is exactly the name codegen will use.
+const VAR_NAME_RE = /^[A-Za-z_][A-Za-z0-9_]*$/;
+const VAR_NAME_MAX = 64;
+const TESTDATA_RENDER_DEBOUNCE_MS = 120;
+
+let testDataVars = []; // [{ name, value, kind, steps: [step objects] }] as rendered
+let _testDataDirty = false;
+let _testDataRenderTimer = null;
+let _testDataStatusTimer = null;
+
+function variablesApi() {
+  return typeof LLCodegen !== 'undefined' &&
+    typeof LLCodegen.extractVariables === 'function' &&
+    typeof LLCodegen.applyVariables === 'function' &&
+    typeof LLCodegen.variablesJson === 'function' ? LLCodegen : null;
+}
+
+/** extractVariables(steps), or [] when unavailable / it fails. */
+function extractTestData(steps) {
+  const api = variablesApi();
+  if (!api) return [];
+  try {
+    const vars = api.extractVariables(steps);
+    return Array.isArray(vars) ? vars.filter(v => v && typeof v.name === 'string' && v.name) : [];
+  } catch (e) {
+    console.warn('[Locatra] extractVariables failed:', e);
+    return [];
+  }
+}
+
+/** applyVariables(steps, vars) — a parallel array of steps carrying varRef — or null. */
+function applyTestData(steps, vars) {
+  const api = variablesApi();
+  if (!api) return null;
+  try {
+    const out = api.applyVariables(steps, vars);
+    return Array.isArray(out) && out.length === steps.length ? out : null;
+  } catch (e) {
+    console.warn('[Locatra] applyVariables failed:', e);
+    return null;
+  }
+}
+
+/** The variables with the actual timeline steps each one stands for. */
+function computeTestData() {
+  const steps = committedActions();
+  const vars = extractTestData(steps);
+  const applied = vars.length ? applyTestData(steps, vars) : null;
+  return vars.map((v) => {
+    let owned = applied ? steps.filter((s, i) => applied[i] && applied[i].varRef === v.name) : [];
+    if (!owned.length && Array.isArray(v.eventIds)) {
+      owned = steps.filter(s => s && s.eventId != null && v.eventIds.indexOf(s.eventId) !== -1);
+    }
+    return {
+      name: v.name,
+      value: v.value == null ? '' : String(v.value),
+      kind: v.kind === 'select' ? 'select' : 'fill',
+      steps: owned
+    };
+  });
+}
+
+function setTestDataStatus(text, kind) {
+  const el = document.getElementById('testDataStatus');
+  if (!el) return;
+  if (_testDataStatusTimer) { clearTimeout(_testDataStatusTimer); _testDataStatusTimer = null; }
+  el.textContent = String(text || '');
+  el.className = 'll-testdata-status' + (kind ? ' ' + kind : '');
+  el.hidden = !text;
+  if (text && kind !== 'err') {
+    _testDataStatusTimer = setTimeout(() => { el.hidden = true; el.textContent = ''; }, 5000);
+  }
+}
+
+function renderTestData() {
+  const section = document.getElementById('testDataSection');
+  if (!section) return;
+  const label = document.getElementById('testDataLabel');
+  const available = !!variablesApi();
+  section.hidden = !available;
+  if (label) label.hidden = !available;
+  if (!available) {
+    testDataVars = [];
+    return;
+  }
+  const next = computeTestData();
+  const count = document.getElementById('testDataCount');
+  if (count) count.textContent = next.length ? `(${next.length})` : '';
+  const empty = document.getElementById('testDataEmpty');
+  if (empty) empty.hidden = next.length > 0;
+  ['testDataCopyBtn', 'testDataDownloadBtn'].forEach((id) => {
+    const b = document.getElementById(id);
+    if (b) b.disabled = next.length === 0;
+  });
+  const list = document.getElementById('testDataList');
+  if (!list) return;
+  if (list.contains(document.activeElement)) {
+    // Never rebuild under the user's caret: refresh in place while the variables
+    // still line up, otherwise rebuild once focus leaves the list.
+    if (sameTestDataShape(testDataVars, next)) refreshTestDataInPlace(list, next);
+    else _testDataDirty = true;
+    return;
+  }
+  testDataVars = next;
+  _testDataDirty = false;
+  list.textContent = '';
+  next.forEach((v, i) => list.appendChild(buildTestDataRow(v, i)));
+}
+
+function sameTestDataShape(a, b) {
+  if (a.length !== b.length) return false;
+  return a.every((v, i) => v.steps.length === b[i].steps.length && v.steps.every((st, j) => st === b[i].steps[j]));
+}
+
+function refreshTestDataInPlace(list, next) {
+  next.forEach((v, i) => {
+    const nameIn = list.querySelector(`.ll-td-name[data-var="${i}"]`);
+    const valIn = list.querySelector(`.ll-td-value[data-var="${i}"]`);
+    if (nameIn && nameIn !== document.activeElement) nameIn.value = v.name;
+    if (valIn && valIn !== document.activeElement) valIn.value = v.value;
+    const meta = document.getElementById('tdMeta-' + i);
+    if (meta) meta.textContent = testDataMeta(v);
+  });
+  testDataVars = next;
+}
+
+function testDataMeta(v) {
+  const nums = v.steps.map(st => recordedActions.indexOf(st) + 1).filter(n => n > 0);
+  const what = v.kind === 'select' ? 'Selected option' : 'Typed text';
+  if (!nums.length) return what;
+  return `${what} · used in step${nums.length === 1 ? '' : 's'} ${nums.join(', ')}`;
+}
+
+function buildTestDataRow(v, i) {
+  const row = document.createElement('div');
+  row.className = 'll-td-row';
+  row.setAttribute('role', 'listitem');
+
+  const nameField = document.createElement('label');
+  nameField.className = 'll-td-field';
+  const nameCap = document.createElement('span');
+  nameCap.textContent = 'Name';
+  const name = document.createElement('input');
+  name.type = 'text';
+  name.className = 'll-td-name';
+  name.value = v.name;
+  name.maxLength = VAR_NAME_MAX;
+  name.spellcheck = false;
+  name.setAttribute('autocomplete', 'off');
+  name.setAttribute('data-var', String(i));
+  name.setAttribute('aria-label', `Name of test-data variable ${i + 1}`);
+  name.setAttribute('aria-describedby', 'tdErr-' + i);
+  name.setAttribute('aria-invalid', 'false');
+  nameField.appendChild(nameCap);
+  nameField.appendChild(name);
+
+  const valueField = document.createElement('label');
+  valueField.className = 'll-td-field';
+  const valueCap = document.createElement('span');
+  valueCap.textContent = 'Value';
+  const value = document.createElement('input');
+  value.type = 'text';
+  value.className = 'll-td-value';
+  value.value = v.value;
+  value.spellcheck = false;
+  value.setAttribute('autocomplete', 'off');
+  value.setAttribute('data-var', String(i));
+  value.setAttribute('aria-label', `Value of test-data variable ${i + 1}`);
+  valueField.appendChild(valueCap);
+  valueField.appendChild(value);
+
+  const meta = document.createElement('div');
+  meta.className = 'll-td-meta';
+  meta.id = 'tdMeta-' + i;
+  meta.textContent = testDataMeta(v);
+
+  const err = document.createElement('div');
+  err.className = 'll-td-err';
+  err.id = 'tdErr-' + i;
+  err.setAttribute('role', 'alert');
+  err.hidden = true;
+
+  row.appendChild(nameField);
+  row.appendChild(valueField);
+  row.appendChild(meta);
+  row.appendChild(err);
+  return row;
+}
+
+/** Why `name` can't name variable `index` ('' when it can). */
+function testDataNameError(name, index) {
+  const others = testDataVars.filter((v, j) => j !== index).map(v => v.name);
+  if (typeof LLCodegen !== 'undefined' && typeof LLCodegen.validateVariableName === 'function') {
+    try {
+      return String(LLCodegen.validateVariableName(name, others) || '');
+    } catch (e) {
+      console.warn('[Locatra] validateVariableName failed:', e);
+    }
+  }
+  if (!name) return 'Enter a name.';
+  if (name.length > VAR_NAME_MAX || !VAR_NAME_RE.test(name)) return 'Use letters, digits and _ only, starting with a letter or _.';
+  if (others.indexOf(name) !== -1) return `Another variable is already named "${name}".`;
+  return '';
+}
+
+function setTestDataError(index, msg, input) {
+  const errEl = document.getElementById('tdErr-' + index);
+  if (errEl) { errEl.textContent = msg; errEl.hidden = !msg; }
+  if (input) input.setAttribute('aria-invalid', msg ? 'true' : 'false');
+}
+
+function onTestDataNameInput(input, index) {
+  const v = testDataVars[index];
+  if (!v) return;
+  const name = input.value.trim();
+  const err = testDataNameError(name, index);
+  setTestDataError(index, err, input);
+  if (err || name === v.name) return;
+  v.steps.forEach((st) => { st.varName = name; });
+  v.name = name;
+  afterTestDataEdit(llSettings.variables !== false);
+}
+
+function onTestDataValueInput(input, index) {
+  const v = testDataVars[index];
+  if (!v) return;
+  const value = input.value;
+  v.steps.forEach((st) => { st.value = value; });
+  v.value = value;
+  afterTestDataEdit(true);
+}
+
+/** Steps changed under the timeline: refresh what shows them (debounced while typing) and save. */
+function afterTestDataEdit(affectsScript) {
+  if (affectsScript) _scriptInputsVersion++;
+  if (_testDataRenderTimer) clearTimeout(_testDataRenderTimer);
+  _testDataRenderTimer = setTimeout(() => {
+    _testDataRenderTimer = null;
+    renderTimeline();
+    updateCodePreview();
+    updateScriptStaleNotice();
+  }, TESTDATA_RENDER_DEBOUNCE_MS);
+  scheduleRecorderPersist();
+}
+
+/** Pretty JSON of the current test data, '' when there is none. */
+function testDataJson() {
+  const api = variablesApi();
+  if (!api) return '';
+  const vars = extractTestData(committedActions());
+  if (!vars.length) return '';
+  try {
+    return String(api.variablesJson(vars) || '');
+  } catch (e) {
+    console.warn('[Locatra] variablesJson failed:', e);
+    return '';
+  }
+}
+
+function initTestData() {
+  const list = document.getElementById('testDataList');
+  if (list) {
+    list.addEventListener('input', (e) => {
+      const t = e.target;
+      const i = parseInt(t.getAttribute('data-var'), 10);
+      if (t.classList.contains('ll-td-name')) onTestDataNameInput(t, i);
+      else if (t.classList.contains('ll-td-value')) onTestDataValueInput(t, i);
+    });
+    list.addEventListener('focusout', (e) => {
+      if (e.relatedTarget && list.contains(e.relatedTarget)) return;
+      // Leaving the list: show what changed meanwhile and drop an invalid draft name.
+      const t = e.target;
+      const i = parseInt(t.getAttribute && t.getAttribute('data-var'), 10);
+      const draftBad = t.classList && t.classList.contains('ll-td-name') && t.getAttribute('aria-invalid') === 'true';
+      if (_testDataDirty || draftBad) {
+        setTimeout(() => {
+          if (!list.contains(document.activeElement)) renderTestData();
+        }, 0);
+      }
+      if (draftBad && testDataVars[i]) setTestDataStatus(`Kept the name "${testDataVars[i].name}" — the one you typed wasn't valid.`, 'info');
+    });
+  }
+  const copyBtn = document.getElementById('testDataCopyBtn');
+  if (copyBtn) copyBtn.addEventListener('click', () => {
+    const json = testDataJson();
+    if (!json) { setTestDataStatus('No test data yet — record a step that types or selects a value.', 'info'); return; }
+    copyToClipboard(json, copyBtn);
+  });
+  const dlBtn = document.getElementById('testDataDownloadBtn');
+  if (dlBtn) dlBtn.addEventListener('click', () => {
+    const json = testDataJson();
+    if (!json) { setTestDataStatus('No test data yet — record a step that types or selects a value.', 'info'); return; }
+    downloadText(json, 'test-data.json', 'application/json');
+  });
+  renderTestData();
+}
+
+// ══ Locator health ════════════════════════════════════════════════════════════
+// Watched locators live in chrome.storage.local.llWatched =
+//   { version: 1, sites: { [siteKey]: [WatchedLocator] } }   (siteKey = origin + path)
+// The panel is the only writer. Every write re-reads storage first and goes
+// through one queue, so two panels (or quick clicks) never lose each other's work.
+// Anything read from storage or an imported file is untrusted and is rebuilt
+// field by field before use; page-derived text only reaches the DOM as text.
+const LL_WATCHED_KEY = 'llWatched';
+const WATCH_MAX_PER_SITE = 200;
+const WATCH_MAX_TOTAL = 2000;
+const WATCH_IMPORT_MAX_BYTES = 5 * 1024 * 1024;
+const HEALTH_STATUSES = ['ok', 'broken', 'ambiguous', 'frame-missing', 'error'];
+const HEALTH_BAD = ['broken', 'ambiguous', 'frame-missing', 'error'];
+const HEALTH_CHECK_TIMEOUT_MS = 15000;
+const HEALTH_BADGE_TEXT = {
+  ok: '✓ ok', broken: '✗ broken', ambiguous: '⚠ ambiguous', 'frame-missing': '⧉ frame missing',
+  error: '! error', none: '• not checked'
+};
+const FINGERPRINT_FIELDS = ['tag', 'id', 'testId', 'testAttr', 'role', 'name', 'label', 'placeholder', 'text',
+  'type', 'href', 'alt', 'title'];
+const UNSAFE_KEYS = ['__proto__', 'constructor', 'prototype'];
+
+let watched = { version: 1, sites: {} };
+let _watchedLoaded = false;
+let healthPage = null; // { url, siteKey (worker's), key (ours), error }
+let healthCheckRun = null;
+let _healthAutoCheckedKey = null;
+let _healthStatusTimer = null;
+let _activePageInFlight = false;
+let _activePageAgain = [];
+const _watchedOps = [];
+let _watchedBusy = false;
+
+/**
+ * origin + pathname of an http(s) URL ('' for anything else) — the same key the
+ * worker reports, which never includes credentials, the query or the hash.
+ */
+function siteKeyOf(url) {
+  if (typeof url !== 'string' || !url || url.length > 4096) return '';
+  let u;
+  try { u = new URL(url); } catch (e) { return ''; }
+  if (u.protocol !== 'http:' && u.protocol !== 'https:') return '';
+  return u.origin + u.pathname;
+}
+
+function newWatchId(taken) {
+  for (let i = 0; i < 50; i++) {
+    let id = '';
+    try {
+      if (typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function') id = crypto.randomUUID();
+    } catch (e) {}
+    if (!id) id = 'w' + Date.now().toString(36) + Math.random().toString(36).slice(2, 10);
+    if (!taken || !taken.has(id)) return id;
+  }
+  return 'w' + Date.now().toString(36) + '-' + (taken ? taken.size : 0);
+}
+
+function cleanText(v, max) {
+  return typeof v === 'string' ? v.slice(0, max) : '';
+}
+
+/** A JSON-safe deep copy with bounded size/depth; undefined for anything unusable. */
+function sanitizeJsonValue(v, depth) {
+  if (depth > 12) return undefined;
+  if (v === null || typeof v === 'boolean') return v;
+  if (typeof v === 'string') return v.slice(0, 2000);
+  if (typeof v === 'number') return Number.isFinite(v) ? v : undefined;
+  if (Array.isArray(v)) {
+    const out = [];
+    for (let i = 0; i < v.length && out.length < 64; i++) {
+      const c = sanitizeJsonValue(v[i], depth + 1);
+      if (c !== undefined) out.push(c);
+    }
+    return out;
+  }
+  if (typeof v === 'object') {
+    const out = {};
+    const keys = Object.keys(v).slice(0, 64);
+    for (const k of keys) {
+      if (UNSAFE_KEYS.indexOf(k) !== -1) continue;
+      const c = sanitizeJsonValue(v[k], depth + 1);
+      if (c !== undefined) out[k] = c;
+    }
+    return out;
+  }
+  return undefined;
+}
+
+function sanitizeTarget(t) {
+  if (!isPlainObject(t)) return null;
+  const c = sanitizeJsonValue(t, 0);
+  if (!isPlainObject(c) || typeof c.kind !== 'string' || !c.kind) return null;
+  let json = '';
+  try { json = JSON.stringify(c); } catch (e) { return null; }
+  return json.length <= 20000 ? c : null;
+}
+
+function sanitizeFingerprint(fp) {
+  const out = {};
+  if (!isPlainObject(fp)) return out;
+  FINGERPRINT_FIELDS.forEach((k) => {
+    const v = cleanText(fp[k], k === 'text' ? 80 : 300);
+    if (v) out[k] = v;
+  });
+  if (Array.isArray(fp.classes)) {
+    out.classes = fp.classes.filter(c => typeof c === 'string' && c).slice(0, 5).map(c => c.slice(0, 100));
+  }
+  return out;
+}
+
+function sanitizeSuggestion(sg) {
+  if (!isPlainObject(sg)) return null;
+  const target = sanitizeTarget(sg.target);
+  if (!target) return null;
+  return { target: target, code: cleanText(sg.code, 2000) || codeForTarget(target) };
+}
+
+function sanitizeLastCheck(lc) {
+  if (!isPlainObject(lc) || HEALTH_STATUSES.indexOf(lc.status) === -1) return null;
+  const at = Number(lc.at);
+  const count = Number(lc.count);
+  const out = {
+    at: Number.isFinite(at) && at > 0 ? at : Date.now(),
+    status: lc.status,
+    count: Number.isFinite(count) && count >= 0 ? Math.floor(count) : 0
+  };
+  const sg = sanitizeSuggestion(lc.suggestion);
+  if (sg && (lc.status === 'broken' || lc.status === 'ambiguous')) out.suggestion = sg;
+  const err = cleanText(lc.error, 300);
+  if (err) out.error = err;
+  return out;
+}
+
+/** Playwright TS for a target (the stored `code` field). */
+function codeForTarget(target) {
+  if (typeof LLCodegen === 'undefined' || !target) return '';
+  try {
+    return String(LLCodegen.locatorExpr(target, 'playwright', 'typescript') || '').slice(0, 2000);
+  } catch (e) {
+    return '';
+  }
+}
+
+function sanitizeWatchedItem(raw, takenIds) {
+  if (!isPlainObject(raw)) return null;
+  const target = sanitizeTarget(raw.target);
+  if (!target) return null;
+  const id = typeof raw.id === 'string' && /^[A-Za-z0-9_-]{1,64}$/.test(raw.id) && !takenIds.has(raw.id)
+    ? raw.id
+    : newWatchId(takenIds);
+  const code = cleanText(raw.code, 2000) || codeForTarget(target);
+  const savedAt = Number(raw.savedAt);
+  const item = {
+    id: id,
+    label: cleanText(raw.label, 200) || code.slice(0, 200) || 'Locator',
+    target: target,
+    code: code,
+    fingerprint: sanitizeFingerprint(raw.fingerprint),
+    savedAt: Number.isFinite(savedAt) && savedAt > 0 ? savedAt : Date.now()
+  };
+  const lc = sanitizeLastCheck(raw.lastCheck);
+  if (lc) item.lastCheck = lc;
+  return item;
+}
+
+/** Key-order-independent JSON, to compare targets. */
+function canonicalJson(v) {
+  if (Array.isArray(v)) return '[' + v.map(canonicalJson).join(',') + ']';
+  if (isPlainObject(v)) {
+    return '{' + Object.keys(v).sort().map(k => JSON.stringify(k) + ':' + canonicalJson(v[k])).join(',') + '}';
+  }
+  return JSON.stringify(v === undefined ? null : v);
+}
+
+function sameTarget(a, b) {
+  return canonicalJson(a) === canonicalJson(b);
+}
+
+/** The canonical targets of a site's items, for duplicate checks without O(n²) work. */
+function targetKeysOf(items) {
+  return new Set(items.map(it => canonicalJson(it.target)));
+}
+
+function watchedTotal(state) {
+  return Object.keys(state.sites).reduce((n, k) => n + state.sites[k].length, 0);
+}
+
+/**
+ * Rebuild a stored / imported llWatched value from scratch.
+ * → { state, skipped, valid } (valid=false when the shape isn't llWatched at all).
+ */
+function normalizeWatched(raw) {
+  const state = { version: 1, sites: {} };
+  if (!isPlainObject(raw) || raw.version !== 1 || !isPlainObject(raw.sites)) {
+    return { state: state, skipped: 0, valid: false };
+  }
+  let skipped = 0;
+  let total = 0;
+  const ids = new Set();
+  Object.keys(raw.sites).forEach((k) => {
+    const list = raw.sites[k];
+    const key = UNSAFE_KEYS.indexOf(k) === -1 ? siteKeyOf(k) : '';
+    if (!key || !Array.isArray(list)) {
+      skipped += Array.isArray(list) ? list.length : 1;
+      return;
+    }
+    const arr = Object.prototype.hasOwnProperty.call(state.sites, key) ? state.sites[key] : [];
+    const seen = targetKeysOf(arr);
+    list.forEach((it) => {
+      if (arr.length >= WATCH_MAX_PER_SITE || total >= WATCH_MAX_TOTAL) { skipped++; return; }
+      const item = sanitizeWatchedItem(it, ids);
+      const tk = item ? canonicalJson(item.target) : '';
+      if (!item || seen.has(tk)) { skipped++; return; }
+      seen.add(tk);
+      ids.add(item.id);
+      arr.push(item);
+      total++;
+    });
+    if (arr.length) state.sites[key] = arr;
+  });
+  return { state: state, skipped: skipped, valid: true };
+}
+
+function storageLocal() {
+  return chrome.storage && chrome.storage.local ? chrome.storage.local : null;
+}
+
+function readWatched(cb) {
+  const local = storageLocal();
+  if (!local) { cb(watched); return; }
+  local.get(LL_WATCHED_KEY, (res) => {
+    void chrome.runtime.lastError;
+    cb(normalizeWatched(res && res[LL_WATCHED_KEY]).state);
+  });
+}
+
+/**
+ * Queue a change to llWatched. `fn(state)` edits a fresh copy read from storage and
+ * returns { changed, … }; it is written back only when changed. `done(err, result)`.
+ */
+function mutateWatched(fn, done) {
+  _watchedOps.push({ fn: fn, done: done });
+  if (!_watchedBusy) runNextWatchedOp();
+}
+
+function runNextWatchedOp() {
+  const op = _watchedOps.shift();
+  if (!op) { _watchedBusy = false; return; }
+  _watchedBusy = true;
+  const finish = (err, result) => {
+    try {
+      if (typeof op.done === 'function') op.done(err, result || {});
+    } catch (e) {
+      console.warn('[Locatra] watched-locator callback failed:', e);
+    }
+    runNextWatchedOp();
+  };
+  readWatched((state) => {
+    let result;
+    try {
+      result = op.fn(state) || {};
+    } catch (e) {
+      finish(e, null);
+      return;
+    }
+    if (!result.changed) { finish(null, result); return; }
+    const local = storageLocal();
+    if (!local) {
+      watched = state;
+      afterWatchedChange();
+      finish(null, result);
+      return;
+    }
+    local.set({ [LL_WATCHED_KEY]: state }, () => {
+      const err = chrome.runtime.lastError;
+      if (!err) {
+        watched = state;
+        afterWatchedChange();
+      }
+      finish(err ? new Error(err.message || String(err)) : null, result);
+    });
+  });
+}
+
+function afterWatchedChange() {
+  _watchedLoaded = true;
+  renderHealth();
+  refreshWatchButtons();
+}
+
+function loadWatched() {
+  readWatched((state) => {
+    watched = state;
+    afterWatchedChange();
+    maybeAutoCheckHealth();
+  });
+}
+
+// ── Watching from the Inspect tab ────────────────────────────────────────────
+function pickPageUrl(data) {
+  if (!data) return '';
+  if (typeof data.pageUrl === 'string' && data.pageUrl) return data.pageUrl;
+  const el = data.elementData;
+  return el && typeof el.pageUrl === 'string' ? el.pageUrl : '';
+}
+
+function shortText(s, max) {
+  const t = String(s == null ? '' : s).replace(/\s+/g, ' ').trim();
+  return t.length > max ? t.slice(0, max - 1) + '…' : t;
+}
+
+/** Human label: role "name", else tag#id, else tag "text". */
+function watchLabel(fp, fallback) {
+  const name = fp.label || fp.text || fp.name || '';
+  if (fp.role && name) return shortText(`${fp.role} "${shortText(name, 60)}"`, 200);
+  const tag = fp.tag || 'element';
+  if (fp.id) return shortText(`${tag}#${fp.id}`, 200);
+  if (name) return shortText(`${tag} "${shortText(name, 60)}"`, 200);
+  return shortText(fallback || tag, 200);
+}
+
+/** The pick's fingerprint, or one assembled from the element bar's fields. */
+function pickFingerprint(el) {
+  if (isPlainObject(el.fingerprint)) return sanitizeFingerprint(el.fingerprint);
+  return sanitizeFingerprint({
+    tag: el.tag, id: el.id, testId: el.testId, role: el.role, label: el.ariaLabel,
+    placeholder: el.placeholder, text: el.visibleText
+  });
+}
+
+function makeWatched(target, code, fp, label, takenIds) {
+  const t = sanitizeTarget(target);
+  if (!t) return null;
+  const c = cleanText(code, 2000) || codeForTarget(t);
+  return {
+    id: newWatchId(takenIds),
+    label: cleanText(label, 200) || watchLabel(fp, c),
+    target: t,
+    code: c,
+    fingerprint: fp,
+    savedAt: Date.now()
+  };
+}
+
+function allWatchedIds(state) {
+  const ids = new Set();
+  Object.keys(state.sites).forEach(k => state.sites[k].forEach(it => ids.add(it.id)));
+  return ids;
+}
+
+function capProblem(state, key) {
+  const site = state.sites[key] || [];
+  if (site.length >= WATCH_MAX_PER_SITE) return `This page already has ${WATCH_MAX_PER_SITE} watched locators — remove some in the Health tab first.`;
+  if (watchedTotal(state) >= WATCH_MAX_TOTAL) return `You already watch ${WATCH_MAX_TOTAL} locators — remove some in the Health tab first.`;
+  return '';
+}
+
+function findWatched(key, target) {
+  const site = key && Object.prototype.hasOwnProperty.call(watched.sites, key) ? watched.sites[key] : [];
+  return site.find(it => sameTarget(it.target, target)) || null;
+}
+
+/** Show ★ Watching on the cards whose locator is already watched for the pick's page. */
+function refreshWatchButtons() {
+  const container = document.getElementById('cardsContainer');
+  if (!container) return;
+  const key = siteKeyOf(pickPageUrl(lastResultData));
+  container.querySelectorAll('.watch-btn').forEach((btn) => {
+    const loc = lastLocators[parseInt(btn.getAttribute('data-index'), 10)];
+    const on = !!(loc && key && findWatched(key, loc.target));
+    btn.setAttribute('aria-pressed', on ? 'true' : 'false');
+    btn.textContent = on ? '★ Watching' : '☆ Watch';
+    btn.title = on ? 'Watched in the Health tab — click to stop watching' : 'Keep an eye on this locator in the Health tab';
+  });
+}
+
+/** ☆ Watch / ★ Watching on a locator card. */
+function toggleWatchLocator(index) {
+  const data = lastResultData;
+  const loc = lastLocators[index];
+  if (!data || !loc || !isPlainObject(loc.target)) return;
+  const el = isPlainObject(data.elementData) ? data.elementData : {};
+  const go = (key) => {
+    if (!key) {
+      showPanelStatus('Locators can only be watched on http(s) pages.', 'err');
+      return;
+    }
+    const fp = pickFingerprint(el);
+    mutateWatched((state) => {
+      const site = state.sites[key] || [];
+      const at = site.findIndex(it => sameTarget(it.target, loc.target));
+      if (at !== -1) {
+        site.splice(at, 1);
+        if (!site.length) delete state.sites[key];
+        return { changed: true, removed: true };
+      }
+      const cap = capProblem(state, key);
+      if (cap) return { changed: false, error: cap };
+      const item = makeWatched(loc.target, loc.code, fp, '', allWatchedIds(state));
+      if (!item) return { changed: false, error: "This locator can't be watched." };
+      site.push(item);
+      state.sites[key] = site;
+      return { changed: true, added: item };
+    }, (err, r) => {
+      if (err) showPanelStatus("Couldn't save the watched locator: " + (err.message || err), 'err');
+      else if (r.error) showPanelStatus(r.error, 'err');
+      else if (r.removed) showPanelStatus('Stopped watching that locator.', 'info');
+      else if (r.added) showPanelStatus(`Watching ${r.added.label} — see the Health tab.`, 'info');
+    });
+  };
+  const key = siteKeyOf(pickPageUrl(data));
+  if (key) go(key);
+  else refreshActivePage(page => go(page && page.key));
+}
+
+/** "Watch all" in the Page Object view: every included element with a locator. */
+function watchAllPom() {
+  if (!pomModel) return;
+  const els = pomModel.elements.filter(e => e.include && isPlainObject(e.target));
+  if (!els.length) {
+    setPomStatus('Include at least one element to watch.', 'info');
+    return;
+  }
+  const key = siteKeyOf(pomModel.pageUrl);
+  const go = (siteKey) => {
+    if (!siteKey) {
+      setPomStatus('Locators can only be watched on http(s) pages.', 'err');
+      return;
+    }
+    mutateWatched((state) => {
+      const site = state.sites[siteKey] || [];
+      const seen = targetKeysOf(site);
+      const ids = allWatchedIds(state);
+      let total = watchedTotal(state);
+      let added = 0;
+      let already = 0;
+      let over = 0;
+      els.forEach((e) => {
+        const tk = canonicalJson(e.target);
+        if (seen.has(tk)) { already++; return; }
+        if (site.length >= WATCH_MAX_PER_SITE || total >= WATCH_MAX_TOTAL) { over++; return; }
+        const fp = sanitizeFingerprint(isPlainObject(e.fingerprint) ? e.fingerprint : { role: e.role });
+        const name = String(e.name || '').trim();
+        const label = name ? `${name} (${String(e.kind || 'element')})` : '';
+        const item = makeWatched(e.target, e.code, fp, label, ids);
+        if (!item) { over++; return; }
+        seen.add(tk);
+        ids.add(item.id);
+        site.push(item);
+        total++;
+        added++;
+      });
+      if (site.length) state.sites[siteKey] = site;
+      return { changed: added > 0, added: added, already: already, over: over };
+    }, (err, r) => {
+      if (err) { setPomStatus("Couldn't save the watched locators: " + (err.message || err), 'err'); return; }
+      const parts = [`Watching ${r.added} locator${r.added === 1 ? '' : 's'} — see the Health tab.`];
+      if (r.already) parts.push(`${r.already} already watched.`);
+      if (r.over) parts.push(`${r.over} skipped (limit: ${WATCH_MAX_PER_SITE} per page, ${WATCH_MAX_TOTAL} in total).`);
+      setPomStatus(parts.join(' '), r.over && !r.added ? 'err' : 'info');
+    });
+  };
+  if (key) go(key);
+  else refreshActivePage(page => go(page && page.key));
+}
+
+// ── The active page ──────────────────────────────────────────────────────────
+function healthTabVisible() {
+  const tab = document.getElementById('tab-health');
+  return !!tab && tab.classList.contains('active');
+}
+
+/** Whether the panel should keep track of the active page right now. */
+function healthPageMatters() {
+  return healthTabVisible() || llSettings.healthAutoCheck === true;
+}
+
+/** Ask the worker which page this window shows; `cb(page)`. Concurrent calls share one request. */
+function refreshActivePage(cb) {
+  if (typeof cb === 'function') _activePageAgain.push(cb);
+  if (_activePageInFlight) return;
+  _activePageInFlight = true;
+  sendToBackground({ type: 'GET_ACTIVE_PAGE' }, (res, err) => {
+    _activePageInFlight = false;
+    let page;
+    if (res && res.ok !== false && (typeof res.url === 'string' || typeof res.siteKey === 'string')) {
+      const url = typeof res.url === 'string' ? res.url : '';
+      const key = siteKeyOf(url) || siteKeyOf(res.siteKey);
+      page = {
+        url: url,
+        siteKey: typeof res.siteKey === 'string' ? res.siteKey : '',
+        key: key,
+        error: key ? '' : 'Locator health works on http(s) pages.'
+      };
+    } else {
+      page = {
+        url: '', siteKey: '', key: '',
+        error: (res && typeof res.error === 'string' && res.error) ||
+          (err ? "Couldn't reach the extension's background worker." : "Couldn't read the active page.")
+      };
+    }
+    const changed = !healthPage || healthPage.key !== page.key || healthPage.error !== page.error;
+    if (!healthPage || healthPage.key !== page.key) _healthAutoCheckedKey = null;
+    healthPage = page;
+    if (changed) renderHealth();
+    const waiters = _activePageAgain.splice(0);
+    waiters.forEach((fn) => {
+      try { fn(page); } catch (e) { console.warn('[Locatra] active-page waiter failed:', e); }
+    });
+    maybeAutoCheckHealth();
+  });
+}
+
+function currentSiteItems() {
+  const key = healthPage && healthPage.key;
+  return key && Object.prototype.hasOwnProperty.call(watched.sites, key) ? watched.sites[key] : [];
+}
+
+/** llSettings.healthAutoCheck: check once per arrival on a watched page. */
+function maybeAutoCheckHealth() {
+  if (llSettings.healthAutoCheck !== true || !_settingsLoaded || !_watchedLoaded) return;
+  if (!healthPage || !healthPage.key || healthCheckRun) return;
+  if (_healthAutoCheckedKey === healthPage.key) return;
+  if (!currentSiteItems().length) return;
+  _healthAutoCheckedKey = healthPage.key;
+  runHealthCheck(true);
+}
+
+function onHealthTabShown() {
+  renderHealth();
+  refreshActivePage();
+}
+
+// ── Checking ─────────────────────────────────────────────────────────────────
+function setHealthStatus(text, kind) {
+  const el = document.getElementById('healthStatus');
+  if (!el) return;
+  if (_healthStatusTimer) { clearTimeout(_healthStatusTimer); _healthStatusTimer = null; }
+  el.textContent = String(text || '');
+  el.className = 'll-health-status' + (kind ? ' ' + kind : '');
+  el.hidden = !text;
+  if (text && (kind === 'ok' || kind === 'info')) {
+    _healthStatusTimer = setTimeout(() => { el.hidden = true; el.textContent = ''; }, 8000);
+  }
+}
+
+function runHealthCheck(auto) {
+  if (healthCheckRun) return;
+  const run = { auto: !!auto, key: '', siteKey: '', sent: new Map(), timer: null };
+  healthCheckRun = run;
+  setHealthStatus(auto ? 'Checking the watched locators on this page…' : 'Checking…', 'info');
+  updateHealthControls();
+  refreshActivePage((page) => {
+    if (healthCheckRun !== run) return;
+    const items = currentSiteItems();
+    if (!page.key || !items.length) {
+      healthCheckRun = null;
+      updateHealthControls();
+      setHealthStatus(page.key ? 'Nothing is watched on this page yet.' : page.error, page.key ? 'info' : 'err');
+      return;
+    }
+    run.key = page.key;
+    run.siteKey = page.siteKey;
+    items.forEach(it => run.sent.set(it.id, canonicalJson(it.target)));
+    run.timer = setTimeout(() => {
+      if (healthCheckRun !== run) return;
+      healthCheckRun = null;
+      updateHealthControls();
+      setHealthStatus('No answer from the page — reload it and check again.', 'err');
+    }, HEALTH_CHECK_TIMEOUT_MS);
+    sendToBackground({
+      type: 'HEALTH_CHECK',
+      items: items.map(it => ({ id: it.id, target: it.target, fingerprint: it.fingerprint }))
+    }, (res, err) => {
+      if (healthCheckRun !== run) return;
+      clearTimeout(run.timer);
+      healthCheckRun = null;
+      updateHealthControls();
+      if (!res || res.ok === false) {
+        setHealthStatus((res && typeof res.error === 'string' && res.error) ||
+          (err ? "The extension's background worker didn't answer — try again." : 'The check failed.'), 'err');
+        return;
+      }
+      if (typeof res.siteKey === 'string' && res.siteKey && run.siteKey && res.siteKey !== run.siteKey) {
+        setHealthStatus('The page changed during the check — check again.', 'warn');
+        refreshActivePage();
+        return;
+      }
+      applyHealthResults(run, Array.isArray(res.results) ? res.results : []);
+    });
+  });
+}
+
+function applyHealthResults(run, results) {
+  const byId = new Map();
+  results.forEach((r) => {
+    if (isPlainObject(r) && typeof r.id === 'string' && !byId.has(r.id)) byId.set(r.id, r);
+  });
+  const at = Date.now();
+  mutateWatched((state) => {
+    const site = state.sites[run.key];
+    const tally = { ok: 0, broken: 0, ambiguous: 0, 'frame-missing': 0, error: 0 };
+    let n = 0;
+    let suggestions = 0;
+    (site || []).forEach((item) => {
+      // Added or changed (suggestion accepted) after the check began: not what was checked.
+      if (run.sent.get(item.id) !== canonicalJson(item.target)) return;
+      const r = byId.get(item.id);
+      const lc = r ? sanitizeLastCheck(Object.assign({}, r, { at: at })) : null;
+      item.lastCheck = lc || { at: at, status: 'error', count: 0, error: r ? 'The page sent an unreadable result.' : 'The page sent no result for this locator.' };
+      tally[item.lastCheck.status]++;
+      if (item.lastCheck.suggestion) suggestions++;
+      n++;
+    });
+    return { changed: n > 0, n: n, tally: tally, suggestions: suggestions };
+  }, (err, r) => {
+    if (err) { setHealthStatus("Checked, but couldn't save the results: " + (err.message || err), 'err'); return; }
+    if (!r.n) { setHealthStatus('Nothing left to check on this page.', 'info'); return; }
+    const t = r.tally;
+    const parts = [];
+    if (t.ok) parts.push(`${t.ok} ok`);
+    if (t.broken) parts.push(`${t.broken} broken`);
+    if (t.ambiguous) parts.push(`${t.ambiguous} ambiguous`);
+    if (t['frame-missing']) parts.push(`${t['frame-missing']} frame missing`);
+    if (t.error) parts.push(`${t.error} error${t.error === 1 ? '' : 's'}`);
+    const bad = r.n - t.ok;
+    let msg = `Checked ${r.n} locator${r.n === 1 ? '' : 's'}: ${parts.join(' · ')}.`;
+    if (r.suggestions) msg += ` ${r.suggestions} suggested fix${r.suggestions === 1 ? '' : 'es'} below.`;
+    setHealthStatus(msg, bad ? 'warn' : 'ok');
+  });
+}
+
+// ── Health tab rendering ─────────────────────────────────────────────────────
+function healthStatusOf(item) {
+  return item.lastCheck && HEALTH_STATUSES.indexOf(item.lastCheck.status) !== -1 ? item.lastCheck.status : 'none';
+}
+
+function relativeTime(at) {
+  const diff = Date.now() - at;
+  if (!Number.isFinite(diff) || diff < 0) return new Date(at).toLocaleString();
+  if (diff < 60000) return 'just now';
+  if (diff < 3600000) return `${Math.floor(diff / 60000)} min ago`;
+  if (diff < 86400000) return `${Math.floor(diff / 3600000)} h ago`;
+  return new Date(at).toLocaleDateString();
+}
+
+function healthMetaText(item) {
+  const lc = item.lastCheck;
+  if (!lc) return 'Not checked yet';
+  let what = '';
+  if (lc.status === 'ok') what = 'matches 1 element';
+  else if (lc.status === 'broken') what = 'matches nothing';
+  else if (lc.status === 'ambiguous') what = `matches ${lc.count} elements`;
+  else if (lc.status === 'frame-missing') what = 'its frame is not on the page';
+  else what = lc.error ? 'error: ' + lc.error : 'could not be checked';
+  return `Checked ${relativeTime(lc.at)} · ${what}`;
+}
+
+/** The locator in the panel's current framework/language. */
+function watchedCodeForOutput(item) {
+  if (isPlaywrightJsTs() || typeof LLCodegen === 'undefined') return item.code;
+  try {
+    return String(LLCodegen.locatorExpr(item.target, outFramework, outLanguage) || item.code);
+  } catch (e) {
+    return item.code;
+  }
+}
+
+function suggestionCodeForOutput(sg) {
+  if (isPlaywrightJsTs() || typeof LLCodegen === 'undefined') return sg.code;
+  try {
+    return String(LLCodegen.locatorExpr(sg.target, outFramework, outLanguage) || sg.code);
+  } catch (e) {
+    return sg.code;
+  }
+}
+
+function healthButton(cls, text, label, id) {
+  const b = document.createElement('button');
+  b.type = 'button';
+  b.className = 'll-rec-ctl ' + cls;
+  b.textContent = text;
+  b.setAttribute('aria-label', label);
+  b.setAttribute('data-id', id);
+  return b;
+}
+
+function buildHealthRow(item) {
+  const status = healthStatusOf(item);
+  const row = document.createElement('div');
+  row.className = 'll-health-row hs-' + status;
+  row.setAttribute('role', 'listitem');
+  row.setAttribute('data-id', item.id);
+
+  const head = document.createElement('div');
+  head.className = 'll-health-head';
+  const badge = document.createElement('span');
+  badge.className = 'll-health-badge hs-' + status;
+  badge.textContent = HEALTH_BADGE_TEXT[status];
+  const label = document.createElement('span');
+  label.className = 'll-health-label';
+  label.textContent = item.label;
+  head.appendChild(badge);
+  head.appendChild(label);
+
+  const code = document.createElement('code');
+  code.className = 'll-health-code';
+  code.textContent = watchedCodeForOutput(item);
+
+  const meta = document.createElement('div');
+  meta.className = 'll-health-meta';
+  meta.textContent = healthMetaText(item);
+  if (item.lastCheck) meta.title = new Date(item.lastCheck.at).toLocaleString();
+
+  row.appendChild(head);
+  row.appendChild(code);
+  row.appendChild(meta);
+
+  const sg = item.lastCheck && item.lastCheck.suggestion;
+  if (sg) {
+    const box = document.createElement('div');
+    box.className = 'll-health-suggest';
+    const t = document.createElement('span');
+    t.textContent = 'Suggested replacement (unique on this page):';
+    const c = document.createElement('code');
+    c.className = 'll-health-code';
+    c.textContent = suggestionCodeForOutput(sg);
+    box.appendChild(t);
+    box.appendChild(c);
+    box.appendChild(healthButton('ll-health-use', '✓ Use suggested locator', 'Use the suggested locator for ' + item.label, item.id));
+    row.appendChild(box);
+  }
+
+  const actions = document.createElement('div');
+  actions.className = 'll-health-row-actions';
+  actions.appendChild(healthButton('ll-health-copy', 'Copy', 'Copy locator: ' + item.label, item.id));
+  actions.appendChild(healthButton('ll-health-remove', '✕ Remove', 'Stop watching: ' + item.label, item.id));
+  row.appendChild(actions);
+  return row;
+}
+
+function updateHealthControls() {
+  const btn = document.getElementById('healthCheckBtn');
+  if (btn) {
+    btn.disabled = !!healthCheckRun || !currentSiteItems().length;
+    btn.textContent = healthCheckRun ? '⟳ Checking…' : '↻ Check now';
+  }
+}
+
+function updateHealthBadge() {
+  const badge = document.getElementById('healthTabBadge');
+  if (!badge) return;
+  const bad = currentSiteItems().filter(it => HEALTH_BAD.indexOf(healthStatusOf(it)) !== -1).length;
+  badge.textContent = bad ? String(bad) : '';
+  badge.hidden = !bad;
+  badge.title = bad ? `${bad} watched locator${bad === 1 ? '' : 's'} on this page need${bad === 1 ? 's' : ''} attention` : '';
+}
+
+function renderHealth() {
+  updateHealthBadge();
+  updateHealthControls();
+  const list = document.getElementById('healthList');
+  if (!list) return;
+  const pageEl = document.getElementById('healthPage');
+  if (pageEl) {
+    pageEl.textContent = '';
+    if (!healthPage) pageEl.textContent = 'Checking which page is open…';
+    else if (!healthPage.key) pageEl.textContent = healthPage.error;
+    else {
+      pageEl.appendChild(document.createTextNode('Page: '));
+      const strong = document.createElement('strong');
+      strong.textContent = healthPage.key;
+      pageEl.appendChild(strong);
+    }
+  }
+
+  const items = currentSiteItems();
+  // Re-rendering replaces the buttons; put keyboard focus back where it was.
+  const active = document.activeElement;
+  const focusId = active && list.contains(active) ? active.getAttribute('data-id') : null;
+  const focusCls = focusId ? ['ll-health-use', 'll-health-copy', 'll-health-remove'].find(c => active.classList.contains(c)) : null;
+  list.textContent = '';
+  items.forEach(it => list.appendChild(buildHealthRow(it)));
+  if (focusId && focusCls) {
+    const again = Array.prototype.find.call(list.querySelectorAll('.' + focusCls), b => b.getAttribute('data-id') === focusId);
+    if (again) again.focus();
+  }
+
+  const empty = document.getElementById('healthEmpty');
+  if (empty) empty.hidden = items.length > 0 || !healthPage || !healthPage.key;
+  const summary = document.getElementById('healthSummary');
+  if (summary) {
+    const bad = items.filter(it => HEALTH_BAD.indexOf(healthStatusOf(it)) !== -1).length;
+    summary.textContent = items.length
+      ? `${items.length} watched on this page${bad ? ` · ${bad} need${bad === 1 ? 's' : ''} attention` : ''}`
+      : '';
+  }
+
+  const other = document.getElementById('healthOther');
+  const otherList = document.getElementById('healthOtherList');
+  const otherKeys = Object.keys(watched.sites).filter(k => !healthPage || k !== healthPage.key).sort();
+  if (other) other.hidden = otherKeys.length === 0;
+  const otherSummary = document.getElementById('healthOtherSummary');
+  if (otherSummary) otherSummary.textContent = `Other sites (${otherKeys.length})`;
+  if (otherList) {
+    otherList.textContent = '';
+    otherKeys.forEach((k) => {
+      const li = document.createElement('li');
+      const n = watched.sites[k].length;
+      li.textContent = `${k} — ${n} locator${n === 1 ? '' : 's'}`;
+      otherList.appendChild(li);
+    });
+  }
+}
+
+function removeWatched(id) {
+  const key = healthPage && healthPage.key;
+  if (!key) return;
+  const before = currentSiteItems().map(it => it.id);
+  const idx = before.indexOf(id);
+  mutateWatched((state) => {
+    const site = state.sites[key] || [];
+    const at = site.findIndex(it => it.id === id);
+    if (at === -1) return { changed: false };
+    site.splice(at, 1);
+    if (!site.length) delete state.sites[key];
+    return { changed: true };
+  }, (err, r) => {
+    if (err) { setHealthStatus("Couldn't remove it: " + (err.message || err), 'err'); return; }
+    if (!r.changed) return;
+    setHealthStatus('Removed.', 'info');
+    // Keep keyboard users in the list: the row that took its place, else the last one.
+    const list = document.getElementById('healthList');
+    const btns = list ? list.querySelectorAll('.ll-health-remove') : [];
+    const next = btns[Math.min(idx, btns.length - 1)];
+    if (next) next.focus();
+    else {
+      const importBtn = document.getElementById('healthImportBtn');
+      if (importBtn) importBtn.focus();
+    }
+  });
+}
+
+function useSuggestion(id) {
+  const key = healthPage && healthPage.key;
+  if (!key) return;
+  mutateWatched((state) => {
+    const item = (state.sites[key] || []).find(it => it.id === id);
+    const sg = item && item.lastCheck && item.lastCheck.suggestion;
+    if (!sg) return { changed: false };
+    item.target = sg.target;
+    item.code = sg.code || codeForTarget(sg.target);
+    delete item.lastCheck; // the new locator hasn't been checked as the watched one yet
+    return { changed: true };
+  }, (err, r) => {
+    if (err) setHealthStatus("Couldn't update it: " + (err.message || err), 'err');
+    else if (r.changed) setHealthStatus('Locator replaced with the suggestion. Check now to confirm it.', 'ok');
+  });
+}
+
+function copyWatched(id, btn) {
+  const item = currentSiteItems().find(it => it.id === id);
+  if (item) copyToClipboard(watchedCodeForOutput(item), btn);
+}
+
+function exportWatched() {
+  readWatched((state) => {
+    const n = watchedTotal(state);
+    if (!n) { setHealthStatus('Nothing to export yet.', 'info'); return; }
+    downloadText(JSON.stringify(state, null, 2) + '\n', 'locatra-watched-locators.json', 'application/json');
+    setHealthStatus(`Exported ${n} watched locator${n === 1 ? '' : 's'}.`, 'ok');
+  });
+}
+
+/** Merge an exported file into llWatched. Every field is validated; nothing is trusted. */
+function importWatchedText(text) {
+  let parsed;
+  try {
+    parsed = JSON.parse(String(text));
+  } catch (e) {
+    setHealthStatus("That file isn't valid JSON.", 'err');
+    return;
+  }
+  const incoming = normalizeWatched(parsed);
+  if (!incoming.valid) {
+    setHealthStatus("That isn't a Locatra watched-locators export (expected { \"version\": 1, \"sites\": { … } }).", 'err');
+    return;
+  }
+  mutateWatched((state) => {
+    const ids = allWatchedIds(state);
+    let total = watchedTotal(state);
+    let added = 0;
+    let dup = 0;
+    let over = 0;
+    Object.keys(incoming.state.sites).forEach((key) => {
+      const site = state.sites[key] || [];
+      const seen = targetKeysOf(site);
+      incoming.state.sites[key].forEach((item) => {
+        const tk = canonicalJson(item.target);
+        if (seen.has(tk)) { dup++; return; }
+        if (site.length >= WATCH_MAX_PER_SITE || total >= WATCH_MAX_TOTAL) { over++; return; }
+        seen.add(tk);
+        if (ids.has(item.id)) item.id = newWatchId(ids);
+        ids.add(item.id);
+        site.push(item);
+        total++;
+        added++;
+      });
+      if (site.length) state.sites[key] = site;
+    });
+    return { changed: added > 0, added: added, dup: dup, over: over };
+  }, (err, r) => {
+    if (err) { setHealthStatus("Couldn't save the imported locators: " + (err.message || err), 'err'); return; }
+    const parts = [`Imported ${r.added} locator${r.added === 1 ? '' : 's'}.`];
+    if (r.dup) parts.push(`${r.dup} already watched.`);
+    if (r.over) parts.push(`${r.over} over the limit (${WATCH_MAX_PER_SITE} per page, ${WATCH_MAX_TOTAL} in total).`);
+    if (incoming.skipped) parts.push(`${incoming.skipped} invalid entr${incoming.skipped === 1 ? 'y' : 'ies'} skipped.`);
+    setHealthStatus(parts.join(' '), r.added ? 'ok' : 'warn');
+  });
+}
+
+function readFileText(file, cb) {
+  if (file && typeof file.text === 'function') {
+    file.text().then(t => cb(null, t), e => cb(e || new Error('read failed')));
+    return;
+  }
+  try {
+    const reader = new FileReader();
+    reader.onload = () => cb(null, String(reader.result || ''));
+    reader.onerror = () => cb(reader.error || new Error('read failed'));
+    reader.readAsText(file);
+  } catch (e) {
+    cb(e);
+  }
+}
+
+function onImportFileChosen(input) {
+  const file = input.files && input.files[0];
+  if (!file) return;
+  input.value = ''; // choosing the same file again must fire change again
+  if (file.size > WATCH_IMPORT_MAX_BYTES) {
+    setHealthStatus('That file is too large to be a watched-locators export (5 MB max).', 'err');
+    return;
+  }
+  readFileText(file, (err, text) => {
+    if (err) { setHealthStatus("Couldn't read that file.", 'err'); return; }
+    importWatchedText(text);
+  });
+}
+
+function initHealth() {
+  const check = document.getElementById('healthCheckBtn');
+  if (check) check.addEventListener('click', () => runHealthCheck(false));
+  const exp = document.getElementById('healthExportBtn');
+  if (exp) exp.addEventListener('click', exportWatched);
+  const imp = document.getElementById('healthImportBtn');
+  const file = document.getElementById('healthImportFile');
+  if (imp && file) imp.addEventListener('click', () => file.click());
+  if (file) file.addEventListener('change', () => onImportFileChosen(file));
+  const list = document.getElementById('healthList');
+  if (list) list.addEventListener('click', (e) => {
+    const btn = e.target.closest ? e.target.closest('button[data-id]') : null;
+    if (!btn) return;
+    const id = btn.getAttribute('data-id');
+    if (btn.classList.contains('ll-health-remove')) removeWatched(id);
+    else if (btn.classList.contains('ll-health-use')) useSuggestion(id);
+    else if (btn.classList.contains('ll-health-copy')) copyWatched(id, btn);
+  });
+
+  // Tab switches and navigations in this window move the Health tab along.
+  try {
+    const onTabsChanged = (windowId) => {
+      if (typeof windowId === 'number' && typeof panelWindowId === 'number' && windowId !== panelWindowId) return;
+      if (healthPageMatters()) refreshActivePage();
+    };
+    if (chrome.tabs && chrome.tabs.onActivated && typeof chrome.tabs.onActivated.addListener === 'function') {
+      chrome.tabs.onActivated.addListener((info) => onTabsChanged(info && info.windowId));
+    }
+    if (chrome.tabs && chrome.tabs.onUpdated && typeof chrome.tabs.onUpdated.addListener === 'function') {
+      chrome.tabs.onUpdated.addListener((tabId, change, tab) => {
+        if (!change || (change.status !== 'complete' && !change.url)) return;
+        if (tab && tab.active === false) return;
+        onTabsChanged(tab && tab.windowId);
+      });
+    }
+  } catch (e) {}
+
+  renderHealth();
+  loadWatched();
+  refreshActivePage();
 }
