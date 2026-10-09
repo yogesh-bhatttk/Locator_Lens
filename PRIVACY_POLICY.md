@@ -30,7 +30,7 @@ Specifically, we do **not**:
   every `http://` and `https://` page. The browser loads it into each such page
   when the page finishes loading (`document_idle`). On load it only:
   - reads the extension's own settings from local storage (framework, language,
-    and two optional advanced settings — see below);
+    your custom test-id attributes and secret variable names — see below);
   - registers a right-click (`contextmenu`) listener that remembers which element
     was right-clicked, so **Copy Best Locator** knows what to copy;
   - sends a short "ready" message to the extension's own background worker, which
@@ -38,8 +38,9 @@ Specifically, we do **not**:
     recording continues after a navigation). The message contains no page
     content.
 - **When it reads the page.** Element details, text and attributes are read only
-  while you use a feature you started — Inspect, Record, Selector Lab, Stress Test
-  or Copy Best Locator — and only for the elements involved.
+  while you use a feature you started — Inspect, Record, Replay, Selector Lab,
+  Stress Test, Page Object export, a locator health check or Copy Best Locator — and
+  only for the elements involved.
 - Locator ranking and explanations run **entirely in your browser** (see
   `content-locator-engine.js` and `content.js`).
 - The side panel and popup run in extension UI contexts; they do not send page
@@ -52,7 +53,8 @@ Specifically, we do **not**:
   `current-password`, `new-password`, `one-time-code`, `cc-number`, `cc-csc`,
   `cc-exp`), is recorded as a step **without its value**. The generated test reads
   the value from an environment variable instead — `LOCATRA_PASSWORD` for passwords,
-  `LOCATRA_SECRET` for the others — so the secret never leaves the page, never
+  `LOCATRA_SECRET` for the others (both names can be changed on the Settings page) —
+  so the secret never leaves the page, never
   reaches extension storage and never appears in a script.
 - **Secrets in URLs.** Before a page address is stored or written into a test, the
   values of query/fragment parameters that commonly carry credentials (`password`,
@@ -74,15 +76,27 @@ Locatra or anyone else, and the extension does not use synced storage.
 - **Recorder state** — the recorded steps (timeline) and the current text of the
   generated test script, so an in-progress recording survives closing the panel.
   Steps contain element descriptions, the values you typed into ordinary fields,
-  and page addresses (with secret parameters redacted, as above).
+  and page addresses (with secret parameters redacted, as above). If you rename or
+  edit a test-data variable, the new name and value are stored with the steps.
 - **Preferences** — your chosen output framework and language.
-- **Settings** (`llSettings`) — whether automatic assertion suggestions and step
-  screenshots are switched on (both are, by default; the **Settings** section of the
-  Record tab turns either off).
-- **Advanced settings with no UI** — an optional list of additional attribute names
-  to treat as test ids (`customAttributes`) and a debug-logging flag (`llDebug`).
-  The extension only reads these; they exist only if you set them yourself from the
-  browser's developer tools.
+- **Settings** (`llSettings`), edited on the extension's Settings page and partly in
+  the side panel:
+  - whether automatic assertion suggestions, step screenshots and test-data
+    variables are switched on (all are, by default);
+  - your custom test-id attribute names (such as `data-qa`);
+  - the environment-variable names generated tests use for secrets;
+  - whether watched locators are re-checked automatically.
+    An older version stored custom test-id attributes under `customAttributes`; the
+    Settings page moves them into `llSettings` and removes that key. A debug-logging
+    flag (`llDebug`) is read if you set it yourself from the browser's developer tools.
+- **Watched locators** (`llWatched`) — the locators you choose to watch for the
+  locator health check, grouped by page address (origin and path only, no query or
+  fragment). Each entry keeps the locator, a short description of its element (tag,
+  id, test id, role, accessible name, label, placeholder, up to 80 characters of
+  text, type, link address with secrets redacted, alt, title and a few class names)
+  so a broken locator can be matched to its element again, and the result of the last
+  check. Typed field values are never part of it. Export and import are files you
+  choose to save or open; nothing is uploaded.
 
 `chrome.storage.session` (cleared when the browser closes):
 
@@ -111,10 +125,19 @@ Features that work on what is already stored, entirely inside your browser:
 - **Page Object export** scans the elements of a region you pick (or the whole
   page) and generates a page-object class; the result is shown in the side panel
   for you to copy or download.
+- **Locator health check** re-checks your watched locators against the page you
+  have open, in that page, and suggests a replacement for one that broke. Results are
+  stored with the watched locators.
+- **Test-data variables** turn the values you typed into named variables in the
+  generated script; you can rename them, edit them, or copy/download them as a JSON
+  file.
 - **Automatic assertion suggestions** watch, during a recording, for the page
   address changing and for confirmation messages appearing after you submit a form,
   and propose checks for them. Suggestions never contain the values of password or
   other sensitive fields, and nothing is added to your test until you accept it.
+
+**Keyboard shortcuts** (Alt+Shift+E to inspect, Alt+Shift+K to record, changeable in
+the browser) only start and stop features; they read nothing on their own.
 
 **Copy and download:** if you copy generated code or download a script, that is
 **you** saving or sharing it through your operating system or clipboard — not an

@@ -14,7 +14,15 @@ This document describes how the extension is structured and how distribution fol
 ## 2. Locator pipeline + multi-framework codegen
 
 - **`content-locator-engine.js`** (injected first) ranks candidate locators, attaches a structured `target` (kind + values) and live **uniqueness** (`matchCount` / `unique`) per candidate, plus explanations. Runs in the content script (it needs the live DOM).
-- **`codegen.js`** is a pure module (loaded as a content script _and_ in the side panel) that translates a `target` + action into **Playwright / Selenium / Cypress** code for **JS / TS / Python**. `LLCodegen.isValidCombo()` blocks the impossible combo (Cypress + Python).
+- **`codegen.js`** is a pure module (loaded as a content script, in the side panel and on the Settings page) that translates a `target` + action into **Playwright / Selenium / Cypress** code for **JS / TS / Python**. `LLCodegen.isValidCombo()` blocks the impossible combo (Cypress + Python).
+- **Target modules** add more output through `LLCodegen.registerTarget()`, each in its own classic script loaded right after `codegen.js`:
+  - `codegen-java.js`: Playwright for Java and Selenium for Java (JUnit 5).
+  - `codegen-csharp.js`: Playwright for .NET and Selenium for C# (NUnit).
+  - `codegen-wdio.js`: WebdriverIO v9 (TypeScript/JavaScript, Mocha).
+
+  A module supplies `locatorExpr`, `actionStatement`, `wrapScript` and `pageObject` (and optionally `todo`) for its framework × language pairs, and uses the shared helpers on `LLCodegen._internals`, so a Selenium Java or C# locator is the same XPath/CSS that Selenium JS emits. Asking a module's framework for a language it doesn't support falls back to its own first language.
+
+- **Test-data variables:** `extractVariables()` / `applyVariables()` / `variablesJson()` turn typed values into named variables. `testScript(steps, fw, lang, { variables: true })` declares them once per file (`testData` in JS/TS, `TEST_DATA` in Python and Java, `TestData` in C#) and references them from each fill or select. Sensitive values stay environment variables.
 - **`content.js`** handles overlay, pick, keyboard traversal, stress test, recorder hooks, selector-lab validation, and framework-aware quick-copy (context menu + click).
 - **`sidepanel.js`** renders cards via **`formatLocator()`** (native Playwright JS/TS, else `codegen`), the uniqueness badges, and all recorder logic; the chosen framework/language is persisted in `chrome.storage.local`.
 
@@ -54,7 +62,8 @@ This document describes how the extension is structured and how distribution fol
 ## 7. Distribution
 
 `npm run build` (`scripts/build.mjs`) is the only supported way to produce a package.
-It writes `dist/chrome/` and `dist/firefox/` plus a versioned `.zip` for each, and
+It writes `dist/chrome/`, `dist/firefox/` and `dist/edge/` plus a versioned `.zip` for each
+(the Edge package is byte-identical to Chrome's; `npm run build:edge` builds only it), and
 prints a SHA-256 per archive, preceded by the Node and zlib versions used. Archives
 are reproducible — sorted entries, a fixed timestamp, fixed Unix permissions — so the
 same commit built with the same Node major (and so the same bundled zlib) yields the
@@ -283,7 +292,19 @@ profile, so they can run alongside the main one.
     - the setting switches capture off and on;
     - suggested and viewport steps never get one.
 
-`npm run smoke:all` runs all three.
+- `npm run smoke:settings`, **the Settings page, shortcuts, health check and Edge**:
+  - every section of the Settings page; test-id attributes are validated, saved and
+    used live by the content script; legacy `customAttributes` is migrated; secret
+    names reach recorded steps; hostile settings imports are rejected;
+  - both keyboard-shortcut commands toggle Inspect and Record, and a restricted page
+    shows the "!" badge;
+  - the health check answers ok / broken (with a suggestion that resolves to one
+    element) / ambiguous / frame missing, including inside the payment iframe;
+  - the Edge package is byte-identical to Chrome's and loads.
+- `npm run smoke:data-health`, **test-data variables and the Health tab** through the
+  real side panel.
+
+`npm run smoke:all` runs all five.
 
 They need a display, so they are not part of `npm run verify`. CI runs them under
 `xvfb` in their own job. Run them locally before submitting too:
@@ -293,8 +314,11 @@ npm run build && npm run smoke:all
 ```
 
 The Page Object smoke reads the clipboard back by pasting into a page, through the
-system clipboard. On a desktop, a clipboard manager or another app writing at the
-same moment can make that one check fail; rerun it.
+system clipboard. Under native Wayland the compositor ignores a copy from a window
+without keyboard focus, which an automated window often lacks, so the smoke runs
+Chromium on X11 (XWayland) when both displays are available — the same as CI's
+`xvfb`. A real user's click gives the panel focus, so the extension itself is not
+affected.
 
 ---
 
@@ -311,6 +335,11 @@ runs the export of a flow in every framework × language, each in its real runne
 | Selenium TS / JS   | `node` + `selenium-webdriver` (TS through Node's type stripping); Selenium Manager's driver |
 | Selenium Python    | `python` + `selenium`                                                                       |
 | Cypress TS / JS    | `cypress run` (Electron) with `cypress-real-events` for combo key presses                   |
+| Playwright Java    | Maven + JUnit 5 (`npm run test:exports:setup-java` installs a JDK and Maven if missing)     |
+| Selenium Java      | Maven + JUnit 5, Selenium Manager's driver                                                  |
+| Playwright C#      | `dotnet test` + NUnit (`npm run test:exports:setup-csharp` installs the .NET SDK)           |
+| Selenium C#        | `dotnet test` + NUnit, Selenium Manager's driver                                            |
+| WebdriverIO TS/JS  | the `wdio` CLI + Mocha (`npm run test:exports:setup-webdriverio`)                           |
 
 Cypress is pinned to 15.x (`npm run test:exports:setup-cypress`). Exported specs
 read secrets through a small `locatraSecret()` helper emitted into the spec: it calls
@@ -338,7 +367,14 @@ wrap, card number from the iframe, the password from the environment, and the fi
 that had focus when Enter submitted (which proves the Tab and Shift+Tab steps). A
 runner that is not installed is skipped with the command that installs it;
 `--require all` (used in CI) turns such a skip into a failure. Generated scripts and
-each runner's output are kept in `.tmp-exports/`.
+each runner's output are kept in `.tmp-exports/port-<n>/`, one folder per `--port`, so
+runs started in parallel don't clear each other's files.
+
+Scripts are generated with test-data variables on, which is what users get by
+default; `--literals` runs the same flows with inline values. Each runner lives in
+`scripts/e2e/runners/` (or in `run-exports.mjs` for the original eight) and installs
+its toolchain into `node_modules/.cache/locatra-e2e/`, so `package.json` is unchanged.
+CI runs each language in its own job.
 
 ```bash
 npm run build && npm run test:exports

@@ -2,9 +2,10 @@
 
 [![Chrome](https://img.shields.io/badge/Chrome-Available-green?logo=google-chrome&logoColor=white)](https://chromewebstore.google.com/detail/locatorlens-%E2%80%93-smart-locat/amnagildbdfgfcjijilomhelgdbpgmeb)
 ![Firefox](https://img.shields.io/badge/Firefox-Ready-orange?logo=firefox-browser&logoColor=white)
+![Edge](https://img.shields.io/badge/Edge-Ready-0078D7?logo=microsoft-edge&logoColor=white)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 
-**Locatra** is a browser extension for end-to-end test authoring: inspect any element to get **ranked, uniqueness-checked locators**, validate selectors, and **record a flow into a runnable test** — all from the side panel. Output targets **Playwright, Selenium, or Cypress** in **TypeScript, JavaScript, or Python** (Cypress is JS/TS only).
+**Locatra** is a browser extension for end-to-end test authoring: inspect any element to get **ranked, uniqueness-checked locators**, validate selectors, and **record a flow into a runnable test** — all from the side panel. Output targets **Playwright, Selenium, Cypress or WebdriverIO** in **TypeScript, JavaScript, Python, Java or C#** — 14 framework × language combinations, each run for real in CI.
 
 Extension version is defined in `manifest.json` (currently **1.3.0**) and kept in step
 with `package.json` and both browser manifests by `node scripts/version.mjs`.
@@ -15,8 +16,16 @@ with `package.json` and both browser manifests by `node scripts/version.mjs`.
 
 ### Frameworks & languages
 
-- Pick a **framework** (Playwright · Selenium · Cypress) and **language** (TypeScript · JavaScript · Python) from the side-panel bar — inspector cards and recorder output update instantly. Cypress is JS/TS only (Python is shown but disabled).
-- Translation lives in `codegen.js`, a pure module shared by the inspector, the recorder, and the right-click “Copy Best Locator”.
+- Pick a **framework** and **language** from the side-panel bar (or set the default on the Settings page) — inspector cards and recorder output update instantly:
+
+  | Framework   | Languages                                    |
+  | ----------- | -------------------------------------------- |
+  | Playwright  | TypeScript · JavaScript · Python · Java · C# |
+  | Selenium    | TypeScript · JavaScript · Python · Java · C# |
+  | Cypress     | TypeScript · JavaScript                      |
+  | WebdriverIO | TypeScript · JavaScript                      |
+
+- Translation lives in `codegen.js`, a pure module shared by the inspector, the recorder, and the right-click “Copy Best Locator”. Java, C# and WebdriverIO are plug-in modules (`codegen-java.js`, `codegen-csharp.js`, `codegen-wdio.js`) registered through `LLCodegen.registerTarget()`.
 
 ### Inspector and ranked locators
 
@@ -67,6 +76,33 @@ with `package.json` and both browser manifests by `node scripts/version.mjs`.
 - **Automatic assertion suggestions:** when the URL changes or a confirmation message appears after a submit, a suggested check (`toHaveURL`, `toContainText`) appears in the timeline — nothing reaches the test until you accept it.
 - **Step screenshots:** each step gets a thumbnail in the timeline, kept locally in IndexedDB (switch off in the Record tab's Settings).
 - **Page Object export:** pick a region (or the whole page) and get a page-object class with named, uniqueness-checked locators and helper methods for every framework and language.
+- **Test-data variables:** typed values become named variables in one `testData` declaration (`TEST_DATA` in Python and Java, `TestData` in C#); rename or edit them in the **Test data** section, or download them as `test-data.json`.
+
+### Locator health check
+
+- **☆ Watch** a locator from its card (or **Watch all** from a Page Object scan); the **Health** tab re-checks watched locators on the page and marks each **ok**, **broken**, **ambiguous** or **frame missing**.
+- A broken locator gets a **suggested replacement**, found by matching the element's saved description (test id, id, name, label, text, …); one click applies it.
+- Watched locators are kept per page, can be exported/imported as JSON, and can be re-checked automatically when you open a watched page.
+
+### Settings page
+
+- Open it from the popup's **⚙ Settings**, the panel's ⚙ button, or the browser's extension options.
+- **Custom test-id attributes** (such as `data-qa`) in priority order, default framework and language, secret variable names, recorder toggles, health auto-check, keyboard shortcuts, and export / import / reset of settings and stored data.
+
+### Keyboard shortcuts
+
+| Shortcut      | Does                     |
+| ------------- | ------------------------ |
+| `Alt+Shift+E` | start or stop inspecting |
+| `Alt+Shift+K` | start or stop recording  |
+
+They act on the active tab of the focused window (Inspect also opens the panel), and
+a page Locatra can't run on flashes a **!** on the toolbar button with the reason.
+The popup shows the keys currently bound. Rebind or clear them in
+`chrome://extensions/shortcuts` (Chrome), `edge://extensions/shortcuts` (Edge) or
+Locatra's ⚙ Settings page (Firefox). `Alt+Shift+I` was avoided on purpose (Chrome and
+Edge open their feedback form with it), and so was `Alt+Shift+R`: Chromium refuses
+to assign it to an extension.
 
 ### Clean, theme-aware UI
 
@@ -78,14 +114,21 @@ with `package.json` and both browser manifests by `node scripts/version.mjs`.
 
 ```bash
 npm ci
-npm run build          # writes dist/chrome/, dist/firefox/ and a .zip for each
+npm run build          # writes dist/chrome/, dist/firefox/, dist/edge/ and a .zip for each
 ```
 
-### Chrome, Edge, or Brave
+### Chrome or Brave
 
 1. Open `chrome://extensions`.
 2. Enable **Developer mode**.
 3. **Load unpacked** → select **`dist/chrome`**.
+
+### Microsoft Edge
+
+1. Open `edge://extensions`.
+2. Enable **Developer mode**.
+3. **Load unpacked** → select **`dist/edge`** (the same files as `dist/chrome`; the
+   Edge Add-ons listing is not published yet).
 
 ### Firefox
 
@@ -149,6 +192,10 @@ all generated by `npm run screenshots` from the built extension.
 ├── src/
 │   ├── background.js           # Extension service worker / messaging
 │   ├── codegen.js              # Framework/language code generation (pure module)
+│   ├── codegen-java.js         # Playwright + Selenium for Java (registered target)
+│   ├── codegen-csharp.js       # Playwright + Selenium for C# (registered target)
+│   ├── codegen-wdio.js         # WebdriverIO TS/JS (registered target)
+│   ├── options.js / .html      # Settings page
 │   ├── content-locator-engine.js  # Locator ranking + live uniqueness (injected first)
 │   ├── content.js              # Overlay, inspect, recorder, selector lab
 │   ├── sidepanel.js / .html    # Main UI: inspect + record

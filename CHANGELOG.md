@@ -37,18 +37,61 @@ All notable changes to Locatra (formerly LocatorLens). Versions follow [semantic
     when you enable the feature. Without it, thumbnails still appear on tabs where
     Locatra was opened from the toolbar.
 - `toHaveURL` and `toHaveValue` assertions in every framework.
+- **Java, C# and WebdriverIO export.** Every recording, locator and Page Object now
+  exports to:
+  - Playwright for Java and Selenium for Java (JUnit 5);
+  - Playwright for .NET and Selenium for C# (NUnit);
+  - WebdriverIO v9 (TypeScript and JavaScript, Mocha).
+
+  They support the same steps, frames, shadow DOM, secrets and assertions as the
+  other frameworks.
+
+- **Test-data variables.** Values you type while recording become named variables in
+  one `testData` declaration, so a recording is reusable instead of hard-coded.
+  - The Record tab's **Test data** section lets you rename variables and edit their
+    values; replay uses the edited values.
+  - Copy or download them as `test-data.json`.
+  - A setting turns variables off for inline values.
+- **Settings page.** A full options page:
+  - custom test-id attributes (such as `data-qa`), in priority order;
+  - default framework and language;
+  - secret variable names, and the recorder toggles;
+  - keyboard shortcuts;
+  - export/import/reset of settings, and clearing stored data.
+
+  Custom test-id attributes set the old way, by hand, are moved over automatically.
+
+- **Keyboard shortcuts:** Alt+Shift+E starts or stops inspecting, and Alt+Shift+K
+  starts or stops recording. Both can be changed in the browser. A restricted page
+  shows a "!" on the toolbar icon with the reason.
+- **Locator health check.** ☆ Watch a locator (or "Watch all" from a Page Object
+  scan). The new **Health** tab re-checks watched locators on the page and marks each
+  ok, broken, ambiguous or "frame missing". For a broken one it suggests a
+  replacement found from the element's saved description; "Use suggested locator"
+  applies it. Watched locators are kept per page and can be exported and imported, and
+  can be re-checked automatically when you open a watched page.
+- **Microsoft Edge package** (`npm run build:edge`), byte-identical to the Chrome
+  one, with listing text for Edge Add-ons.
 
 ### Fixed
 
 - Exported Cypress specs read secrets with `cy.env()` on Cypress 16, which removed
   `Cypress.env()`, and fall back to `Cypress.env()` on older versions.
 - `getByLabel` matches are returned in document order, as Playwright returns them.
+- Selenium Page Objects: an element inside a frame that was located through a parent
+  element generated `By.css('body')`. The chained lookup is now generated inside the
+  frame.
+- Changing a setting in the side panel no longer erases settings made elsewhere.
+- An edit made just before the side panel closed (a dismissed suggestion, a removed
+  step) is no longer lost.
 
 ### Tests
 
 - Every exported script runs for real in CI, against a demo checkout:
-  - Playwright TypeScript/JavaScript/Python, Selenium TypeScript/JavaScript/Python and
-    Cypress TypeScript/JavaScript;
+  - Playwright TypeScript/JavaScript/Python/Java/C#, Selenium
+    TypeScript/JavaScript/Python/Java/C#, Cypress TypeScript/JavaScript and
+    WebdriverIO TypeScript/JavaScript (14 combinations);
+  - with test-data variables and with inline values;
   - for a hand-written flow and for one recorded through the extension.
 
   A run passes only if the order it places matches the expected one, including the
@@ -56,7 +99,7 @@ All notable changes to Locatra (formerly LocatorLens). Versions follow [semantic
 
 - Coverage of classic scripts is now measured accurately. A custom provider stops V8
   offsets from being mapped onto Vite-transformed code.
-  - Coverage is about 95% statements and 88% branches across all source files.
+  - Coverage is about 96% statements and 90% branches across all source files.
   - Each file has its own threshold.
 
 ## [1.4.0] — 2026-10-09
