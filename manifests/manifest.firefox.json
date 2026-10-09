@@ -18,8 +18,9 @@
     "default_icon": "icons/icon32.png"
   },
   "host_permissions": ["http://*/*", "https://*/*"],
+  "optional_host_permissions": ["<all_urls>"],
   "background": {
-    "scripts": ["src/background.js"],
+    "scripts": ["src/thumbs-store.js", "src/background.js"],
     "type": "module"
   },
   "action": {

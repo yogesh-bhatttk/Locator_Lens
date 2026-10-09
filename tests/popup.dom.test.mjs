@@ -298,3 +298,150 @@ describe('the panel button', () => {
     }
   });
 });
+
+describe('degraded environments and failures', () => {
+  const msgText = () => document.getElementById('popupMsg').textContent;
+
+  it('says so when the window is not known yet, instead of opening a panel somewhere else', async () => {
+    const getCurrent = globalThis.chrome.windows.getCurrent;
+    globalThis.chrome.windows.getCurrent = (cb) => cb(undefined);
+    try {
+      open();
+      calls.length = 0;
+      document.getElementById('panelBtn').click();
+      await flush();
+      expect(calls).toEqual([]);
+      expect(msgText()).toMatch(/window not resolved yet/);
+      expect(panelLabel()).toContain('Open');
+      // Without a window the worker is asked without one (it falls back itself).
+      expect(sent).toContainEqual({ type: 'GET_INSPECT_STATE' });
+    } finally {
+      globalThis.chrome.windows.getCurrent = getCurrent;
+    }
+  });
+
+  it('works without chrome.windows at all', () => {
+    const windows = globalThis.chrome.windows;
+    delete globalThis.chrome.windows;
+    try {
+      vm.runInThisContext('popupWindowId = null;');
+      open();
+      expect(sent).toContainEqual({ type: 'GET_PANEL_STATE' });
+    } finally {
+      globalThis.chrome.windows = windows;
+    }
+  });
+
+  it('a browser with no side-panel API gets an explanation', async () => {
+    const sidePanel = globalThis.chrome.sidePanel;
+    delete globalThis.chrome.sidePanel;
+    try {
+      open();
+      document.getElementById('panelBtn').click();
+      await flush();
+      expect(msgText()).toMatch(/no side panel API/);
+    } finally {
+      globalThis.chrome.sidePanel = sidePanel;
+    }
+  });
+
+  it('an open() that throws synchronously is reported, and inspect still starts', async () => {
+    sidePanelResult = () => {
+      throw new Error('sync boom');
+    };
+    open();
+    document.getElementById('panelBtn').click();
+    await flush();
+    expect(msgText()).toMatch(/Couldn't open the results panel: sync boom/);
+    document.getElementById('inspectBtn').click();
+    await flush();
+    expect(btnText()).toBe('Stop Inspecting');
+    expect(types()).toContain('START_INSPECT');
+  });
+
+  it('a close() that throws or rejects is reported and the label stays', async () => {
+    responders.GET_PANEL_STATE = { active: true };
+    globalThis.chrome.sidePanel.close = () => {
+      throw new Error('close boom');
+    };
+    open();
+    document.getElementById('panelBtn').click();
+    await flush();
+    expect(msgText()).toMatch(/Couldn't close the results panel: close boom/);
+    expect(panelLabel()).toContain('Close');
+    globalThis.chrome.sidePanel.close = () => Promise.reject(new Error('later boom'));
+    document.getElementById('panelBtn').click();
+    await flush();
+    expect(msgText()).toMatch(/later boom/);
+  });
+
+  it('a worker that is unreachable while loading state leaves the defaults', () => {
+    responders.GET_INSPECT_STATE = { active: true };
+    responders.GET_PANEL_STATE = { active: true };
+    const rt = globalThis.chrome.runtime;
+    const realSend = rt.sendMessage;
+    rt.sendMessage = (msg, cb) => {
+      sent.push(msg);
+      rt.lastError = { message: 'Could not establish connection.' };
+      try {
+        if (cb) cb(undefined);
+      } finally {
+        rt.lastError = null;
+      }
+    };
+    try {
+      open();
+      expect(btnText()).toBe('Start Inspecting');
+      expect(panelLabel()).toContain('Open');
+      // …and a failed START_INSPECT says why, with the browser's message.
+      document.getElementById('inspectBtn').click();
+      expect(btnText()).toBe('Start Inspecting');
+      expect(msgText()).toMatch(/Couldn't start inspecting: Could not establish connection/);
+    } finally {
+      rt.sendMessage = realSend;
+    }
+  });
+
+  it('stopping swallows a dead worker quietly', () => {
+    responders.STOP_INSPECT = { ok: true };
+    responders.GET_INSPECT_STATE = { active: true };
+    open();
+    document.getElementById('inspectBtn').click();
+    expect(types()).toContain('STOP_INSPECT');
+    expect(btnText()).toBe('Start Inspecting');
+  });
+
+  it('a missing message area never throws', () => {
+    responders.START_INSPECT = { ok: false, error: 'nope' };
+    open();
+    document.getElementById('popupMsg').remove();
+    expect(() => document.getElementById('inspectBtn').click()).not.toThrow();
+  });
+
+  it('ignores untyped messages', () => {
+    open();
+    expect(() => messageListeners.forEach((fn) => fn(null, {}))).not.toThrow();
+    expect(() => messageListeners.forEach((fn) => fn({ type: 3 }, {}))).not.toThrow();
+  });
+
+  it("treats this extension's own page opened as a tab as a UI sender, not a page", () => {
+    globalThis.chrome.runtime.getURL = (p) => 'chrome-extension://abc/' + p;
+    try {
+      responders.GET_INSPECT_STATE = { active: true };
+      open();
+      messageListeners.forEach((fn) =>
+        fn(
+          { type: 'STOP_INSPECT', windowId: WINDOW },
+          { tab: { id: 1 }, url: 'chrome-extension://abc/src/sidepanel.html' }
+        )
+      );
+      expect(btnText()).toBe('Start Inspecting');
+      messageListeners.forEach((fn) =>
+        fn({ type: 'START_INSPECT', windowId: WINDOW }, { tab: { id: 1 }, url: 'https://page.example/' })
+      );
+      expect(btnText()).toBe('Start Inspecting');
+    } finally {
+      delete globalThis.chrome.runtime.getURL;
+    }
+  });
+});

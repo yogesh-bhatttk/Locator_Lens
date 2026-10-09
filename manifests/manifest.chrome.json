@@ -9,6 +9,7 @@
     "default_path": "src/sidepanel.html"
   },
   "host_permissions": ["http://*/*", "https://*/*"],
+  "optional_host_permissions": ["<all_urls>"],
   "background": {
     "service_worker": "src/background.js"
   },

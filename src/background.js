@@ -6,6 +6,18 @@
 // every piece of state below is keyed so that one window's activity can never
 // steer, stop or show up in another's.
 
+// Step-screenshot storage (globalThis.LLThumbs), shared with the side panel.
+// Chrome runs this file as a classic service worker, so it pulls the store in
+// itself (resolved next to this file: src/thumbs-store.js). Firefox's background is
+// a module page with no importScripts; its manifest lists thumbs-store.js before
+// this file instead. Either way a missing store only means no thumbnails.
+/* global importScripts */
+if (typeof importScripts === 'function' && !globalThis.LLThumbs) {
+  try {
+    importScripts('thumbs-store.js');
+  } catch (e) {}
+}
+
 /** Load order matters: engine defines __LocatorLensEngine before content.js runs. */
 const CONTENT_SCRIPT_FILES = ['src/codegen.js', 'src/content-locator-engine.js', 'src/content.js'];
 
@@ -78,6 +90,12 @@ chrome.runtime.onConnect.addListener((port) => {
   port.onDisconnect.addListener(() => {
     const windowId = sidePanelPorts.get(port);
     sidePanelPorts.delete(port);
+    // A replay reports to its panel; with that panel gone nobody can see or stop
+    // it, so it stops too.
+    if (isWindowId(windowId) && !hasPanelPort(windowId)) {
+      const run = replayRuns.get(windowId);
+      if (run) abortReplay(run, 'stopped');
+    }
     // The panel closed. Forget its heartbeat now rather than letting the popup
     // claim "open" for another TTL's worth of seconds.
     if (isWindowId(windowId) && !hasPanelPort(windowId)) {
@@ -118,6 +136,8 @@ function handlePortMessage(port, msg) {
       try {
         port.postMessage({ type: 'PANEL_BUFFER_REPLAYED', windowId, count: buffered.length });
       } catch (e) {}
+      // A replay this panel was watching died with the previous worker instance.
+      settleInterruptedReplays(windowId);
     });
     return;
   }
@@ -169,6 +189,16 @@ let lastPick = null;
 /** windowId -> RECORDED_ACTION payloads not yet acknowledged by that window's panel. */
 let recordBuffers = {};
 
+/** windowId -> the replay running in that window (at most one per window). */
+const replayRuns = new Map();
+
+/**
+ * Replays whose worker instance died mid-run: { windowId, runId, resume, at }.
+ * Kept (and persisted) until that window's panel has been told the run ended.
+ */
+let interruptedReplays = [];
+const INTERRUPTED_REPLAY_TTL_MS = 60 * 60 * 1000;
+
 function isPanelActive(windowId) {
   const fresh = (t) => typeof t === 'number' && t > 0 && Date.now() - t < PANEL_HEARTBEAT_TTL_MS;
   if (isWindowId(windowId)) return hasPanelPort(windowId) || fresh(panelSeen[windowId]);
@@ -217,9 +247,25 @@ function ready() {
       if (saved.lastPick) lastPick = saved.lastPick;
       const buf = res && res[RECORD_BUFFER_KEY];
       if (buf && typeof buf === 'object') recordBuffers = Object.assign({}, buf);
+      // Any replay on record belonged to a previous worker instance, and its step
+      // loop died with it: nothing is driving it any more.
+      if (Array.isArray(saved.replays)) {
+        const cutoff = Date.now() - INTERRUPTED_REPLAY_TTL_MS;
+        saved.replays.forEach((r) => {
+          if (!r || !isWindowId(r.windowId) || typeof r.runId !== 'string') return;
+          if (typeof r.at === 'number' && r.at < cutoff) return;
+          interruptedReplays.push({
+            windowId: r.windowId,
+            runId: r.runId,
+            resume: Array.isArray(r.resume) ? r.resume.filter(isWindowId) : [],
+            at: typeof r.at === 'number' ? r.at : Date.now()
+          });
+        });
+      }
       hydrated = true;
       hydrating = null;
       resolve();
+      if (interruptedReplays.length) settleInterruptedReplays();
     });
   });
   return hydrating;
@@ -253,7 +299,12 @@ function persistState() {
         assertType: s.assertType
       })),
       panelSeen,
-      lastPick
+      lastPick,
+      // Only what is needed to clean up after a worker restart — never the steps
+      // or the secrets of a run.
+      replays: Array.from(replayRuns.values())
+        .map((r) => ({ windowId: r.windowId, runId: r.runId, resume: Array.from(r.resume), at: r.startedAt }))
+        .concat(interruptedReplays)
     }
   });
 }
@@ -305,6 +356,8 @@ chrome.runtime.onInstalled.addListener(() => {
 
 // ── Context menu click ────────────────────────────────────────────────────────
 chrome.contextMenus.onClicked.addListener((info, tab) => {
+  // Any menu click grants activeTab on that tab: a capture there may work again.
+  if (tab && typeof tab.id === 'number') captureBlockedTabs.delete(tab.id);
   if (info.menuItemId === 'll-toggle-panel' && tab && tab.windowId) {
     // Synchronous on purpose: the menu click is the user gesture open() needs.
     openSidePanel(tab.windowId);
@@ -407,6 +460,9 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
 
   // PING is answered by content scripts; the worker has nothing to say.
   if (msg.type === 'PING') return;
+
+  // The user invoked Locatra on the window's active tab: a capture there may work again.
+  if (!fromTab && TAB_INVOKING_COMMANDS.has(msg.type)) unblockActiveTabCapture(msg.windowId);
 
   // ── Content script lifecycle (C3) ──
   // Every freshly initialised frame asks what it should be doing. That is how a
@@ -524,10 +580,22 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
   // Selector Lab results and dblclick supersession come straight from a page; the
   // panel ignores page broadcasts (it cannot tell which window they came from), so
   // they reach it through here, tagged.
-  if (msg.type === 'LAB_STATUS_UPDATE' || msg.type === 'LAB_ERROR' || msg.type === 'RECORDED_ACTION_SUPERSEDE') {
+  // Page Object results (POM_RESULT / POM_PICK_CANCELLED) travel the same way.
+  if (
+    msg.type === 'LAB_STATUS_UPDATE' ||
+    msg.type === 'LAB_ERROR' ||
+    msg.type === 'RECORDED_ACTION_SUPERSEDE' ||
+    msg.type === 'POM_RESULT' ||
+    msg.type === 'POM_PICK_CANCELLED'
+  ) {
     if (!fromTab) return;
     if (msg.type !== 'RECORDED_ACTION_SUPERSEDE') {
       relayToSidePanel(Object.assign({}, msg, { windowId: fromTab.windowId, tabId: fromTab.id }));
+      // Region picking runs in every frame, but only the frame that got the click
+      // (or Esc) ends by itself: take the others out of pick mode too.
+      if (msg.type === 'POM_RESULT' || msg.type === 'POM_PICK_CANCELLED') {
+        sendToFrame(fromTab.id, { type: 'POM_PICK_STOP' });
+      }
       return;
     }
     // A supersede belongs with its steps, which go to the session's window — and
@@ -720,6 +788,7 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
         }
         // Pressing Start means "capture now", whatever the previous pause said.
         s.paused = false;
+        releaseReplayPause(windowId);
         const joined = !s.tabIds.has(tabId);
         s.tabIds.add(tabId);
         persistState();
@@ -775,6 +844,9 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
         // a Stop is never a no-op for a tab that is visibly recording.
         if (!s && tab) targets.add(tab.id);
 
+        // The user changing the recording state mid-replay overrides the replay's
+        // own "pause, then restore" — it must not undo what they just chose.
+        if (msg.type !== 'SET_ASSERT_MODE') releaseReplayPause(windowId);
         if (s) {
           if (msg.type === 'STOP_RECORDING') sessions.delete(windowId);
           else if (msg.type === 'PAUSE_RECORDING') s.paused = true;
@@ -812,8 +884,91 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
       data.windowId = windowId;
       bufferRecordedAction(windowId, data);
       relayToSidePanel({ type: 'RECORDED_ACTION', data, windowId, tabId });
+      maybeCaptureStep(fromTab, data);
     });
     return;
+  }
+
+  // 🧩 PAGE OBJECT: region pick in every frame of the active tab (each frame
+  // hit-tests its own document, as inspect does); whole-page scan in the top frame.
+  if (msg.type === 'POM_PICK_START' || msg.type === 'POM_SCAN') {
+    if (fromTab) return;
+    const respond = respondOnce(sendResponse);
+    queryActiveTab(msg.windowId, (tab) => {
+      if (!tab) {
+        respond({ ok: false, error: 'No active tab to scan.' });
+        return;
+      }
+      const tabId = tab.id;
+      const go = (alive) => {
+        if (!alive) {
+          respond({ ok: false, error: RESTRICTED_PAGE_ERROR });
+          return;
+        }
+        if (msg.type === 'POM_PICK_START') sendToFrame(tabId, { type: 'POM_PICK_START' });
+        else sendToFrame(tabId, { type: 'POM_SCAN' }, 0);
+        respond({ ok: true, tabId });
+      };
+      if (msg.type === 'POM_PICK_START') injectAllFrames(tabId, () => pingTopFrame(tabId, go));
+      else ensureTopFrame(tabId, go);
+    });
+    return true;
+  }
+
+  // ▶ REPLAY
+  if (msg.type === 'REPLAY_START') {
+    if (fromTab) return;
+    startReplay(msg, respondOnce(sendResponse));
+    return true;
+  }
+
+  if (msg.type === 'REPLAY_STOP') {
+    if (fromTab) return;
+    const stop = (windowId) => {
+      const run = isWindowId(windowId) ? replayRuns.get(windowId) : null;
+      if (run) abortReplay(run, 'stopped');
+      sendResponse({ ok: true });
+      // A panel still waiting on a run that died with an earlier worker gets its end.
+      if (isWindowId(windowId) && !run) ready().then(() => settleInterruptedReplays(windowId));
+    };
+    if (isWindowId(msg.windowId)) stop(msg.windowId);
+    else queryActiveTab(undefined, (tab) => stop(tab ? tab.windowId : undefined));
+    return true;
+  }
+
+  // 🖼 STEP SCREENSHOTS: may the worker capture at all? granted: <all_urls> is held
+  // (false also when it cannot be told); available: the permissions API exists, so
+  // the panel can offer to request it.
+  if (msg.type === 'GET_SCREENSHOT_PERMISSION') {
+    if (fromTab) return;
+    screenshotPermission().then((granted) => {
+      sendResponse({ granted: granted === true, available: granted !== null });
+    });
+    return true;
+  }
+
+  // 🖼 STEP SCREENSHOTS: the panel removed steps, or cleared its timeline.
+  if (msg.type === 'THUMBS_DELETE' || msg.type === 'THUMBS_CLEAR') {
+    if (fromTab) return;
+    const store = thumbStore();
+    let pending;
+    if (msg.type === 'THUMBS_DELETE') {
+      const ids = (Array.isArray(msg.eventIds) ? msg.eventIds : []).filter(isEventId);
+      forgetThumbs(ids, undefined);
+      pending = store && ids.length ? store.deleteMany(ids) : Promise.resolve(0);
+    } else {
+      if (!isWindowId(msg.windowId)) {
+        sendResponse({ ok: false, error: 'THUMBS_CLEAR needs a windowId.' });
+        return;
+      }
+      forgetThumbs(null, msg.windowId);
+      pending = store ? store.clearWindow(msg.windowId) : Promise.resolve(0);
+    }
+    pending.then(
+      (n) => sendResponse({ ok: true, deleted: typeof n === 'number' ? n : 0 }),
+      () => sendResponse({ ok: false, error: 'Could not delete thumbnails.' })
+    );
+    return true;
   }
 });
 
@@ -864,6 +1019,12 @@ if (chrome.tabs.onAttached) {
 
 // Clean up when tab closes
 chrome.tabs.onRemoved.addListener((tabId) => {
+  tabLoadSeq.delete(tabId);
+  pendingCaptures.delete(tabId);
+  captureBlockedTabs.delete(tabId);
+  for (const run of Array.from(replayRuns.values())) {
+    if (run.tabId === tabId) abortReplay(run, 'error', 'The tab being replayed was closed.');
+  }
   const timer = frameInjectionTimers.get(tabId);
   if (timer) {
     clearTimeout(timer);
@@ -890,6 +1051,8 @@ chrome.tabs.onRemoved.addListener((tabId) => {
 // A closed window takes its session, panel and buffered steps with it.
 if (chrome.windows && chrome.windows.onRemoved) {
   chrome.windows.onRemoved.addListener((windowId) => {
+    const run = replayRuns.get(windowId);
+    if (run) abortReplay(run, 'stopped');
     ready().then(() => {
       let changed = sessions.delete(windowId);
       if (windowId in panelSeen) {
@@ -902,6 +1065,9 @@ if (chrome.windows && chrome.windows.onRemoved) {
           changed = true;
         }
       }
+      const before = interruptedReplays.length;
+      interruptedReplays = interruptedReplays.filter((r) => r.windowId !== windowId);
+      if (interruptedReplays.length !== before) changed = true;
       if (changed) persistState();
       clearRecordBuffer(windowId);
     });
@@ -911,6 +1077,12 @@ if (chrome.windows && chrome.windows.onRemoved) {
 // Clean up on navigation (and sync UI)
 chrome.tabs.onUpdated.addListener((tabId, info, tab) => {
   if (info.status !== 'loading' && info.status !== 'complete') return;
+  // Counted synchronously, outside ready(): a replay compares these counts to tell
+  // "the page navigated" from "nobody answered".
+  if (info.status === 'loading') {
+    tabLoadSeq.set(tabId, (tabLoadSeq.get(tabId) || 0) + 1);
+    captureBlockedTabs.delete(tabId); // a new page: an activeTab grant may apply again
+  }
   ready().then(() => {
     if (info.status === 'loading') {
       let changed = false;
@@ -946,3 +1118,818 @@ chrome.tabs.onUpdated.addListener((tabId, info, tab) => {
     });
   });
 });
+
+/** Make sure the top frame has a live content script, injecting only it if not. cb(alive). */
+function ensureTopFrame(tabId, cb) {
+  pingTopFrame(tabId, (alive) => {
+    if (alive) {
+      cb(true);
+      return;
+    }
+    chrome.scripting.executeScript({ target: { tabId }, files: CONTENT_SCRIPT_FILES }, () => {
+      void chrome.runtime.lastError;
+      pingTopFrame(tabId, cb);
+    });
+  });
+}
+
+// ── Settings ─────────────────────────────────────────────────────────────────
+// llSettings in storage.local is edited by the panel; missing key or field means
+// the default (on). Only stepScreenshots matters to the worker.
+const SETTINGS_KEY = 'llSettings';
+let stepScreenshotsEnabled = true;
+let settingsLoad = null;
+
+function applySettings(value) {
+  stepScreenshotsEnabled = !(value && typeof value === 'object' && value.stepScreenshots === false);
+  if (!stepScreenshotsEnabled) dropPendingCaptures();
+}
+
+function loadSettings() {
+  if (settingsLoad) return settingsLoad;
+  settingsLoad = new Promise((resolve) => {
+    const local = chrome.storage && chrome.storage.local;
+    if (!local || typeof local.get !== 'function') {
+      resolve();
+      return;
+    }
+    try {
+      local.get(SETTINGS_KEY, (res) => {
+        void chrome.runtime.lastError;
+        applySettings(res && res[SETTINGS_KEY]);
+        resolve();
+      });
+    } catch (e) {
+      resolve();
+    }
+  });
+  return settingsLoad;
+}
+
+if (chrome.storage && chrome.storage.onChanged && chrome.storage.onChanged.addListener) {
+  chrome.storage.onChanged.addListener((changes, area) => {
+    if (area !== 'local' || !changes || !changes[SETTINGS_KEY]) return;
+    // A change also counts as loaded: it is newer than anything get() could return.
+    if (!settingsLoad) settingsLoad = Promise.resolve();
+    applySettings(changes[SETTINGS_KEY].newValue);
+  });
+}
+
+// ── Step screenshots (F4) ────────────────────────────────────────────────────
+// After relaying a recorded step, capture the visible tab and keep a small JPEG of
+// it in IndexedDB (thumbs-store.js) for the panel's timeline. Strictly best
+// effort: a skipped or failed capture just means that step has no thumbnail.
+//
+// Chrome allows captureVisibleTab about twice a second per extension, so captures
+// are spaced CAPTURE_MIN_INTERVAL_MS apart and only the newest pending step per
+// tab waits for the next slot — a burst of steps never builds a backlog of stale
+// screenshots.
+const THUMB_MAX_WIDTH = 360;
+const CAPTURE_MIN_INTERVAL_MS = 500;
+/** tabId -> the newest step from that tab still waiting for a capture slot. */
+const pendingCaptures = new Map();
+let captureBusy = false;
+let captureTimer = null;
+let lastCaptureAt = 0;
+/** Steps the panel deleted (or windows it cleared) while their capture was in flight. */
+const forgottenThumbIds = new Set();
+const thumbsClearedAt = new Map();
+
+const isEventId = (v) => (typeof v === 'string' && v.length > 0) || (typeof v === 'number' && isFinite(v));
+
+function thumbStore() {
+  const t = globalThis.LLThumbs;
+  return t && typeof t.put === 'function' ? t : null;
+}
+
+function dropPendingCaptures() {
+  pendingCaptures.clear();
+  if (captureTimer) {
+    clearTimeout(captureTimer);
+    captureTimer = null;
+  }
+}
+
+function forgetThumbs(eventIds, windowId) {
+  for (const [tabId, job] of Array.from(pendingCaptures.entries())) {
+    if ((eventIds && eventIds.includes(job.eventId)) || (isWindowId(windowId) && job.windowId === windowId)) {
+      pendingCaptures.delete(tabId);
+    }
+  }
+  if (eventIds) {
+    eventIds.forEach((id) => forgottenThumbIds.add(id));
+    // Bounded: only captures already in flight can still need the reminder.
+    while (forgottenThumbIds.size > 500) forgottenThumbIds.delete(forgottenThumbIds.values().next().value);
+  }
+  if (isWindowId(windowId)) thumbsClearedAt.set(windowId, Date.now());
+}
+
+/** Did the panel delete this step (or clear its window) after it was queued? */
+function thumbForgotten(job) {
+  return forgottenThumbIds.has(job.eventId) || (thumbsClearedAt.get(job.windowId) || 0) >= job.queuedAt;
+}
+
+// captureVisibleTab needs the literal <all_urls> host permission (http/https host
+// access is not enough) or an activeTab grant. <all_urls> is optional: the panel
+// requests it when the user wants screenshots. Without it a capture is still tried —
+// an activeTab grant (the user invoked Locatra on that tab) is enough — and a refusal
+// stays silent. So that a tab with no grant is not asked again on every step, a
+// failure there blocks the tab until it navigates, the user invokes the extension on
+// it again, or <all_urls> is granted.
+const ALL_URLS = { origins: ['<all_urls>'] };
+/** true / false once known; null when it cannot be told. */
+let allUrlsGranted = null;
+let permissionCheck = null;
+/** Tabs whose last capture failed without <all_urls>: no further attempts for now. */
+const captureBlockedTabs = new Set();
+
+/** A UI command that acts on the window's active tab: the user invoked us there. */
+const TAB_INVOKING_COMMANDS = new Set([
+  'START_INSPECT',
+  'START_RECORDING',
+  'RESUME_RECORDING',
+  'POM_PICK_START',
+  'POM_SCAN',
+  'REPLAY_START',
+  'LAB_VALIDATE',
+  'RUN_STRESS_TEST'
+]);
+
+function unblockActiveTabCapture(windowId) {
+  if (!captureBlockedTabs.size) return;
+  queryActiveTab(windowId, (tab) => {
+    if (tab) captureBlockedTabs.delete(tab.id);
+  });
+}
+
+function checkAllUrlsPermission() {
+  const perms = chrome.permissions;
+  if (!perms || typeof perms.contains !== 'function') {
+    allUrlsGranted = null;
+    return Promise.resolve(null);
+  }
+  return new Promise((resolve) => {
+    try {
+      perms.contains(ALL_URLS, (granted) => {
+        allUrlsGranted = chrome.runtime.lastError ? null : !!granted;
+        resolve(allUrlsGranted);
+      });
+    } catch (e) {
+      allUrlsGranted = null;
+      resolve(null);
+    }
+  });
+}
+
+/** The cached answer, checked once per worker instance and on every grant/revoke. */
+function screenshotPermission() {
+  if (!permissionCheck) permissionCheck = checkAllUrlsPermission();
+  return permissionCheck;
+}
+
+if (chrome.permissions) {
+  const recheck = () => {
+    permissionCheck = checkAllUrlsPermission();
+    permissionCheck.then((granted) => {
+      if (granted === true) captureBlockedTabs.clear();
+    });
+  };
+  if (chrome.permissions.onAdded && chrome.permissions.onAdded.addListener) chrome.permissions.onAdded.addListener(recheck);
+  if (chrome.permissions.onRemoved && chrome.permissions.onRemoved.addListener) chrome.permissions.onRemoved.addListener(recheck);
+}
+
+function maybeCaptureStep(fromTab, data) {
+  // Suggestions are not steps the user took; a viewport step is the same moment
+  // as the goto before it, and would take that step's capture slot.
+  if (!data || data.suggested || data.action === 'viewport' || !isEventId(data.eventId)) return;
+  if (!fromTab || fromTab.active === false || !isWindowId(fromTab.windowId)) return;
+  if (typeof chrome.tabs.captureVisibleTab !== 'function' || !thumbStore()) return;
+  const job = {
+    tabId: fromTab.id,
+    tabWindowId: fromTab.windowId,
+    windowId: isWindowId(data.windowId) ? data.windowId : fromTab.windowId,
+    eventId: data.eventId,
+    queuedAt: Date.now()
+  };
+  Promise.all([loadSettings(), screenshotPermission()]).then(() => {
+    if (!stepScreenshotsEnabled || captureBlockedTabs.has(job.tabId) || thumbForgotten(job)) return;
+    pendingCaptures.delete(job.tabId); // re-insert so the map stays in arrival order
+    pendingCaptures.set(job.tabId, job);
+    pumpCaptures();
+  });
+}
+
+function pumpCaptures() {
+  if (captureBusy || captureTimer || pendingCaptures.size === 0) return;
+  const wait = lastCaptureAt + CAPTURE_MIN_INTERVAL_MS - Date.now();
+  if (wait > 0) {
+    captureTimer = setTimeout(() => {
+      captureTimer = null;
+      pumpCaptures();
+    }, wait);
+    return;
+  }
+  const [tabId, job] = pendingCaptures.entries().next().value;
+  pendingCaptures.delete(tabId);
+  captureBusy = true;
+  captureStep(job)
+    .catch(() => {})
+    .then(() => {
+      captureBusy = false;
+      pumpCaptures();
+    });
+}
+
+/** Capture one step. Resolves when done, whatever the outcome; never rejects. */
+function captureStep(job) {
+  return new Promise((resolve) => {
+    if (!stepScreenshotsEnabled || captureBlockedTabs.has(job.tabId) || thumbForgotten(job)) {
+      resolve();
+      return;
+    }
+    // captureVisibleTab shoots whatever the window shows: only worth it while the
+    // step's own tab is still the one on screen.
+    queryActiveTab(job.tabWindowId, (tab) => {
+      if (!tab || tab.id !== job.tabId) {
+        resolve();
+        return;
+      }
+      lastCaptureAt = Date.now();
+      try {
+        chrome.tabs.captureVisibleTab(job.tabWindowId, { format: 'jpeg', quality: 60 }, (dataUrl) => {
+          // Restricted page, missing activeTab grant, minimised window…: no thumbnail.
+          const failed = !!chrome.runtime.lastError || typeof dataUrl !== 'string';
+          if (failed) {
+            // No <all_urls> and no (longer an) activeTab grant on this tab: stop asking.
+            if (allUrlsGranted !== true) captureBlockedTabs.add(job.tabId);
+            resolve();
+            return;
+          }
+          storeThumbnail(job, dataUrl).then(resolve, resolve);
+        });
+      } catch (e) {
+        resolve();
+      }
+    });
+  });
+}
+
+async function storeThumbnail(job, dataUrl) {
+  const store = thumbStore();
+  const image = await makeThumbnail(dataUrl);
+  if (!store || !image) return;
+  // Removed while the capture was in flight: storing it would only orphan it.
+  if (thumbForgotten(job)) return;
+  const ok = await store.put({
+    eventId: job.eventId,
+    windowId: job.windowId,
+    blob: image.blob,
+    width: image.width,
+    height: image.height,
+    createdAt: Date.now()
+  });
+  if (ok) relayToSidePanel({ type: 'STEP_THUMBNAIL', windowId: job.windowId, eventId: job.eventId });
+}
+
+/** data: URL -> Blob, without fetch() (which nothing in this package may call). */
+function dataUrlToBlob(dataUrl) {
+  const comma = dataUrl.indexOf(',');
+  if (!dataUrl.startsWith('data:') || comma < 0) return null;
+  const meta = dataUrl.slice(5, comma);
+  const type = meta.split(';')[0] || 'image/jpeg';
+  const body = dataUrl.slice(comma + 1);
+  let bin;
+  try {
+    bin = /;base64/i.test(meta) ? atob(body) : decodeURIComponent(body);
+  } catch (e) {
+    return null;
+  }
+  const bytes = new Uint8Array(bin.length);
+  for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+  return new Blob([bytes], { type });
+}
+
+/**
+ * Downscale to at most THUMB_MAX_WIDTH px wide. Without createImageBitmap or
+ * OffscreenCanvas (or if decoding fails) the original capture is kept as is.
+ * @returns {Promise<{blob, width, height}|null>} width/height null when unknown
+ */
+async function makeThumbnail(dataUrl) {
+  const original = dataUrlToBlob(dataUrl);
+  if (!original) return null;
+  const asIs = (w, h) => ({ blob: original, width: typeof w === 'number' ? w : null, height: typeof h === 'number' ? h : null });
+  if (typeof createImageBitmap !== 'function' || typeof OffscreenCanvas !== 'function') return asIs();
+  let bitmap = null;
+  try {
+    bitmap = await createImageBitmap(original);
+    const w = bitmap.width;
+    const h = bitmap.height;
+    if (!(w > 0 && h > 0)) return asIs();
+    if (w <= THUMB_MAX_WIDTH) return asIs(w, h);
+    const tw = THUMB_MAX_WIDTH;
+    const th = Math.max(1, Math.round((h * THUMB_MAX_WIDTH) / w));
+    const canvas = new OffscreenCanvas(tw, th);
+    const ctx = canvas.getContext('2d');
+    if (!ctx) return asIs(w, h);
+    ctx.drawImage(bitmap, 0, 0, tw, th);
+    const blob = await canvas.convertToBlob({ type: 'image/jpeg', quality: 0.7 });
+    return blob ? { blob, width: tw, height: th } : asIs(w, h);
+  } catch (e) {
+    return asIs(bitmap ? bitmap.width : undefined, bitmap ? bitmap.height : undefined);
+  } finally {
+    if (bitmap && typeof bitmap.close === 'function') bitmap.close();
+  }
+}
+
+// Old thumbnails go on every worker start (the panel's recorder state is the only
+// thing that refers to them, and it is not kept for weeks).
+try {
+  const store = thumbStore();
+  if (store) store.prune().catch(() => {});
+} catch (e) {}
+
+// ── Replay (F1) ──────────────────────────────────────────────────────────────
+// The panel hands over its recorded steps; this loop plays them, one at a time, on
+// one tab of the panel's window. Page-level steps (goto, waiting for loads) happen
+// here; everything that touches an element is a REPLAY_STEP to the tab's frames,
+// where only the frame the step was recorded in answers.
+//
+// Progress goes back as REPLAY_PROGRESS / REPLAY_DONE relays tagged with the
+// window. Every run ends with exactly one REPLAY_DONE — including when this worker
+// is torn down mid-run: the run is persisted (ids only, never steps or secrets),
+// and the next worker instance reports it as result 'error' as soon as it hears
+// from that window's panel (PANEL_HELLO when its port reconnects, or REPLAY_STOP).
+const REPLAY_DEFAULT_STEP_TIMEOUT_MS = 5000;
+const REPLAY_LOAD_TIMEOUT_MS = 15000;
+const REPLAY_POLL_MS = 100;
+/** How long a goto waits for its navigation to show up before assuming none (a same-page hash change). */
+const REPLAY_NAV_START_GRACE_MS = 1000;
+/** Extra time over the step's own timeout before giving up on the frame's answer. */
+const REPLAY_RESPONSE_GRACE_MS = 2000;
+/** After an action, a moment for a navigation it caused to start. */
+const REPLAY_SETTLE_MS = 150;
+/** "No frame answered" is retried once after this, in case the page was swapping documents. */
+const REPLAY_NO_ANSWER_RETRY_MS = 300;
+const REPLAY_MAX_STEPS = 5000;
+const REPLAY_INTERRUPTED_ERROR =
+  'Replay was interrupted because the extension restarted in the background. Run it again.';
+/** Actions that are not idempotent: once sent, they are never sent again. */
+const REPLAY_ACTIONS = new Set(['click', 'dblclick', 'press']);
+
+/** tabId -> how many times the tab started loading (tabs.onUpdated 'loading'). */
+const tabLoadSeq = new Map();
+const loadSeqOf = (tabId) => tabLoadSeq.get(tabId) || 0;
+
+let replaySeq = 0;
+function newRunId() {
+  replaySeq++;
+  return 'run-' + Date.now().toString(36) + '-' + replaySeq + '-' + Math.random().toString(36).slice(2, 7);
+}
+
+function clampNumber(v, min, max, dflt) {
+  return typeof v === 'number' && isFinite(v) ? Math.min(max, Math.max(min, v)) : dflt;
+}
+
+function tabGet(tabId) {
+  return new Promise((resolve) => {
+    try {
+      chrome.tabs.get(tabId, (tab) => {
+        resolve(chrome.runtime.lastError ? null : tab || null);
+      });
+    } catch (e) {
+      resolve(null);
+    }
+  });
+}
+
+function tabUpdate(tabId, props) {
+  return new Promise((resolve) => {
+    try {
+      chrome.tabs.update(tabId, props, () => {
+        const err = chrome.runtime.lastError;
+        resolve(err ? { ok: false, error: String(err.message || err) } : { ok: true });
+      });
+    } catch (e) {
+      resolve({ ok: false, error: String((e && e.message) || e) });
+    }
+  });
+}
+
+const pingP = (tabId) => new Promise((resolve) => pingTopFrame(tabId, resolve));
+const injectP = (tabId) => new Promise((resolve) => injectAllFrames(tabId, resolve));
+
+/** Sleep that ends early when the run is aborted. */
+function replayWait(run, ms) {
+  return new Promise((resolve) => {
+    if (run.aborted) {
+      resolve();
+      return;
+    }
+    const t = setTimeout(resolve, ms);
+    run.abortPromise.then(() => {
+      clearTimeout(t);
+      resolve();
+    });
+  });
+}
+
+function replayProgress(run, index, status, extra) {
+  if (run.done) return;
+  const msg = { type: 'REPLAY_PROGRESS', windowId: run.windowId, runId: run.runId, index, status };
+  if (extra) {
+    if (extra.error) msg.error = String(extra.error);
+    if (typeof extra.matchCount === 'number') msg.matchCount = extra.matchCount;
+    if (typeof extra.durationMs === 'number') msg.durationMs = extra.durationMs;
+  }
+  relayToSidePanel(msg);
+}
+
+// ── recording pause around a replay ──
+
+/** Pause the window's recording session (and the replayed tab's, if another) for the run. */
+function pauseForReplay(run) {
+  const windows = new Set([run.windowId]);
+  const tabSession = sessionForTab(run.tabId);
+  if (tabSession) windows.add(tabSession.windowId);
+  let changed = false;
+  for (const w of windows) {
+    const s = sessions.get(w);
+    if (!s || s.paused) continue;
+    s.paused = true;
+    run.resume.add(w);
+    changed = true;
+    for (const id of s.tabIds) sendToFrame(id, { type: 'PAUSE_RECORDING' });
+  }
+  if (changed) persistState();
+}
+
+/** Undo pauseForReplay for one session — only if it is still the replay's pause. */
+function resumeAfterReplay(windowId) {
+  const s = sessions.get(windowId);
+  if (!s || !s.paused) return;
+  s.paused = false;
+  persistState();
+  for (const id of s.tabIds) sendToFrame(id, { type: 'RESUME_RECORDING' });
+}
+
+/** The user set this window's recording state themselves: the replay no longer restores it. */
+function releaseReplayPause(windowId) {
+  if (!isWindowId(windowId)) return;
+  let changed = false;
+  for (const run of replayRuns.values()) if (run.resume.delete(windowId)) changed = true;
+  for (const r of interruptedReplays) {
+    const i = r.resume.indexOf(windowId);
+    if (i >= 0) {
+      r.resume.splice(i, 1);
+      changed = true;
+    }
+  }
+  if (changed) persistState();
+}
+
+/**
+ * Clean up after runs that died with an earlier worker: give back the recording
+ * they paused, and tell their panel (only `windowId`'s, when given) that they ended.
+ */
+function settleInterruptedReplays(windowId) {
+  if (!interruptedReplays.length) return;
+  let changed = false;
+  interruptedReplays = interruptedReplays.filter((r) => {
+    if (r.resume.length) {
+      // A new run in the same window has already taken over the pause.
+      if (!replayRuns.has(r.windowId)) r.resume.forEach(resumeAfterReplay);
+      r.resume = [];
+      changed = true;
+    }
+    if (isWindowId(windowId) && r.windowId !== windowId) return true;
+    const delivered = hasPanelPort(r.windowId);
+    relayToSidePanel({
+      type: 'REPLAY_DONE',
+      windowId: r.windowId,
+      runId: r.runId,
+      result: 'error',
+      error: REPLAY_INTERRUPTED_ERROR
+    });
+    if (delivered) changed = true;
+    return !delivered;
+  });
+  if (changed) persistState();
+}
+
+// ── run lifecycle ──
+
+function finishReplay(run, outcome) {
+  if (run.done) return;
+  run.done = true;
+  run.aborted = true;
+  run.abortResolve();
+  if (replayRuns.get(run.windowId) === run) replayRuns.delete(run.windowId);
+  for (const w of run.resume) resumeAfterReplay(w);
+  run.resume.clear();
+  run.secrets = {};
+  persistState();
+  const msg = { type: 'REPLAY_DONE', windowId: run.windowId, runId: run.runId, result: outcome.result };
+  if (typeof outcome.failedIndex === 'number') msg.failedIndex = outcome.failedIndex;
+  if (outcome.error) msg.error = String(outcome.error);
+  relayToSidePanel(msg);
+}
+
+/** Stop a run now. Its REPLAY_DONE goes out immediately; the step loop notices and exits. */
+function abortReplay(run, result, error) {
+  if (run.done) return;
+  if (!run.started) {
+    // Still in its pre-flight checks: startReplay answers the panel instead.
+    run.aborted = true;
+    run.abortResolve();
+    return;
+  }
+  finishReplay(run, { result, error });
+}
+
+function sanitizeSecrets(secrets) {
+  const out = {};
+  if (!secrets || typeof secrets !== 'object') return out;
+  for (const k of Object.keys(secrets)) {
+    if (typeof secrets[k] === 'string' && secrets[k] !== '') out[k] = secrets[k];
+  }
+  return out;
+}
+
+function startReplay(msg, respond) {
+  const steps = (Array.isArray(msg.steps) ? msg.steps : []).filter(
+    (s) => s && typeof s === 'object' && typeof s.action === 'string'
+  );
+  if (!steps.length) {
+    respond({ ok: false, error: 'There are no steps to replay.' });
+    return;
+  }
+  if (steps.length > REPLAY_MAX_STEPS) {
+    respond({ ok: false, error: `Too many steps to replay (max ${REPLAY_MAX_STEPS}).` });
+    return;
+  }
+  queryActiveTab(msg.windowId, (active) => {
+    ready().then(() => {
+      const windowId = isWindowId(msg.windowId) ? msg.windowId : active ? active.windowId : undefined;
+      if (!isWindowId(windowId)) {
+        respond({ ok: false, error: 'No window to replay in.' });
+        return;
+      }
+      if (replayRuns.has(windowId)) {
+        respond({ ok: false, error: 'A replay is already running in this window.' });
+        return;
+      }
+      // The window's active tab; failing that, the first tab of its recording.
+      const s = sessions.get(windowId);
+      const tabId = active ? active.id : s && s.tabIds.size ? s.tabIds.values().next().value : undefined;
+      if (typeof tabId !== 'number') {
+        respond({ ok: false, error: 'No tab to replay in.' });
+        return;
+      }
+      const options = msg.options && typeof msg.options === 'object' ? msg.options : {};
+      let abortResolve;
+      const run = {
+        runId: newRunId(),
+        windowId,
+        tabId,
+        steps,
+        secrets: sanitizeSecrets(msg.secrets),
+        stopOnFailure: options.stopOnFailure !== false,
+        slowMoMs: clampNumber(options.slowMoMs, 0, 10000, 0),
+        stepTimeoutMs: clampNumber(options.stepTimeoutMs, 100, 60000, REPLAY_DEFAULT_STEP_TIMEOUT_MS),
+        resume: new Set(),
+        startedAt: Date.now(),
+        started: false,
+        aborted: false,
+        done: false,
+        abortPromise: new Promise((r) => (abortResolve = r)),
+        abortResolve: () => abortResolve()
+      };
+      // Claimed synchronously with the check above, so a second start is refused.
+      replayRuns.set(windowId, run);
+      const before = interruptedReplays.length;
+      interruptedReplays = interruptedReplays.filter((r) => r.windowId !== windowId || r.resume.length);
+      if (interruptedReplays.length !== before) persistState();
+
+      // Every frame needs the content script (a step may live in an iframe). A page
+      // that refuses it can still be replayed when the first step navigates away.
+      const firstRunnable = steps.find((st) => st.action !== 'viewport' && !st.suggested);
+      const startsWithGoto = !!firstRunnable && firstRunnable.action === 'goto';
+      injectAllFrames(tabId, () => {
+        pingTopFrame(tabId, (alive) => {
+          if (run.aborted || (!alive && !startsWithGoto)) {
+            if (replayRuns.get(windowId) === run) replayRuns.delete(windowId);
+            run.done = true;
+            respond({ ok: false, error: run.aborted ? 'Replay was stopped.' : RESTRICTED_PAGE_ERROR });
+            return;
+          }
+          run.started = true;
+          run.readySeq = loadSeqOf(tabId);
+          pauseForReplay(run);
+          persistState();
+          respond({ ok: true, runId: run.runId });
+          // After the response, so the panel knows the runId before any progress.
+          setTimeout(() => runReplay(run), 0);
+        });
+      });
+    });
+  });
+}
+
+async function runReplay(run) {
+  let failedIndex;
+  let failedError;
+  try {
+    for (let i = 0; i < run.steps.length; i++) {
+      if (run.aborted) return;
+      if (i > 0 && run.slowMoMs > 0) await replayWait(run, run.slowMoMs);
+      if (run.aborted) return;
+      replayProgress(run, i, 'running');
+      const t0 = Date.now();
+      const out = await replayStep(run, i, run.steps[i]);
+      if (run.aborted) return;
+      if (out.fatal) {
+        finishReplay(run, { result: 'error', failedIndex: i, error: out.error });
+        return;
+      }
+      replayProgress(run, i, out.status, {
+        error: out.error,
+        matchCount: out.matchCount,
+        durationMs: Date.now() - t0
+      });
+      if (out.status === 'failed') {
+        if (failedIndex === undefined) {
+          failedIndex = i;
+          failedError = out.error;
+        }
+        if (run.stopOnFailure) break;
+      }
+    }
+    finishReplay(
+      run,
+      failedIndex === undefined ? { result: 'passed' } : { result: 'failed', failedIndex, error: failedError }
+    );
+  } catch (e) {
+    finishReplay(run, { result: 'error', error: String((e && e.message) || e) });
+  }
+}
+
+const failed = (error, extra) => Object.assign({ status: 'failed', error }, extra || {});
+const TAB_GONE = { status: 'failed', error: 'The tab being replayed was closed.', fatal: true };
+
+/** Map a waitForTabReady outcome that is not 'ready' to a step result. */
+function loadFailure(state) {
+  if (state === 'gone') return TAB_GONE;
+  if (state === 'unreachable') return failed(RESTRICTED_PAGE_ERROR);
+  if (state === 'aborted') return { status: 'aborted' };
+  return failed('page did not finish loading');
+}
+
+/**
+ * Wait until the tab has finished loading and its top frame answers PING
+ * (injecting every frame first — the manifest only injects the top one).
+ * expectNavigation: a navigation was just requested; give it a moment to start
+ * (navSeq is the load count from before the request) so the old, already
+ * complete document is not mistaken for the new one.
+ * @returns 'ready' | 'timeout' | 'unreachable' | 'gone' | 'aborted'
+ */
+async function waitForTabReady(run, opts) {
+  const { expectNavigation = false, navSeq = loadSeqOf(run.tabId), timeoutMs = REPLAY_LOAD_TIMEOUT_MS } = opts || {};
+  let waited = 0;
+  let pingFailures = 0;
+  for (;;) {
+    if (run.aborted) return 'aborted';
+    const tab = await tabGet(run.tabId);
+    if (run.aborted) return 'aborted';
+    if (!tab) return 'gone';
+    const started = loadSeqOf(run.tabId) !== navSeq;
+    const loading = tab.status === 'loading';
+    if (!loading && (!expectNavigation || started || waited >= REPLAY_NAV_START_GRACE_MS)) {
+      await injectP(run.tabId);
+      if (run.aborted) return 'aborted';
+      if (await pingP(run.tabId)) {
+        run.readySeq = loadSeqOf(run.tabId);
+        return 'ready';
+      }
+      // Complete but no script, even after injecting: a page Locatra may not run on.
+      if (++pingFailures >= 5) return 'unreachable';
+    }
+    if (waited >= timeoutMs) return 'timeout';
+    await replayWait(run, REPLAY_POLL_MS);
+    waited += REPLAY_POLL_MS;
+  }
+}
+
+async function replayStep(run, index, step) {
+  if (step.suggested) return { status: 'skipped', error: 'suggested step was not accepted' };
+  if (step.action === 'viewport') return { status: 'skipped', error: 'viewport is not changed during replay' };
+  if (step.action === 'goto') return replayGoto(run, step);
+
+  // Between steps: let a navigation the previous step started finish first.
+  const tab = await tabGet(run.tabId);
+  if (!tab) return TAB_GONE;
+  if (tab.status === 'loading' || loadSeqOf(run.tabId) !== run.readySeq) {
+    const state = await waitForTabReady(run);
+    if (state !== 'ready') return loadFailure(state);
+  }
+  return replayInPage(run, index, step, 0);
+}
+
+async function replayGoto(run, step) {
+  const url = typeof step.value === 'string' ? step.value.trim() : '';
+  if (!/^https?:\/\//i.test(url)) return failed(`can't navigate to "${url}" (only http and https pages can be replayed)`);
+  const navSeq = loadSeqOf(run.tabId);
+  const res = await tabUpdate(run.tabId, { url });
+  if (run.aborted) return { status: 'aborted' };
+  if (!res.ok) {
+    if (!(await tabGet(run.tabId))) return TAB_GONE;
+    return failed(`navigation failed: ${res.error || 'unknown error'}`);
+  }
+  const state = await waitForTabReady(run, { expectNavigation: true, navSeq });
+  return state === 'ready' ? { status: 'passed' } : loadFailure(state);
+}
+
+/** Send one REPLAY_STEP to every frame of the tab. Resolves {res} | {noAnswer} | {timedOut} | {aborted}. */
+function sendReplayStep(run, msg) {
+  return new Promise((resolve) => {
+    let settled = false;
+    let timer = null;
+    const finish = (v) => {
+      if (settled) return;
+      settled = true;
+      if (timer) clearTimeout(timer);
+      resolve(v);
+    };
+    timer = setTimeout(() => finish({ timedOut: true }), msg.timeoutMs + REPLAY_RESPONSE_GRACE_MS);
+    run.abortPromise.then(() => finish({ aborted: true }));
+    try {
+      chrome.tabs.sendMessage(run.tabId, msg, (res) => {
+        const err = chrome.runtime.lastError;
+        finish(err || !res || typeof res !== 'object' ? { noAnswer: true } : { res });
+      });
+    } catch (e) {
+      finish({ noAnswer: true });
+    }
+  });
+}
+
+async function replayInPage(run, index, step, attempt) {
+  const msg = {
+    type: 'REPLAY_STEP',
+    runId: run.runId,
+    index,
+    step,
+    timeoutMs: run.stepTimeoutMs,
+    highlight: true
+  };
+  // Only the one value this step needs, and only to the tab being replayed.
+  if (step.sensitive && typeof step.secretName === 'string' && run.secrets[step.secretName] !== undefined) {
+    msg.secrets = { [step.secretName]: run.secrets[step.secretName] };
+  }
+  const seqBefore = loadSeqOf(run.tabId);
+  const reply = await sendReplayStep(run, msg);
+  if (run.aborted || reply.aborted) return { status: 'aborted' };
+
+  if (reply.res) {
+    const r = reply.res;
+    const extra = typeof r.matchCount === 'number' ? { matchCount: r.matchCount } : {};
+    if (r.ok === true) {
+      if (REPLAY_ACTIONS.has(step.action)) await replayWait(run, REPLAY_SETTLE_MS);
+      return Object.assign({ status: 'passed' }, extra);
+    }
+    if (r.skipped) return Object.assign({ status: 'skipped', error: String(r.error || 'skipped') }, extra);
+    return failed(String(r.error || 'step failed'), extra);
+  }
+
+  // Nobody answered (or not in time). Either the page navigated underneath the
+  // step — typically because the step itself clicked a link — or no frame owns it.
+  const navigated = async () => {
+    const tab = await tabGet(run.tabId);
+    if (!tab) return null;
+    return loadSeqOf(run.tabId) !== seqBefore || tab.status === 'loading';
+  };
+  let nav = await navigated();
+  if (nav === null) return TAB_GONE;
+  if (!nav && !reply.timedOut) {
+    await replayWait(run, REPLAY_NO_ANSWER_RETRY_MS);
+    if (run.aborted) return { status: 'aborted' };
+    nav = await navigated();
+    if (nav === null) return TAB_GONE;
+  }
+  if (nav) {
+    const state = await waitForTabReady(run);
+    if (state !== 'ready') return loadFailure(state);
+    // An action that navigated did its job. Anything else is idempotent and never
+    // got to run on the old page, so it gets one go on the new one.
+    if (REPLAY_ACTIONS.has(step.action)) return { status: 'passed' };
+    if (attempt === 0) return replayInPage(run, index, step, 1);
+    return failed('frame not found or page navigated');
+  }
+  if (reply.timedOut) return failed(`step timed out after ${Math.round(run.stepTimeoutMs / 100) / 10}s`);
+  if (attempt === 0) {
+    // A frame may have been added (or reloaded) since the last injection.
+    await injectP(run.tabId);
+    if (run.aborted) return { status: 'aborted' };
+    return replayInPage(run, index, step, 1);
+  }
+  return failed('frame not found or page navigated');
+}
