@@ -323,17 +323,16 @@ async function playwrightPython({ dir, script, env }) {
 }
 
 // GitHub's Ubuntu runners ship their own ChromeDriver on PATH (CHROMEWEBDRIVER), and
-// Selenium uses a driver found on PATH even when its version doesn't match the browser
-// — so every Selenium run died with "This version of ChromeDriver only supports Chrome
-// version 154" against Playwright's Chromium 147. Hiding stray drivers lets Selenium
-// Manager fetch the one that matches. An explicit LOCATRA_CHROMEDRIVER still wins.
+// Selenium Manager uses a driver found on PATH even when its version doesn't match the
+// browser — every Selenium run died with "This version of ChromeDriver only supports
+// Chrome version 154" against Playwright's Chromium 147. SE_SKIP_DRIVER_IN_PATH makes
+// Selenium Manager (used by the JS, Python, Java and C# bindings alike) ignore PATH
+// drivers and fetch the one matching the browser. PATH itself is left alone: an
+// earlier version dropped every PATH directory holding a chromedriver, which on the
+// runners includes /usr/bin, and Maven's launcher script then had no uname/ls/dirname.
+// An explicit LOCATRA_CHROMEDRIVER still wins.
 function withoutStrayChromedriver(env) {
-  const exe = process.platform === 'win32' ? 'chromedriver.exe' : 'chromedriver';
-  const path = (env.PATH ?? process.env.PATH ?? '')
-    .split(delimiter)
-    .filter((dir) => dir && !existsSync(join(dir, exe)))
-    .join(delimiter);
-  return { ...env, PATH: path };
+  return { ...env, SE_SKIP_DRIVER_IN_PATH: 'true' };
 }
 
 function seleniumNode(lang) {

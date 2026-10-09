@@ -12,7 +12,7 @@
 // ChromeDriver: WebdriverIO resolves (and caches) the one matching that browser
 // itself, into node_modules/.cache/locatra-e2e/wdio/drivers. It never looks at PATH,
 // but CHROMEDRIVER_PATH would override it, so that (and the CI runners'
-// CHROMEWEBDRIVER) is cleared; stray drivers are hidden from PATH all the same.
+// CHROMEWEBDRIVER) is cleared; SE_SKIP_DRIVER_IN_PATH is set too, for consistency.
 // LOCATRA_CHROMEDRIVER, when set, is used explicitly.
 
 import { existsSync, symlinkSync, writeFileSync } from 'node:fs';
