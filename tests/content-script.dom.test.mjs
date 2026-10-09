@@ -628,7 +628,9 @@ function loadIntoFrame(frame) {
     },
     storage: { local: { get: (k, cb) => cb({}) }, onChanged: { addListener: () => {} } },
   };
-  for (const file of CONTENT_SCRIPTS) w.eval(readFileSync(join(ROOT, file), 'utf8'));
+  // runInContext (not w.eval) so coverage attributes the frame's run to src/.
+  for (const file of CONTENT_SCRIPTS)
+    vm.runInContext(readFileSync(join(ROOT, file), 'utf8'), w, { filename: file });
   const frameSend = (msg) => {
     let response;
     for (const h of frameHandlers) h(msg, {}, (r) => (response = r));

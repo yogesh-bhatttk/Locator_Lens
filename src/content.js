@@ -35,7 +35,12 @@
   // untrusted, so it opts in through a global that only this script's own world
   // can see: content scripts live in an isolated world (Chrome) / behind Xray
   // wrappers (Firefox), so a page cannot set it for us.
+  // Replay (F1) dispatches its own synthetic events into the page. Those are never
+  // the user — not even under the test seam — so while a replayed action is being
+  // dispatched every event counts as untrusted.
+  let _replayDispatching = 0;
   function isUserEvent(e) {
+    if (_replayDispatching > 0) return false;
     if (!e || e.isTrusted !== false) return true;
     return globalThis.__LocatraTrustSyntheticEvents === true;
   }
@@ -162,11 +167,50 @@
       target: data.target != null ? data.target : null,
       assertType: data.assertType != null ? data.assertType : null
     };
-    ['sensitive', 'secretName', 'inputType', 'supersedes'].forEach((k) => {
+    ['sensitive', 'secretName', 'inputType', 'supersedes', 'suggested', 'reason'].forEach((k) => {
       if (data[k] != null) payload[k] = data[k];
     });
+    // F4: where the step's element sat on screen, for the step thumbnail.
+    if (payload.target && data.el) {
+      const geo = stepGeometry(data.el);
+      if (geo) {
+        payload.rect = geo.rect;
+        payload.viewport = geo.viewport;
+      }
+    }
     safeSend({ type: 'RECORDED_ACTION', data: payload });
     return payload.eventId;
+  }
+
+  /**
+   * F4: the element's box in top-frame viewport coordinates (CSS px) plus the top
+   * viewport's size. Inside frames each same-origin <iframe>'s content-box offset is
+   * added; across an origin boundary the position is unknowable, so null.
+   */
+  function stepGeometry(el) {
+    try {
+      if (!el || !el.isConnected || typeof el.getBoundingClientRect !== 'function') return null;
+      const r = el.getBoundingClientRect();
+      let x = r.left, y = r.top;
+      let win = window;
+      let guard = 0;
+      while (win !== win.parent && guard++ < 8) {
+        const fe = win.frameElement; // null (or throws) across an origin boundary
+        if (!fe) return null;
+        const fr = fe.getBoundingClientRect();
+        const cs = win.parent.getComputedStyle(fe);
+        x += fr.left + (fe.clientLeft || 0) + (parseFloat(cs.paddingLeft) || 0);
+        y += fr.top + (fe.clientTop || 0) + (parseFloat(cs.paddingTop) || 0);
+        win = win.parent;
+      }
+      const round = (n) => Math.round(n * 10) / 10;
+      return {
+        rect: { x: round(x), y: round(y), width: round(r.width), height: round(r.height) },
+        viewport: { width: win.innerWidth, height: win.innerHeight }
+      };
+    } catch (err) {
+      return null;
+    }
   }
 
   function recordFallbackLocator(el, methodChain) {
@@ -210,7 +254,8 @@
       value: '',
       code: best.code,
       fullCode: `await ${best.code}.hover();`,
-      target: best.target
+      target: best.target,
+      el: el
     });
   }
 
@@ -275,7 +320,8 @@
       value: value,
       code: best.code,
       fullCode: `await expect(${best.code}).${call};`,
-      target: best.target
+      target: best.target,
+      el: el
     });
   }
 
@@ -356,6 +402,7 @@
 
   function onRecordSwallow(e) {
     if (!isRecording || isPaused || isInspecting) return;
+    if (!isUserEvent(e)) return;
     if (typeof e.button === 'number' && e.button !== 0) return;
     // Only the rest of a gesture whose pointerdown was recorded as an assertion /
     // hover — a keyboard-activated click (Enter on a button) is left alone.
@@ -374,6 +421,8 @@
     if (!isRecording || isPaused) return;
     // Picking an element while recording is not part of the flow.
     if (isInspecting) return;
+    // A page's (or a replay's) dispatched pointerdown is not the user clicking.
+    if (!isUserEvent(e)) return;
     if (typeof e.button === 'number' && e.button !== 0) return;
     if (typeof e.isPrimary === 'boolean' && e.isPrimary === false) return;
 
@@ -419,9 +468,12 @@
       value: '',
       code: best.code,
       fullCode: best.fullCode,
-      target: best && best.target
+      target: best && best.target,
+      el: el
     });
     rememberClick(el, eventId);
+    // F3: a click on a submit-like button may produce feedback worth asserting.
+    if (isSubmitLikeButton(el)) startFeedbackWatch();
   }
 
   const _recordPointerOptions = { capture: true };
@@ -490,7 +542,8 @@
       target: best && best.target,
       sensitive: secretName ? true : null,
       secretName: secretName,
-      inputType: inputType
+      inputType: inputType,
+      el: el
     });
   }
 
@@ -538,7 +591,8 @@
       value: value,
       code: best.code,
       fullCode: best.fullCode,
-      target: best && best.target
+      target: best && best.target,
+      el: el
     });
   }
 
@@ -594,7 +648,8 @@
         value: value,
         code: best.code,
         fullCode: best.fullCode,
-        target: best && best.target
+        target: best && best.target,
+        el: el
       });
       return;
     }
@@ -610,6 +665,7 @@
 
   function onRecordDblClick(e) {
     if (!isRecording || isPaused || assertMode || isInspecting) return;
+    if (!isUserEvent(e)) return;
     const el = resolvePrimaryTarget(e);
     if (!el || isOwnUi(el)) return;
     const best = bestWithChain(el, 'dblclick()');
@@ -627,7 +683,8 @@
       code: best.code,
       fullCode: best.fullCode,
       target: best && best.target,
-      supersedes: supersedes.length ? supersedes : null
+      supersedes: supersedes.length ? supersedes : null,
+      el: el
     });
   }
 
@@ -659,6 +716,7 @@
     if (isInspecting) return;
     // Mid-composition keys (IME: CJK, dead keys) belong to the text being composed.
     if (e.isComposing || e.keyCode === 229) return;
+    if (!isUserEvent(e)) return;
 
     let key = null;
     if (RECORDED_KEYS.includes(e.key)) key = e.key;
@@ -682,20 +740,307 @@
       code: '',
       fullCode: `await page.keyboard.press(${JSON.stringify(combo)});`
     });
+    // F3: Enter / Space on a submit-like button submits as surely as a click does.
+    if ((key === 'Enter' || key === ' ') && isSubmitLikeButton(resolvePrimaryTarget(e))) startFeedbackWatch();
   }
 
   // The page is going away (navigation, tab close, bfcache) or being hidden: a
   // fill still inside its debounce window would otherwise be lost with it.
   function onRecordPageHide() {
     if (isRecording) flushPendingFills();
+    stopFeedbackWatch();
   }
   function onRecordVisibility() {
     if (isRecording && document.visibilityState === 'hidden') flushPendingFills();
   }
 
+  // ── Automatic assertion suggestions (F3) ──────────────────────────────────
+  // Suggested steps are ordinary RECORDED_ACTIONs with suggested:true: the panel
+  // shows them apart and nothing uses them until the user accepts one. Two sources:
+  // the URL settling somewhere new, and feedback (a toast, an alert, a dialog)
+  // appearing after a submit. Off with llSettings.autoAssertions === false.
+  let llSettings = { autoAssertions: true, stepScreenshots: true };
+  function applySettings(v) {
+    const o = v && typeof v === 'object' ? v : {};
+    llSettings = { autoAssertions: o.autoAssertions !== false, stepScreenshots: o.stepScreenshots !== false };
+    if (!llSettings.autoAssertions) stopFeedbackWatch();
+  }
+
+  function canSuggest() {
+    return isRecording && !isPaused && !tornDown && llSettings.autoAssertions !== false;
+  }
+
+  const URL_POLL_MS = 500;
+  const URL_STABLE_MS = 500;
+  let urlPollTimer = null;
+  let urlStableTimer = null;
+  let urlSeen = null;          // the href the watcher last saw
+  let urlLastSuggested = null; // redacted href of the last toHaveURL suggestion (or the goto)
+
+  function shortUrlPath(href) {
+    try {
+      const u = new URL(href);
+      const p = u.pathname + u.search + u.hash;
+      return p.length > 80 ? p.slice(0, 77) + '…' : p;
+    } catch (err) {
+      return String(href).slice(0, 80);
+    }
+  }
+
+  function suggestUrl(href) {
+    if (!canSuggest()) return;
+    const value = redactUrl(href);
+    if (value === urlLastSuggested) return; // one per distinct URL in a row
+    urlLastSuggested = value;
+    sendRecordedAction({
+      action: 'assert',
+      assertType: 'toHaveURL',
+      value: value,
+      code: 'page',
+      fullCode: `await expect(page).toHaveURL(${JSON.stringify(value)});`,
+      target: null,
+      suggested: true,
+      reason: `Page navigated to ${shortUrlPath(value)}`
+    });
+  }
+
+  /** A changed href is suggested once it has held still for URL_STABLE_MS. */
+  function checkUrlChange() {
+    if (!isRecording || tornDown) return;
+    const href = window.location.href;
+    if (href === urlSeen) return;
+    urlSeen = href;
+    armUrlStable();
+  }
+  function armUrlStable() {
+    if (urlStableTimer) clearTimeout(urlStableTimer);
+    urlStableTimer = setTimeout(() => {
+      urlStableTimer = null;
+      if (window.location.href !== urlSeen) { checkUrlChange(); return; }
+      suggestUrl(urlSeen);
+    }, URL_STABLE_MS);
+  }
+  function onUrlEvent() { checkUrlChange(); }
+
+  /** Top frame only. `navigated`: this document is a later page of the recording. */
+  function startUrlWatch(navigated) {
+    if (window !== window.top || urlPollTimer) return;
+    urlSeen = window.location.href;
+    urlLastSuggested = navigated ? null : redactUrl(urlSeen); // the goto already says where we start
+    urlPollTimer = setInterval(checkUrlChange, URL_POLL_MS);
+    window.addEventListener('popstate', onUrlEvent, true);
+    window.addEventListener('hashchange', onUrlEvent, true);
+    if (navigated && !isReloadNavigation()) armUrlStable();
+  }
+  function stopUrlWatch() {
+    if (urlPollTimer) { clearInterval(urlPollTimer); urlPollTimer = null; }
+    if (urlStableTimer) { clearTimeout(urlStableTimer); urlStableTimer = null; }
+    window.removeEventListener('popstate', onUrlEvent, true);
+    window.removeEventListener('hashchange', onUrlEvent, true);
+  }
+  function isReloadNavigation() {
+    try {
+      const nav = performance.getEntriesByType && performance.getEntriesByType('navigation')[0];
+      return !!nav && nav.type === 'reload';
+    } catch (err) {
+      return false;
+    }
+  }
+
+  // Feedback after a submit: for FEEDBACK_WATCH_MS, newly visible (or re-worded)
+  // alerts, live regions, dialogs and toast-like elements become suggestions.
+  const FEEDBACK_WATCH_MS = 3000;
+  const FEEDBACK_MAX = 2;
+  const FEEDBACK_TEXT_MAX = 300;
+  const FEEDBACK_ROLE_SEL = '[role="alert"],[role="status"],[role="alertdialog"],[role="dialog"],[aria-live="polite"],[aria-live="assertive"],dialog[open]';
+  const FEEDBACK_NAME_RE = /toast|snackbar|alert|notification|flash|success|error|message|banner/i;
+  const SUBMIT_NAME_RE = /submit|save|send|sign ?in|log ?in|continue|place order|confirm|apply|update|create|register|pay/i;
+  const FEEDBACK_SCAN_CAP = 2000;
+  let feedbackWatch = null; // { observer, timer, checkTimer, baseline: Map, emitted: [], count }
+
+  function isOwnArtifact(n) {
+    return !!(n && n.closest && n.closest('[id^="ll-"],[id^="locatra-"]'));
+  }
+
+  function isFeedbackEl(n) {
+    if (!n || n.nodeType !== Node.ELEMENT_NODE) return false;
+    try { if (n.matches(FEEDBACK_ROLE_SEL)) return true; } catch (err) { /* ignore */ }
+    const cls = n.getAttribute('class') || '';
+    return FEEDBACK_NAME_RE.test(cls + ' ' + (typeof n.id === 'string' ? n.id : ''));
+  }
+
+  function isDialogEl(n) {
+    if (n.tagName.toLowerCase() === 'dialog') return true;
+    const role = (n.getAttribute('role') || '').toLowerCase();
+    return role === 'dialog' || role === 'alertdialog';
+  }
+
+  /** Feedback-looking elements at and (closest) around `n`, and inside it when `deep`. */
+  function feedbackCandidatesAround(n, out, deep) {
+    if (!n) return;
+    if (n.nodeType !== Node.ELEMENT_NODE) n = n.parentElement;
+    if (!n) return;
+    let a = n;
+    for (let i = 0; a && i < 6; i++, a = a.parentElement) {
+      if (isFeedbackEl(a)) { out.add(a); break; }
+    }
+    if (isFeedbackEl(n)) out.add(n);
+    if (!deep) return;
+    let all;
+    try { all = n.querySelectorAll('*'); } catch (err) { return; }
+    for (let i = 0; i < all.length && i < FEEDBACK_SCAN_CAP; i++) if (isFeedbackEl(all[i])) out.add(all[i]);
+  }
+
+  function feedbackSnapshot(el) {
+    return { text: normalizedText(el), visible: isElementVisible(el) };
+  }
+
+  /** Values typed into password / OTP / card fields right now — never suggested. */
+  function sensitiveValues() {
+    const out = [];
+    try {
+      document.querySelectorAll('input').forEach((i) => {
+        if (sensitiveSecretName(i) && i.value && i.value.length >= 3) out.push(i.value);
+      });
+    } catch (err) { /* ignore */ }
+    return out;
+  }
+
+  function isSubmitLikeButton(el) {
+    if (!el || el.nodeType !== Node.ELEMENT_NODE) return false;
+    const btn = el.closest('button, input[type="submit"], input[type="image"], input[type="button"], [role="button"]');
+    if (!btn) return false;
+    const tag = btn.tagName.toLowerCase();
+    const type = (btn.getAttribute('type') || '').toLowerCase();
+    if (tag === 'input' && (type === 'submit' || type === 'image')) return true;
+    if (tag === 'button' && (type === '' || type === 'submit') && btn.form) return true;
+    let name = '';
+    try {
+      const E = globalThis.__LocatorLensEngine;
+      name = (E && E.getAccessibleName(btn)) || '';
+    } catch (err) { name = ''; }
+    if (!name) name = normalizedText(btn) || btn.getAttribute('value') || '';
+    return SUBMIT_NAME_RE.test(name);
+  }
+
+  function startFeedbackWatch() {
+    if (!canSuggest() || feedbackWatch || typeof MutationObserver === 'undefined' || !document.documentElement) return;
+    const baseline = new Map();
+    const initial = new Set();
+    try { document.querySelectorAll(FEEDBACK_ROLE_SEL).forEach((n) => initial.add(n)); } catch (err) { /* ignore */ }
+    try {
+      const all = document.querySelectorAll('[class],[id]');
+      for (let i = 0; i < all.length && i < 20000; i++) if (isFeedbackEl(all[i])) initial.add(all[i]);
+    } catch (err) { /* ignore */ }
+    initial.forEach((n) => baseline.set(n, feedbackSnapshot(n)));
+    const w = { observer: null, timer: null, checkTimer: null, baseline, pending: new Set(), emitted: [], count: 0 };
+    w.observer = new MutationObserver((records) => {
+      for (const r of records) {
+        // A class/style/hidden flip can reveal a whole subtree; a childList change
+        // only matters for what was added (and the box it was added into).
+        feedbackCandidatesAround(r.target, w.pending, r.type === 'attributes');
+        if (r.addedNodes) r.addedNodes.forEach((a) => feedbackCandidatesAround(a, w.pending, true));
+      }
+      if (!w.checkTimer) w.checkTimer = setTimeout(() => { w.checkTimer = null; checkFeedback(w); }, 100);
+    });
+    w.observer.observe(document.documentElement, {
+      childList: true, subtree: true, characterData: true, attributes: true,
+      attributeFilter: ['class', 'style', 'hidden', 'open', 'aria-hidden']
+    });
+    w.timer = setTimeout(() => { checkFeedback(w); stopFeedbackWatch(); }, FEEDBACK_WATCH_MS);
+    feedbackWatch = w;
+  }
+
+  function stopFeedbackWatch() {
+    const w = feedbackWatch;
+    if (!w) return;
+    feedbackWatch = null;
+    try { w.observer.disconnect(); } catch (err) { /* ignore */ }
+    clearTimeout(w.timer);
+    clearTimeout(w.checkTimer);
+    w.pending.clear();
+  }
+
+  function feedbackPriority(el) {
+    try { if (el.matches('[role="alert"],[role="status"],[aria-live]')) return 0; } catch (err) { /* ignore */ }
+    return isDialogEl(el) ? 1 : 2;
+  }
+
+  function checkFeedback(w) {
+    if (feedbackWatch !== w) return;
+    if (!canSuggest()) { stopFeedbackWatch(); return; }
+    const cands = Array.from(w.pending).filter((el) => el.isConnected && !isOwnArtifact(el));
+    w.pending.clear();
+    // Document order, then by kind: an alert/live region beats a dialog beats a class-named box.
+    cands.sort((a, b) => (a === b ? 0 : (a.compareDocumentPosition(b) & Node.DOCUMENT_POSITION_FOLLOWING ? -1 : 1)));
+    cands.sort((a, b) => feedbackPriority(a) - feedbackPriority(b));
+    const secrets = sensitiveValues();
+    for (const el of cands) {
+      if (w.count >= FEEDBACK_MAX) break;
+      if (w.emitted.some((o) => o === el || o.contains(el) || el.contains(o))) continue;
+      if (!isElementVisible(el)) continue;
+      const text = normalizedText(el);
+      const before = w.baseline.get(el);
+      if (before && before.visible && before.text === text) continue; // was already showing this
+      const dialog = isDialogEl(el);
+      if (text.length > FEEDBACK_TEXT_MAX) continue;
+      if (!text && !dialog) continue;
+      const best = safeLocatorFor(el, secrets);
+      if (!best) continue; // every locator would spell out a secret
+      const leaks = secrets.some((v) => text.includes(v));
+      const type = text && !leaks ? 'toContainText' : 'toBeVisible';
+      const value = type === 'toContainText' ? text : '';
+      const call = type === 'toContainText' ? `toContainText(${JSON.stringify(value)})` : 'toBeVisible()';
+      const hint = (el.getAttribute('class') || '') + ' ' + el.id + ' ' + text;
+      let reason = 'Message appeared after submit';
+      if (/error|invalid|fail|wrong|denied/i.test(hint)) reason = 'Error message appeared after submit';
+      else if (/success|saved|thank|confirm|complete|created|updated|sent/i.test(hint)) reason = 'Success message appeared after submit';
+      else if (dialog) reason = 'Dialog appeared after submit';
+      w.emitted.push(el);
+      w.count++;
+      sendRecordedAction({
+        action: 'assert',
+        assertType: type,
+        value: value,
+        code: best.code,
+        fullCode: `await expect(${best.code}).${call};`,
+        target: best.target,
+        suggested: true,
+        reason: reason,
+        el: el
+      });
+    }
+    if (w.count >= FEEDBACK_MAX) stopFeedbackWatch();
+  }
+
+  /** The best locator for `el` whose text does not contain any of `secrets`. */
+  function safeLocatorFor(el, secrets) {
+    const leaks = (l) => secrets.some((v) => JSON.stringify(l.target || {}).includes(v) || String(l.code || '').includes(v));
+    if (!secrets.length) return bestLocatorFor(el, 'click()');
+    let locs = [];
+    try { locs = generateLocators(el).locators || []; } catch (err) { locs = []; }
+    const ok = locs.find((l) => l && l.target && !leaks(l));
+    if (ok) return ok;
+    const fb = recordFallbackLocator(el, 'click()');
+    return leaks(fb) ? null : fb;
+  }
+
+  function onRecordSubmit(e) {
+    if (!isRecording || isPaused || _replayDispatching > 0) return;
+    if (e && isOwnArtifact(e.target)) return;
+    startFeedbackWatch();
+  }
+
   function setPaused(paused) {
     // Keystrokes made before Pause belong to the recording.
     if (paused && !isPaused) flushPendingFills();
+    if (paused) {
+      stopFeedbackWatch();
+      if (urlStableTimer) { clearTimeout(urlStableTimer); urlStableTimer = null; }
+    } else if (isPaused) {
+      // Where the page went while paused is not part of the flow.
+      urlSeen = window.location.href;
+    }
     isPaused = !!paused;
   }
 
@@ -748,7 +1093,9 @@
     document.addEventListener('visibilitychange', onRecordVisibility, true);
     window.addEventListener('pagehide', onRecordPageHide, true);
     window.addEventListener('beforeunload', onRecordPageHide, true);
+    document.addEventListener('submit', onRecordSubmit, true);
     updateFrameWatcher();
+    startUrlWatch(!!rearm);
     debugLog('Recording started.' + (rearm ? ' (resumed after navigation)' : ''));
 
     // Only the top document opens the flow: every frame used to add its own
@@ -795,6 +1142,9 @@
     document.removeEventListener('visibilitychange', onRecordVisibility, true);
     window.removeEventListener('pagehide', onRecordPageHide, true);
     window.removeEventListener('beforeunload', onRecordPageHide, true);
+    document.removeEventListener('submit', onRecordSubmit, true);
+    stopUrlWatch();
+    stopFeedbackWatch();
     _shadowChangeRoots.forEach((root) => root.removeEventListener('change', onRecordChange, true));
     _shadowChangeRoots.clear();
     updateFrameWatcher();
@@ -985,7 +1335,7 @@
   }
 
   if (ownChrome.storage && ownChrome.storage.local) {
-    ownChrome.storage.local.get(['customAttributes', 'llFramework', 'llLanguage', 'llDebug'], (res) => {
+    ownChrome.storage.local.get(['customAttributes', 'llFramework', 'llLanguage', 'llDebug', 'llSettings'], (res) => {
       if (ownChrome.runtime.lastError) return;
       if (res && res.customAttributes && res.customAttributes.length > 0) {
         customTestAttributes = [...res.customAttributes, ...customTestAttributes];
@@ -995,6 +1345,7 @@
       if (res && res.llFramework) llFramework = res.llFramework;
       if (res && res.llLanguage) llLanguage = res.llLanguage;
       llDebug = !!(res && res.llDebug);
+      applySettings(res && res.llSettings);
     });
 
     ownChrome.storage.onChanged.addListener(onStorageChanged);
@@ -1010,6 +1361,7 @@
     if (changes.llFramework) llFramework = changes.llFramework.newValue || 'playwright';
     if (changes.llLanguage) llLanguage = changes.llLanguage.newValue || 'typescript';
     if (changes.llDebug) llDebug = !!changes.llDebug.newValue;
+    if (changes.llSettings) applySettings(changes.llSettings.newValue);
   }
 
   // ── Deep-Tracing Engine (Shadow DOM X-Ray) ────────────────────────────────
@@ -1302,7 +1654,9 @@
     tooltip.appendChild(ttTag);
     const ttHint = document.createElement('div');
     ttHint.className = 'll-hint';
-    ttHint.textContent = 'Click or Enter to analyze · ▲/▼ to navigate · Esc to stop';
+    ttHint.textContent = regionPick
+      ? 'Click or Enter to pick this region · ▲/▼ to widen/narrow · Esc to cancel'
+      : 'Click or Enter to analyze · ▲/▼ to navigate · Esc to stop';
     tooltip.appendChild(ttHint);
 
     // Position tooltip: prefer below, fall back to above
@@ -1875,6 +2229,974 @@
     return (loc && loc.code) || '';
   }
 
+  // ── Element state (replay auto-wait, POM scan, feedback detection) ─────────
+  function normText(t) {
+    return String(t == null ? '' : t).replace(/\s+/g, ' ').trim();
+  }
+
+  function documentHasLayout() {
+    try {
+      const r = document.documentElement.getBoundingClientRect();
+      return r.width > 0 || r.height > 0;
+    } catch (err) {
+      return false;
+    }
+  }
+
+  /**
+   * Playwright's notion of visible: a non-empty box, no display:none anywhere up
+   * the composed tree, and not visibility:hidden. A document with no layout at all
+   * (jsdom) can only be judged on styles and the hidden attribute.
+   */
+  function isElementVisible(el) {
+    if (!el || el.nodeType !== Node.ELEMENT_NODE || !el.isConnected) return false;
+    const layout = documentHasLayout();
+    let cs;
+    try { cs = getComputedStyle(el); } catch (err) { return false; }
+    let n = el;
+    for (let g = 0; n && g < 256; g++, n = composedParent(n)) {
+      let s = null;
+      try { s = n === el ? cs : getComputedStyle(n); } catch (err) { s = null; }
+      if (s && s.display === 'none') return false;
+      if (!layout && n.hasAttribute('hidden')) return false;
+    }
+    if (cs.visibility === 'hidden' || cs.visibility === 'collapse') return false;
+    if (!layout) return true;
+    if (cs.display === 'contents') return Array.prototype.some.call(el.children, isElementVisible);
+    const r = el.getBoundingClientRect();
+    return r.width > 0 && r.height > 0;
+  }
+
+  function isElementEnabled(el) {
+    try { if (el.matches(':disabled')) return false; } catch (err) { /* not a form control */ }
+    let n = el;
+    for (let g = 0; n && g < 256; g++, n = composedParent(n)) {
+      if (n.getAttribute && n.getAttribute('aria-disabled') === 'true') return false;
+    }
+    return true;
+  }
+
+  function composedContainsNode(ancestor, n) {
+    for (let g = 0; n && g < 512; g++, n = composedParent(n)) if (n === ancestor) return true;
+    return false;
+  }
+
+  // ── Replay (F1) ────────────────────────────────────────────────────────────
+  // BACKGROUND sends every REPLAY_STEP to all frames of the tab. Exactly one frame
+  // owns a step — the one whose own frame chain matches the frame path the step's
+  // target was wrapped in at record time (wrapInFrames) — and only it answers.
+  const REPLAY_POLL_MS = 100;
+  const REPLAY_HIGHLIGHT_MS = 400;
+  const REPLAY_DEFAULT_TIMEOUT_MS = 5000;
+  let replayHighlight = null;
+  let replayHighlightTimer = null;
+
+  function replaySleep(ms) {
+    return new Promise((r) => setTimeout(r, ms));
+  }
+
+  function innerTargetOf(t) {
+    let guard = 0;
+    while (t && t.kind === 'frame' && guard++ < 16) t = t.child;
+    return t;
+  }
+
+  function framePathOf(t) {
+    const out = [];
+    let guard = 0;
+    while (t && t.kind === 'frame' && guard++ < 16) {
+      out.push({ selector: t.selector || null, index: t.index });
+      t = t.child;
+    }
+    return out;
+  }
+
+  /** This frame and its ancestors below the top, outermost first (parallel to frameChain()). */
+  function ownFrameWindows() {
+    const wins = [];
+    let w = window;
+    let guard = 0;
+    while (w && w !== w.parent && guard++ < 8) {
+      wins.unshift(w);
+      w = w.parent;
+    }
+    return wins;
+  }
+
+  /** Does one level of a recorded frame path address this frame's ancestor `win`? */
+  function frameLevelMatches(step, own, win) {
+    if (step.selector) {
+      if (own && own.selector && own.selector === step.selector) return true;
+      let fe = null;
+      try { fe = win.frameElement; } catch (err) { fe = null; }
+      if (fe) {
+        // The selector may have been built against a slightly different DOM: what
+        // matters is that it still addresses this <iframe> in its parent document.
+        try {
+          const roots = openRootsOf(fe.ownerDocument);
+          if (composedMatches(roots, step.selector).indexOf(fe) !== -1) return true;
+          if (step.selector.indexOf('>') !== -1 &&
+            composedPathResolvesTo(step.selector.split(/\s*>\s*/), roots, fe)) return true;
+        } catch (err) { /* invalid selector */ }
+        return false;
+      }
+    }
+    // Cross-origin (or recorded without a selector): position is all there is.
+    return typeof step.index === 'number' && !!own && step.index === own.index;
+  }
+
+  function deepActiveElement(doc) {
+    let a = doc.activeElement;
+    let guard = 0;
+    while (a && a.shadowRoot && a.shadowRoot.activeElement && guard++ < 32) a = a.shadowRoot.activeElement;
+    return a;
+  }
+
+  /** A target-less press belongs to the frame that has the keyboard focus. */
+  function ownsKeyboardFocus() {
+    const a = deepActiveElement(document);
+    if (a && isFrameEl(a)) return false; // focus is inside a child frame: it answers
+    if (window === window.top) return true;
+    let w = window;
+    let guard = 0;
+    try {
+      while (w !== w.top && guard++ < 8) {
+        const fe = w.frameElement;
+        if (!fe) throw new Error('cross-origin ancestor');
+        if (deepActiveElement(fe.ownerDocument) !== fe) return false;
+        w = w.parent;
+      }
+      return true;
+    } catch (err) {
+      const hasFocus = typeof document.hasFocus === 'function' && document.hasFocus();
+      return hasFocus || (!!a && a !== document.body && a !== document.documentElement);
+    }
+  }
+
+  function ownsReplayStep(step) {
+    if (!step || typeof step !== 'object') return false;
+    const isTop = window === window.top;
+    const target = step.target;
+    if (!target || typeof target !== 'object') {
+      if (step.action === 'press') return ownsKeyboardFocus();
+      return isTop;
+    }
+    const path = framePathOf(target);
+    if (!path.length) return isTop;
+    const chain = frameChain();
+    if (chain.length !== path.length) return false;
+    const wins = ownFrameWindows();
+    for (let i = 0; i < path.length; i++) {
+      if (!frameLevelMatches(path[i], chain[i], wins[i])) return false;
+    }
+    return true;
+  }
+
+  function locatorLabel(t) {
+    try {
+      if (window.LLCodegen) {
+        const expr = window.LLCodegen.locatorExpr(t, 'playwright', 'typescript');
+        if (expr) return expr;
+      }
+    } catch (err) { /* fall through */ }
+    try { return JSON.stringify(t); } catch (err) { return String(t && t.kind); }
+  }
+
+  /**
+   * Fallback for an engine without resolveTarget (older bundle): Playwright's
+   * default matching for each target kind, over the composed tree.
+   */
+  function localResolveTarget(t, E) {
+    if (!t || !E) return null;
+    const all = (sel) => {
+      const r = E.deepQueryAll ? E.deepQueryAll(sel, document, Infinity) : null;
+      return r || Array.from(document.querySelectorAll(sel));
+    };
+    const matchStr = (actual, expected, exact) => {
+      const a = normText(actual);
+      const e = normText(expected);
+      return exact ? a === e : a.toLowerCase().includes(e.toLowerCase());
+    };
+    const attrMatch = (attr) => all('[' + attr + ']').filter((n) => {
+      const v = n.getAttribute(attr) || '';
+      return t.exact ? v === String(t.value) : v.toLowerCase().includes(String(t.value).toLowerCase());
+    });
+    const ariaHidden = (n) => {
+      for (let g = 0; n && g < 256; g++, n = composedParent(n)) {
+        if (n.getAttribute('aria-hidden') === 'true' || n.hasAttribute('hidden')) return true;
+        let s = null;
+        try { s = getComputedStyle(n); } catch (err) { s = null; }
+        if (s && (s.display === 'none' || (g === 0 && s.visibility === 'hidden'))) return true;
+      }
+      return false;
+    };
+    let out;
+    switch (t.kind) {
+      case 'testid': out = all('[' + cssEscape(t.attr) + '="' + attrQuote(t.value) + '"]'); break;
+      case 'id': out = all('#' + cssEscape(String(t.value))); break;
+      case 'name': out = all('[name="' + attrQuote(t.value) + '"]'); break;
+      case 'css': out = all(t.value); break;
+      case 'placeholder': out = attrMatch('placeholder'); break;
+      case 'altText': out = attrMatch('alt'); break;
+      case 'title': out = attrMatch('title'); break;
+      case 'label':
+        out = all('input,select,textarea,[aria-label],[aria-labelledby]')
+          .filter((n) => matchStr(E.getAccessibleName(n), t.value, t.exact));
+        break;
+      case 'role':
+        out = all('*').filter((n) => {
+          if (E.getRole(n) !== t.role || ariaHidden(n)) return false;
+          if (t.level) {
+            const m = /^h([1-6])$/i.exec(n.tagName);
+            const level = n.getAttribute('aria-level') ? parseInt(n.getAttribute('aria-level'), 10) : (m ? parseInt(m[1], 10) : null);
+            if (level !== t.level) return false;
+          }
+          return !t.name || matchStr(E.getAccessibleName(n), t.name, t.exact);
+        });
+        break;
+      case 'text': {
+        const hits = all('*').filter((n) => !/^(script|style|head|title|template|noscript|html|body)$/i.test(n.tagName) &&
+          matchStr(n.textContent, t.value, t.exact));
+        out = hits.filter((n) => !hits.some((o) => o !== n && n.contains(o)));
+        break;
+      }
+      case 'chain': {
+        const parents = localResolveTarget(t.parent, E);
+        const children = localResolveTarget(t.child, E);
+        if (!parents || !children) return null;
+        const selfOk = t.child && t.child.kind === 'text';
+        out = children.filter((c) => parents.some((p) => (p !== c || selfOk) && composedContainsNode(p, c)));
+        break;
+      }
+      default: return null;
+    }
+    if (typeof t.nth === 'number' && t.nth >= 0) out = out[t.nth] ? [out[t.nth]] : [];
+    return out;
+  }
+
+  /** Elements a (frame-less) target resolves to in this document, or null if it cannot be evaluated. */
+  function resolveReplayTarget(t) {
+    const E = globalThis.__LocatorLensEngine;
+    const nodes = E && typeof E.resolveTarget === 'function' ? E.resolveTarget(t) : localResolveTarget(t, E);
+    if (!nodes) return null;
+    return Array.from(nodes).filter((n) => n && n.nodeType === Node.ELEMENT_NODE && !isOwnArtifact(n));
+  }
+
+  /**
+   * Auto-wait: poll until exactly one attached element matches and `ready(el)`
+   * reports no problem, or the timeout passes. More than one match is Playwright's
+   * strict-mode violation and fails at once.
+   */
+  async function waitForReplayElement(target, timeoutMs, ready) {
+    const inner = innerTargetOf(target);
+    const label = locatorLabel(target);
+    const deadline = Date.now() + timeoutMs;
+    for (;;) {
+      let nodes;
+      try { nodes = resolveReplayTarget(inner); } catch (err) { nodes = null; }
+      if (!nodes) return { error: `cannot resolve locator ${label}`, matchCount: 0 };
+      const attached = nodes.filter((n) => n.isConnected);
+      const count = attached.length;
+      if (count > 1) return { error: `${count} elements match ${label} (strict mode)`, matchCount: count };
+      let error;
+      if (!count) error = `no element matches ${label}`;
+      else {
+        error = ready(attached[0]);
+        if (!error) return { el: attached[0], matchCount: 1 };
+      }
+      if (Date.now() >= deadline) return { error, matchCount: count };
+      await replaySleep(REPLAY_POLL_MS);
+    }
+  }
+
+  function clearReplayHighlight() {
+    if (replayHighlightTimer) { clearTimeout(replayHighlightTimer); replayHighlightTimer = null; }
+    if (replayHighlight) { replayHighlight.remove(); replayHighlight = null; }
+  }
+
+  /** The picker overlay's look, on the element being replayed, for ~400 ms. */
+  function showReplayHighlight(el) {
+    const host = document.body || document.documentElement;
+    if (!host || typeof el.getBoundingClientRect !== 'function') return;
+    if (!replayHighlight || !replayHighlight.isConnected) {
+      replayHighlight = document.createElement('div');
+      replayHighlight.id = 'll-replay-highlight';
+      host.appendChild(replayHighlight);
+    }
+    const r = el.getBoundingClientRect();
+    replayHighlight.style.cssText = `
+      position: fixed !important;
+      pointer-events: none !important;
+      z-index: 2147483646 !important;
+      border: 1px solid #3adffa !important;
+      background: rgba(58, 223, 250, 0.15) !important;
+      border-radius: 2px !important;
+      box-shadow: 0 0 0 1px rgba(58, 223, 250, 0.2), inset 0 0 15px rgba(58, 223, 250, 0.1) !important;
+      left: ${r.left}px !important;
+      top: ${r.top}px !important;
+      width: ${r.width}px !important;
+      height: ${r.height}px !important;
+    `;
+    if (replayHighlightTimer) clearTimeout(replayHighlightTimer);
+    replayHighlightTimer = setTimeout(clearReplayHighlight, REPLAY_HIGHLIGHT_MS);
+  }
+
+  /** Run page-facing dispatches with the recorder (and picker) looking away. */
+  function dispatchReplay(fn) {
+    _replayDispatching++;
+    try { return fn(); } finally { _replayDispatching--; }
+  }
+
+  function fireEvent(el, type, Ctor, init) {
+    let ev;
+    try { ev = new Ctor(type, init); } catch (err) { ev = new Event(type, init); }
+    return el.dispatchEvent(ev);
+  }
+
+  function pointerInit(el, extra) {
+    let x = 0;
+    let y = 0;
+    try {
+      const r = el.getBoundingClientRect();
+      x = r.left + r.width / 2;
+      y = r.top + r.height / 2;
+    } catch (err) { /* no box */ }
+    return Object.assign({
+      bubbles: true, cancelable: true, composed: true,
+      clientX: x, clientY: y, screenX: x, screenY: y, button: 0
+    }, extra || {});
+  }
+
+  function scrollIntoViewIfPossible(el) {
+    try { if (typeof el.scrollIntoView === 'function') el.scrollIntoView({ block: 'center', inline: 'center' }); } catch (err) { /* ignore */ }
+  }
+
+  const CLICK_FOCUSABLE_SEL = 'a[href], area[href], button, input, select, textarea, iframe, summary, [tabindex], [contenteditable]:not([contenteditable="false"])';
+
+  /** pointer/mouse down → focus → up → el.click() (which fires `click` once and activates). */
+  function replayClick(el, detail) {
+    const PE = typeof PointerEvent !== 'undefined' ? PointerEvent : MouseEvent;
+    const ptr = { pointerId: 1, pointerType: 'mouse', isPrimary: true };
+    const down = pointerInit(el, { detail: detail || 1, buttons: 1 });
+    const up = pointerInit(el, { detail: detail || 1, buttons: 0 });
+    const pd = fireEvent(el, 'pointerdown', PE, Object.assign({}, down, ptr));
+    // A cancelled pointerdown suppresses the compatibility mouse events (not the click).
+    const md = pd ? fireEvent(el, 'mousedown', MouseEvent, down) : false;
+    if (pd && md) {
+      const f = el.closest ? el.closest(CLICK_FOCUSABLE_SEL) : null;
+      try {
+        if (f && typeof f.focus === 'function') f.focus({ preventScroll: true });
+        else if (document.activeElement && document.activeElement !== document.body && document.activeElement.blur) document.activeElement.blur();
+      } catch (err) { /* ignore */ }
+    }
+    fireEvent(el, 'pointerup', PE, Object.assign({}, up, ptr));
+    if (pd) fireEvent(el, 'mouseup', MouseEvent, up);
+    if (typeof el.click === 'function') el.click();
+    else fireEvent(el, 'click', MouseEvent, up);
+  }
+
+  function replayHover(el) {
+    const PE = typeof PointerEvent !== 'undefined' ? PointerEvent : MouseEvent;
+    const ptr = { pointerId: 1, pointerType: 'mouse', isPrimary: true };
+    const init = pointerInit(el, { buttons: 0 });
+    const noBubble = Object.assign({}, init, { bubbles: false });
+    fireEvent(el, 'pointerover', PE, Object.assign({}, init, ptr));
+    fireEvent(el, 'pointerenter', PE, Object.assign({}, noBubble, ptr));
+    fireEvent(el, 'mouseover', MouseEvent, init);
+    fireEvent(el, 'mouseenter', MouseEvent, noBubble);
+    fireEvent(el, 'pointermove', PE, Object.assign({}, init, ptr));
+    fireEvent(el, 'mousemove', MouseEvent, init);
+  }
+
+  function nativeValueSetter(el) {
+    let p = Object.getPrototypeOf(el);
+    while (p) {
+      const d = Object.getOwnPropertyDescriptor(p, 'value');
+      if (d && d.set) return d.set;
+      p = Object.getPrototypeOf(p);
+    }
+    return null;
+  }
+
+  const NON_FILLABLE_INPUTS = ['checkbox', 'radio', 'file', 'submit', 'button', 'reset', 'image', 'hidden'];
+
+  /** @returns an error message, or null. */
+  function replayFill(el, value) {
+    const tag = el.tagName.toLowerCase();
+    const type = (el.getAttribute('type') || '').toLowerCase();
+    const isField = tag === 'textarea' || (tag === 'input' && !NON_FILLABLE_INPUTS.includes(type));
+    if (!isField && !el.isContentEditable) return 'element is not an <input>, <textarea> or [contenteditable] element';
+    if (isField && el.readOnly) return 'element is not editable (readonly)';
+    try { el.focus({ preventScroll: true }); } catch (err) { /* ignore */ }
+    if (!isField) {
+      el.textContent = value;
+    } else {
+      // The prototype's setter, not el.value =: frameworks that track the last
+      // value they wrote (React) only notice a change made underneath them.
+      const set = nativeValueSetter(el);
+      if (set) set.call(el, value);
+      else el.value = value;
+      if (SPECIAL_INPUT_TYPES.includes(type) && el.value !== value) return `the <input type=${type}> rejected the value`;
+    }
+    const IE = typeof InputEvent !== 'undefined' ? InputEvent : Event;
+    fireEvent(el, 'input', IE, { bubbles: true, composed: true, inputType: 'insertText', data: value });
+    if (isField) fireEvent(el, 'change', Event, { bubbles: true });
+    return null;
+  }
+
+  function replaySelectOption(el, value) {
+    if (el.tagName.toLowerCase() !== 'select') return 'element is not a <select> element';
+    const options = Array.from(el.options);
+    const want = normText(value);
+    const opt = options.find((o) => normText(o.label || o.textContent) === want) ||
+      options.find((o) => o.value === String(value));
+    if (!opt) return `no option "${want}" in the <select>`;
+    if (opt.disabled) return `option "${want}" is disabled`;
+    try { el.focus({ preventScroll: true }); } catch (err) { /* ignore */ }
+    if (el.multiple) options.forEach((o) => { o.selected = o === opt; });
+    else el.selectedIndex = options.indexOf(opt);
+    fireEvent(el, 'input', Event, { bubbles: true, composed: true });
+    fireEvent(el, 'change', Event, { bubbles: true });
+    return null;
+  }
+
+  const CHECKABLE_ROLES = ['checkbox', 'switch', 'radio', 'menuitemcheckbox', 'menuitemradio'];
+
+  function visibleLabelFor(el) {
+    const labels = el.labels ? Array.from(el.labels) : [];
+    return labels.find(isElementVisible) || null;
+  }
+
+  function replayCheck(el, want) {
+    const tag = el.tagName.toLowerCase();
+    const type = (el.getAttribute('type') || '').toLowerCase();
+    const role = (el.getAttribute('role') || '').trim().toLowerCase();
+    const native = tag === 'input' && (type === 'checkbox' || type === 'radio');
+    if (!native && !el.hasAttribute('aria-checked') && !CHECKABLE_ROLES.includes(role)) {
+      return 'element is not a checkbox or radio button';
+    }
+    if (isChecked(el) === want) return null;
+    if (!want && (type === 'radio' || role === 'radio')) return 'cannot uncheck a radio button';
+    // Custom-styled boxes hide the input and show its label: click what the user can.
+    const subject = isElementVisible(el) ? el : visibleLabelFor(el);
+    if (!subject) return 'element is not visible';
+    replayClick(subject, 1);
+    return isChecked(el) === want ? null : `clicking did not ${want ? 'check' : 'uncheck'} the element`;
+  }
+
+  const KEY_CODES = {
+    Enter: 13, Tab: 9, Escape: 27, ' ': 32, Backspace: 8, Delete: 46, ArrowUp: 38, ArrowDown: 40,
+    ArrowLeft: 37, ArrowRight: 39, Home: 36, End: 35, PageUp: 33, PageDown: 34
+  };
+
+  function parseKeyCombo(value) {
+    const v = String(value == null ? '' : value);
+    if (v === '' || v === '+') return { mods: [], key: v };
+    let parts;
+    let key;
+    if (/\+\+$/.test(v)) {
+      key = '+';
+      parts = v.slice(0, -2).split('+');
+    } else {
+      parts = v.split('+');
+      key = parts.pop();
+    }
+    if (key === 'Space' || key === 'Spacebar') key = ' ';
+    return { mods: parts.filter(Boolean), key };
+  }
+
+  function dispatchKey(target, type, key, mods) {
+    let code = key;
+    if (key === ' ') code = 'Space';
+    else if (key.length === 1) code = /[a-z]/i.test(key) ? 'Key' + key.toUpperCase() : (/\d/.test(key) ? 'Digit' + key : '');
+    const kc = KEY_CODES[key] || (key.length === 1 ? key.toUpperCase().charCodeAt(0) : 0);
+    const charCode = type === 'keypress' ? (key === 'Enter' ? 13 : (key.length === 1 ? key.charCodeAt(0) : 0)) : 0;
+    const init = {
+      key, code, keyCode: type === 'keypress' ? charCode : kc, which: type === 'keypress' ? charCode : kc, charCode,
+      bubbles: true, cancelable: true, composed: true,
+      ctrlKey: mods.indexOf('Control') !== -1, shiftKey: mods.indexOf('Shift') !== -1,
+      altKey: mods.indexOf('Alt') !== -1, metaKey: mods.indexOf('Meta') !== -1
+    };
+    let ev;
+    try { ev = new KeyboardEvent(type, init); } catch (err) { ev = new Event(type, init); }
+    // Legacy keyCode/which: some engines ignore them in the init dictionary.
+    if (ev.keyCode !== init.keyCode) {
+      try {
+        Object.defineProperty(ev, 'keyCode', { get: () => init.keyCode });
+        Object.defineProperty(ev, 'which', { get: () => init.which });
+      } catch (err) { /* ignore */ }
+    }
+    return target.dispatchEvent(ev);
+  }
+
+  function isNativeButtonLike(el) {
+    if (!el || el.nodeType !== Node.ELEMENT_NODE) return false;
+    const tag = el.tagName.toLowerCase();
+    const type = (el.getAttribute('type') || '').toLowerCase();
+    if (tag === 'button' || tag === 'summary') return true;
+    if (tag === 'input') return ['submit', 'button', 'reset', 'image'].includes(type);
+    return tag === 'a' && el.hasAttribute('href');
+  }
+
+  function isTabbable(n) {
+    if (!n || n.nodeType !== Node.ELEMENT_NODE) return false;
+    const tag = n.tagName.toLowerCase();
+    const hasTabindex = n.hasAttribute('tabindex');
+    if (hasTabindex) {
+      if (n.tabIndex < 0) return false;
+    } else {
+      const natural = ['button', 'input', 'select', 'textarea', 'iframe', 'summary'].includes(tag) ||
+        ((tag === 'a' || tag === 'area') && n.hasAttribute('href')) || n.isContentEditable;
+      if (!natural) return false;
+      if (n.isContentEditable && n.parentElement && n.parentElement.isContentEditable) return false;
+    }
+    if (tag === 'input' && (n.getAttribute('type') || '').toLowerCase() === 'hidden') return false;
+    if (n.disabled) return false;
+    return isElementVisible(n);
+  }
+
+  /** Tabbable elements of the composed tree in document order. */
+  function tabbablesInDocumentOrder() {
+    const out = [];
+    const root = document.body || document.documentElement;
+    const stack = root ? [root] : [];
+    while (stack.length && out.length < 5000) {
+      const n = stack.pop();
+      if (n !== root && isTabbable(n)) out.push(n);
+      const kids = [];
+      if (n.shadowRoot) Array.prototype.push.apply(kids, n.shadowRoot.children);
+      Array.prototype.push.apply(kids, n.children);
+      for (let i = kids.length - 1; i >= 0; i--) stack.push(kids[i]);
+    }
+    return out;
+  }
+
+  function moveFocus(from, backwards) {
+    const docOrder = tabbablesInDocumentOrder();
+    if (!docOrder.length) return;
+    // Sequential focus order: positive tabindex ascending first, then the rest.
+    const positive = docOrder.filter((n) => n.tabIndex > 0).sort((a, b) => a.tabIndex - b.tabIndex);
+    const order = positive.concat(docOrder.filter((n) => !(n.tabIndex > 0)));
+    const i = order.indexOf(from);
+    let next;
+    if (i !== -1) next = order[backwards ? i - 1 : i + 1];
+    else if (!from || from === document.body || from === document.documentElement) next = backwards ? order[order.length - 1] : order[0];
+    else {
+      // Focus sits on something outside the order (tabindex=-1): continue from its place.
+      const after = docOrder.filter((n) => from.compareDocumentPosition(n) & Node.DOCUMENT_POSITION_FOLLOWING);
+      const before = docOrder.filter((n) => from.compareDocumentPosition(n) & Node.DOCUMENT_POSITION_PRECEDING);
+      next = backwards ? before[before.length - 1] : after[0];
+    }
+    if (next) {
+      try { next.focus(); } catch (err) { /* ignore */ }
+    }
+  }
+
+  function implicitSubmit(field) {
+    const form = field.form;
+    if (!form) return;
+    // A form with a submit button is submitted by "clicking" it (what the browser
+    // does on Enter); requestSubmit() fires the submit event with validation.
+    const btn = Array.prototype.find.call(form.elements || [], (c) => {
+      const tag = c.tagName.toLowerCase();
+      const type = (c.getAttribute('type') || '').toLowerCase();
+      return (tag === 'button' && (type === '' || type === 'submit')) || (tag === 'input' && (type === 'submit' || type === 'image'));
+    });
+    if (btn) {
+      if (!btn.disabled) btn.click();
+      return;
+    }
+    if (typeof form.requestSubmit === 'function') form.requestSubmit();
+    else form.submit();
+  }
+
+  function replayPress(combo) {
+    const parsed = parseKeyCombo(combo);
+    const key = parsed.key;
+    const mods = parsed.mods;
+    if (!key) return 'no key to press';
+    const target = deepActiveElement(document) || document.body || document.documentElement;
+    const proceed = dispatchKey(target, 'keydown', key, mods);
+    const plain = mods.indexOf('Control') === -1 && mods.indexOf('Meta') === -1 && mods.indexOf('Alt') === -1;
+    if (proceed && plain && (key === 'Enter' || key.length === 1)) dispatchKey(target, 'keypress', key, mods);
+    if (proceed && plain) {
+      const tag = target.tagName ? target.tagName.toLowerCase() : '';
+      if (key === 'Enter') {
+        if (isNativeButtonLike(target)) target.click();
+        else if (tag === 'input' && isTextLikeField(target)) implicitSubmit(target);
+      } else if (key === 'Tab') {
+        moveFocus(target, mods.indexOf('Shift') !== -1);
+      }
+    }
+    const upTarget = deepActiveElement(document) || target;
+    dispatchKey(upTarget, 'keyup', key, mods);
+    // Space activates on key release.
+    if (proceed && plain && key === ' ' && upTarget === target) {
+      const type = (target.getAttribute && (target.getAttribute('type') || '').toLowerCase()) || '';
+      if (isNativeButtonLike(target) || (target.tagName.toLowerCase() === 'input' && (type === 'checkbox' || type === 'radio'))) target.click();
+    }
+    return null;
+  }
+
+  function clip(s) {
+    const t = String(s == null ? '' : s);
+    return t.length > 120 ? t.slice(0, 117) + '…' : t;
+  }
+
+  /** innerText (what the recorder captured) and textContent (Playwright's default). */
+  function textVariants(el) {
+    return [normText(el.innerText != null ? el.innerText : el.textContent), normText(el.textContent)];
+  }
+
+  const ASSERTION_TYPES = ['toBeVisible', 'toHaveText', 'toContainText', 'toBeChecked', 'toHaveValue', 'toBeEnabled'];
+
+  /** null when the assertion holds, otherwise expected-vs-actual. */
+  function assertionError(type, el, value) {
+    switch (type) {
+      case 'toBeVisible':
+        return isElementVisible(el) ? null : 'toBeVisible: expected the element to be visible, but it is hidden';
+      case 'toHaveText': {
+        const got = textVariants(el);
+        const want = normText(value);
+        return got.indexOf(want) !== -1 ? null : `toHaveText: expected "${clip(want)}", got "${clip(got[0])}"`;
+      }
+      case 'toContainText': {
+        const got = textVariants(el);
+        const want = normText(value);
+        return got.some((g) => g.includes(want)) ? null : `toContainText: expected text containing "${clip(want)}", got "${clip(got[0])}"`;
+      }
+      case 'toBeChecked': {
+        const want = String(value) !== 'false';
+        const got = isChecked(el);
+        return got === want ? null : `toBeChecked: expected ${want ? 'checked' : 'unchecked'}, got ${got ? 'checked' : 'unchecked'}`;
+      }
+      case 'toHaveValue': {
+        const got = el.value != null ? String(el.value) : '';
+        const want = value == null ? '' : String(value);
+        return got === want ? null : `toHaveValue: expected "${clip(want)}", got "${clip(got)}"`;
+      }
+      case 'toBeEnabled':
+        return isElementEnabled(el) ? null : 'toBeEnabled: expected the element to be enabled, but it is disabled';
+      default:
+        return `unsupported assertion ${type}`;
+    }
+  }
+
+  async function replayUrlAssertion(expected, timeoutMs) {
+    const want = String(expected == null ? '' : expected);
+    const deadline = Date.now() + timeoutMs;
+    for (;;) {
+      const href = window.location.href;
+      const got = redactUrl(href);
+      if (got === want || href === want) return null;
+      if (Date.now() >= deadline) return `toHaveURL: expected "${clip(want)}", got "${clip(got)}"`;
+      await replaySleep(REPLAY_POLL_MS);
+    }
+  }
+
+  const TARGETED_ACTIONS = ['click', 'dblclick', 'fill', 'selectOption', 'check', 'uncheck', 'hover'];
+
+  async function runReplayStep(msg) {
+    const step = msg.step || {};
+    const action = step.action;
+    const timeoutMs = typeof msg.timeoutMs === 'number' && msg.timeoutMs >= 0 ? msg.timeoutMs : REPLAY_DEFAULT_TIMEOUT_MS;
+
+    if (action === 'upload') return { ok: false, skipped: true, error: 'file uploads can\'t be replayed in the browser', matchCount: 0 };
+    if (action === 'viewport') return { ok: false, skipped: true, error: 'viewport is not changed during replay', matchCount: 0 };
+
+    let value = step.value;
+    if (action === 'fill' && step.sensitive) {
+      const secrets = msg.secrets && typeof msg.secrets === 'object' ? msg.secrets : {};
+      // Same key the panel's secrets form uses: legacy steps without a valid
+      // secretName are password fields.
+      const name = typeof step.secretName === 'string' && /^[A-Za-z_][A-Za-z0-9_]*$/.test(step.secretName)
+        ? step.secretName : 'LOCATRA_PASSWORD';
+      const secret = secrets[name];
+      if (secret == null || secret === '') return { ok: false, skipped: true, error: 'no value provided', matchCount: 0 };
+      value = String(secret);
+    }
+
+    if (action === 'press') {
+      const error = dispatchReplay(() => replayPress(value));
+      return error ? { ok: false, error, matchCount: 0 } : { ok: true, matchCount: 0 };
+    }
+    if (action === 'assert' && step.assertType === 'toHaveURL') {
+      const error = await replayUrlAssertion(value, timeoutMs);
+      return error ? { ok: false, error, matchCount: 0 } : { ok: true, matchCount: 0 };
+    }
+
+    const isAssert = action === 'assert';
+    if (!isAssert && TARGETED_ACTIONS.indexOf(action) === -1) {
+      return { ok: false, error: `unsupported step "${action}"`, matchCount: 0 };
+    }
+    if (isAssert && ASSERTION_TYPES.indexOf(step.assertType) === -1) {
+      return { ok: false, error: `unsupported assertion ${step.assertType}`, matchCount: 0 };
+    }
+    if (!step.target || typeof step.target !== 'object') return { ok: false, error: `the ${action} step has no locator`, matchCount: 0 };
+
+    let ready;
+    if (isAssert) {
+      ready = (el) => assertionError(step.assertType, el, value);
+    } else if (action === 'check' || action === 'uncheck') {
+      ready = (el) => (!isElementVisible(el) && !visibleLabelFor(el) ? 'element is not visible'
+        : (!isElementEnabled(el) ? 'element is disabled' : null));
+    } else {
+      ready = (el) => (!isElementVisible(el) ? 'element is not visible'
+        : (action !== 'hover' && !isElementEnabled(el) ? 'element is disabled' : null));
+    }
+
+    const found = await waitForReplayElement(step.target, timeoutMs, ready);
+    if (found.error) return { ok: false, error: found.error, matchCount: found.matchCount };
+    const el = found.el;
+    if (tornDown) return { ok: false, error: 'the page went away', matchCount: 1 };
+
+    if (!isAssert) scrollIntoViewIfPossible(el);
+    if (msg.highlight) showReplayHighlight(el);
+    if (isAssert) return { ok: true, matchCount: 1 };
+
+    const error = dispatchReplay(() => {
+      switch (action) {
+        case 'click': replayClick(el, 1); return null;
+        case 'dblclick':
+          replayClick(el, 1);
+          replayClick(el, 2);
+          fireEvent(el, 'dblclick', MouseEvent, pointerInit(el, { detail: 2 }));
+          return null;
+        case 'fill': return replayFill(el, value == null ? '' : String(value));
+        case 'selectOption': return replaySelectOption(el, value);
+        case 'check': return replayCheck(el, true);
+        case 'uncheck': return replayCheck(el, false);
+        case 'hover': replayHover(el); return null;
+        default: return `unsupported step "${action}"`;
+      }
+    });
+    return error ? { ok: false, error, matchCount: 1 } : { ok: true, matchCount: 1 };
+  }
+
+  // ── Page Object model (F2) ─────────────────────────────────────────────────
+  // "Pick region" reuses the inspect overlay: hovering highlights the container
+  // around the pointer, a click scans it. "Whole page" scans <body> (top frame).
+  const POM_MAX = 200;
+  const POM_ROLES = ['button', 'link', 'checkbox', 'radio', 'switch', 'textbox', 'combobox', 'searchbox', 'slider',
+    'spinbutton', 'tab', 'menuitem', 'option'];
+  const REGION_TAGS = ['form', 'fieldset', 'section', 'article', 'aside', 'nav', 'main', 'header', 'footer', 'dialog',
+    'table', 'ul', 'ol', 'details'];
+  const REGION_ROLES = ['form', 'region', 'dialog', 'alertdialog', 'navigation', 'group', 'list', 'search', 'tabpanel',
+    'toolbar', 'menu', 'menubar', 'banner', 'contentinfo', 'main', 'complementary', 'radiogroup', 'grid', 'listbox', 'tablist'];
+  const POM_QUICK_SEL = 'input,textarea,select,button,a[href],summary,[contenteditable],[role]';
+  const POM_KIND_SUFFIX = { input: 'Input', textarea: 'Field', select: 'Select', checkbox: 'Checkbox', radio: 'Radio', button: 'Button', link: 'Link' };
+  const RESERVED_NAMES = new Set(['break', 'case', 'catch', 'class', 'const', 'continue', 'debugger', 'default', 'delete',
+    'do', 'else', 'enum', 'export', 'extends', 'false', 'finally', 'for', 'function', 'if', 'import', 'in', 'instanceof',
+    'new', 'null', 'return', 'super', 'switch', 'this', 'throw', 'true', 'try', 'typeof', 'var', 'void', 'while', 'with',
+    'yield', 'let', 'static', 'implements', 'interface', 'package', 'private', 'protected', 'public', 'await', 'async',
+    'and', 'as', 'assert', 'def', 'del', 'elif', 'except', 'from', 'global', 'is', 'lambda', 'nonlocal', 'not', 'or',
+    'pass', 'raise', 'None', 'True', 'False', 'page', 'driver', 'constructor', 'goto']);
+  let regionPick = false;
+  let regionPickPrevInspecting = false;
+
+  function isPomInteractive(n) {
+    if (!n || n.nodeType !== Node.ELEMENT_NODE) return false;
+    const tag = n.tagName.toLowerCase();
+    if (tag === 'input') return (n.getAttribute('type') || '').toLowerCase() !== 'hidden';
+    if (tag === 'textarea' || tag === 'select' || tag === 'button' || tag === 'summary') return true;
+    if (tag === 'a' && n.hasAttribute('href')) return true;
+    const ce = n.getAttribute('contenteditable');
+    if (ce != null && ce.toLowerCase() !== 'false') return true;
+    const role = (n.getAttribute('role') || '').trim().toLowerCase().split(/\s+/)[0];
+    return POM_ROLES.indexOf(role) !== -1;
+  }
+
+  /** Interactive, visible elements in `root`, open shadow roots included, document order. */
+  function pomCollect(root) {
+    const out = [];
+    let truncated = false;
+    const stack = [root];
+    while (stack.length) {
+      const n = stack.pop();
+      if (n.nodeType !== Node.ELEMENT_NODE) continue;
+      if (/^(ll-|locatra-)/.test(typeof n.id === 'string' ? n.id : '')) continue;
+      const tag = n.tagName.toLowerCase();
+      if (tag === 'script' || tag === 'style' || tag === 'template' || tag === 'noscript') continue;
+      if (isPomInteractive(n) && isElementVisible(n)) {
+        if (out.length >= POM_MAX) { truncated = true; break; }
+        out.push(n);
+      }
+      const kids = [];
+      if (n.shadowRoot) Array.prototype.push.apply(kids, n.shadowRoot.children);
+      Array.prototype.push.apply(kids, n.children);
+      for (let i = kids.length - 1; i >= 0; i--) stack.push(kids[i]);
+    }
+    return { list: out, truncated };
+  }
+
+  function pomKind(el, role) {
+    const tag = el.tagName.toLowerCase();
+    const type = (el.getAttribute('type') || '').toLowerCase();
+    if (tag === 'input') {
+      if (type === 'checkbox' || type === 'radio') return type;
+      if (['submit', 'button', 'reset', 'image'].indexOf(type) !== -1) return 'button';
+      return 'input';
+    }
+    if (tag === 'textarea' || tag === 'select' || tag === 'button') return tag;
+    if (tag === 'a') return 'link';
+    if (role === 'button' || role === 'link' || role === 'radio') return role;
+    if (role === 'checkbox' || role === 'switch') return 'checkbox';
+    // fill() needs a real field or a contenteditable; an ARIA-only textbox is 'other'.
+    if (el.isContentEditable) return 'input';
+    return 'other';
+  }
+
+  function fallbackPomName(el, kind) {
+    const E = globalThis.__LocatorLensEngine;
+    let accName = '';
+    try { accName = (E && E.getAccessibleName(el)) || ''; } catch (err) { accName = ''; }
+    const base = el.getAttribute('data-testid') || accName || el.getAttribute('placeholder') ||
+      (typeof el.id === 'string' && el.id) || el.getAttribute('name') || el.tagName.toLowerCase();
+    const words = String(base).replace(/([a-z0-9])([A-Z])/g, '$1 $2').split(/[^A-Za-z0-9]+/).filter(Boolean).slice(0, 4);
+    let name = words.map((w, i) => (i === 0 ? w.toLowerCase() : w.charAt(0).toUpperCase() + w.slice(1).toLowerCase())).join('');
+    if (!name) name = 'element';
+    if (/^\d/.test(name)) name = 'el' + name;
+    const suffix = POM_KIND_SUFFIX[kind] || '';
+    if (suffix && !name.toLowerCase().endsWith(suffix.toLowerCase())) name += suffix;
+    if (RESERVED_NAMES.has(name)) name += 'Element';
+    return name;
+  }
+
+  function pomName(el, kind) {
+    const E = globalThis.__LocatorLensEngine;
+    if (E && typeof E.suggestName === 'function') {
+      try {
+        const n = E.suggestName(el, customTestAttributes);
+        if (typeof n === 'string' && /^[A-Za-z_$][\w$]*$/.test(n)) return n;
+      } catch (err) { /* fall back */ }
+    }
+    return fallbackPomName(el, kind);
+  }
+
+  function pomLocator(el) {
+    let result = null;
+    try { result = generateLocators(el); } catch (err) { result = null; }
+    const locs = ((result && result.locators) || []).filter((l) => l && l.target);
+    const isUnique = (l) => l.unique === true || l.matchCount === 1;
+    const best = locs.find(isUnique) || locs[0];
+    if (!best) {
+      const fb = recordFallbackLocator(el, 'click()');
+      let count = 0;
+      try { count = globalThis.__LocatorLensEngine.countTargetMatches(fb.target) || 0; } catch (err) { count = 0; }
+      return { target: fb.target, code: fb.code, matchCount: count, unique: count === 1 };
+    }
+    const unique = isUnique(best);
+    return {
+      target: best.target,
+      code: best.code,
+      matchCount: typeof best.matchCount === 'number' ? best.matchCount : (unique ? 1 : 0),
+      unique
+    };
+  }
+
+  async function buildPomModel(region) {
+    const E = globalThis.__LocatorLensEngine;
+    const { list, truncated } = pomCollect(region);
+    const taken = new Set();
+    const elements = [];
+    for (let i = 0; i < list.length; i++) {
+      if (i && i % 20 === 0) await replaySleep(0); // keep a big page responsive
+      if (tornDown) break;
+      const el = list[i];
+      if (!el.isConnected) continue;
+      let role = null;
+      try { role = (E && E.getRole(el)) || null; } catch (err) { role = null; }
+      const kind = pomKind(el, role);
+      let name = pomName(el, kind);
+      if (taken.has(name)) {
+        let k = 2;
+        while (taken.has(name + k)) k++;
+        name = name + k;
+      }
+      taken.add(name);
+      const loc = pomLocator(el);
+      const entry = { name, kind, role, tag: el.tagName.toLowerCase() };
+      if (entry.tag === 'input') entry.inputType = (el.getAttribute('type') || 'text').toLowerCase();
+      let label = '';
+      try { label = normText((E && E.getAccessibleName(el)) || ''); } catch (err) { label = ''; }
+      if (label) entry.label = label.slice(0, 120);
+      entry.target = loc.target;
+      entry.code = loc.code;
+      entry.matchCount = loc.matchCount;
+      entry.unique = loc.unique;
+      elements.push(entry);
+    }
+    const tag = region.tagName.toLowerCase();
+    let locator = "page.locator('body')";
+    if (region !== document.body && region !== document.documentElement) {
+      const best = pomLocator(region);
+      locator = best.code || tag;
+    }
+    let title = document.title || '';
+    if (window !== window.top) {
+      try { title = window.top.document.title || title; } catch (err) { /* cross-origin parent */ }
+    }
+    return { pageUrl: pageInfo().pageUrl, title, region: { tag, locator }, elements, truncated };
+  }
+
+  function sendPomResult(region) {
+    return buildPomModel(region).then(
+      (data) => { if (!tornDown) safeSend({ type: 'POM_RESULT', data }); },
+      (err) => debugWarn('Page Object scan failed:', err)
+    );
+  }
+
+  function countPomInteractive(n, cap) {
+    let c = 0;
+    let all;
+    try { all = n.querySelectorAll(POM_QUICK_SEL); } catch (err) { return 0; }
+    for (let i = 0; i < all.length && c < cap; i++) if (isPomInteractive(all[i])) c++;
+    return c;
+  }
+
+  /** The region a hovered element stands for: its nearest container worth a page object. */
+  function regionContainerFor(el) {
+    let n = el;
+    for (let g = 0; n && g < 64; g++, n = composedParent(n)) {
+      if (n === document.body || n === document.documentElement) break;
+      const tag = n.tagName.toLowerCase();
+      const role = (n.getAttribute('role') || '').trim().toLowerCase();
+      if (REGION_TAGS.indexOf(tag) !== -1 || REGION_ROLES.indexOf(role) !== -1) return n;
+      if (!isPomInteractive(n) && countPomInteractive(n, 2) >= 2) return n;
+    }
+    return document.body || el;
+  }
+
+  function startRegionPick() {
+    if (tornDown || !document.body) return false;
+    if (regionPick) return true;
+    regionPickPrevInspecting = isInspecting;
+    if (!isInspecting) startInspect();
+    if (!isInspecting) return false;
+    regionPick = true;
+    traversalLock = null;
+    if (hoveredEl) {
+      hoveredEl = regionContainerFor(hoveredEl);
+      updateOverlay(hoveredEl);
+    }
+    return true;
+  }
+
+  /** Leave region mode; a normal inspect that was already running carries on. */
+  function endRegionPick() {
+    if (!regionPick) return;
+    regionPick = false;
+    traversalLock = null;
+    if (!regionPickPrevInspecting) stopInspect();
+    else if (hoveredEl) updateOverlay(hoveredEl);
+  }
+
+  function pickRegion(region) {
+    if (!region) return;
+    endRegionPick();
+    sendPomResult(region);
+  }
+
   // ── Event handlers ─────────────────────────────────────────────────────────
   function onMouseOver(e) {
     if (!isInspecting) return;
@@ -1891,8 +3213,8 @@
       traversalLock = null;
     }
 
-    hoveredEl = el;
-    updateOverlay(el);
+    hoveredEl = regionPick ? regionContainerFor(el) : el;
+    updateOverlay(hoveredEl);
   }
 
   function isTraversalBarEvent(e) {
@@ -1973,8 +3295,10 @@
       el = hoveredEl;
     } else {
       el = getDeepElementAt(e.clientX, e.clientY) || resolvePrimaryTarget(e);
+      if (el && regionPick && !isOwnUi(el)) el = regionContainerFor(el);
     }
     if (!el || isOwnUi(el)) return;
+    if (regionPick) { pickRegion(el); return; }
     pickElement(el);
   }
 
@@ -1982,6 +3306,13 @@
     if (!isInspecting) return;
 
     if (e.key === 'Escape') {
+      // Esc in region mode cancels only the region pick (F2).
+      if (regionPick) {
+        swallow(e);
+        endRegionPick();
+        safeSend({ type: 'POM_PICK_CANCELLED' });
+        return;
+      }
       stopInspect();
       safeSend({ type: 'STOP_INSPECT' });
       return;
@@ -1990,7 +3321,8 @@
     // Enter picks the current selection — the keyboard way to take a traversed element.
     if (e.key === 'Enter' && hoveredEl && hoveredEl.isConnected && isUserEvent(e)) {
       swallow(e);
-      pickElement(hoveredEl);
+      if (regionPick) pickRegion(hoveredEl);
+      else pickElement(hoveredEl);
       return;
     }
 
@@ -2024,6 +3356,7 @@
 
   function stopInspect() {
     isInspecting = false;
+    regionPick = false;
     if (document.body) document.body.classList.remove('ll-inspecting');
 
     // Total Decommission: Remove all tracking listeners
@@ -2084,6 +3417,8 @@
     try { stopInspect(); } catch (err) { /* best effort */ }
     try { clearLabHighlights(); } catch (err) { /* best effort */ }
     try { restoreCtxFlash(); } catch (err) { /* best effort */ }
+    try { clearReplayHighlight(); } catch (err) { /* best effort */ }
+    try { stopUrlWatch(); stopFeedbackWatch(); } catch (err) { /* best effort */ }
     _pendingFills.forEach((t) => clearTimeout(t));
     _pendingFills.clear();
     document.removeEventListener('contextmenu', onContextMenuTrack, true);
@@ -2406,6 +3741,36 @@
 
     else if (msg.type === 'LAB_CLEAR') {
       clearLabHighlights();
+      sendResponse({ ok: true });
+    }
+
+    // ▶ REPLAY (F1): only the frame the step belongs to answers; the others stay
+    // silent so BACKGROUND's sendMessage to all frames resolves with the owner's reply.
+    else if (msg.type === 'REPLAY_STEP') {
+      let owner = false;
+      try { owner = ownsReplayStep(msg.step); } catch (err) { owner = false; }
+      if (!owner) return false;
+      runReplayStep(msg).then(sendResponse, (err) => {
+        sendResponse({ ok: false, error: (err && err.message) || String(err), matchCount: 0 });
+      });
+      return true;
+    }
+
+    // 🧩 PAGE OBJECT (F2)
+    else if (msg.type === 'POM_PICK_START') {
+      sendResponse({ ok: startRegionPick() });
+    }
+    else if (msg.type === 'POM_PICK_STOP') {
+      endRegionPick();
+      sendResponse({ ok: true });
+    }
+    else if (msg.type === 'POM_SCAN') {
+      if (window !== window.top) return false; // the top frame scans the page
+      if (!document.body) {
+        sendResponse({ ok: false, error: 'this page has no body to scan' });
+        return;
+      }
+      sendPomResult(document.body);
       sendResponse({ ok: true });
     }
 
