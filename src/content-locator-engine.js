@@ -99,6 +99,20 @@
   // change inside one synchronous call, so everything is memoised for exactly the
   // duration of the call and dropped afterwards. Calls nest safely (a depth counter).
   let ctx = null;
+  // The document every page-wide query runs against. null means the global
+  // `document`; resolveTarget() points it at a same-origin frame's document while it
+  // resolves the inside of a frame target (always with a fresh cache context, since
+  // every cache below is per document).
+  let scopeDoc = null;
+  function curDoc() { return scopeDoc || document; }
+  function inDocument(doc, fn) {
+    if (doc === curDoc()) return withCaches(fn);
+    const savedCtx = ctx;
+    const savedDoc = scopeDoc;
+    ctx = null;
+    scopeDoc = doc;
+    try { return withCaches(fn); } finally { ctx = savedCtx; scopeDoc = savedDoc; }
+  }
   function beginCaches() {
     if (ctx) { ctx.depth++; return; }
     ctx = {
@@ -593,7 +607,7 @@
   function buildLabelMap() {
     if (!ctx.labelMap) {
       ctx.labelMap = new Map();
-      const labels = deepQueryAllUncapped('label', document) || [];
+      const labels = deepQueryAllUncapped('label', curDoc()) || [];
       for (const label of labels) {
         let c = null;
         try { c = labelControl(label); } catch (e) {}
@@ -1110,11 +1124,11 @@
   // false "not found" on large pages (and never reached shadow content, which is
   // visited last).
   function nodesBySelector(sel) {
-    try { return deepQueryAllUncapped(sel, document); } catch (e) { return null; }
+    try { return deepQueryAllUncapped(sel, curDoc()); } catch (e) { return null; }
   }
   function nodesByText(value, exact) {
     const matcher = textMatcher(value, exact);
-    const all = deepQueryAllUncapped('*', document) || [];
+    const all = deepQueryAllUncapped('*', curDoc()) || [];
     const out = [];
     let lastNone = null;
     for (let i = 0; i < all.length; i++) {
@@ -1129,7 +1143,7 @@
   }
   function nodesByRole(t) {
     const cand = ROLE_CANDIDATE_TAGS[t.role];
-    const all = deepQueryAllUncapped(cand ? '[role],' + cand : '*', document) || [];
+    const all = deepQueryAllUncapped(cand ? '[role],' + cand : '*', curDoc()) || [];
     const hasName = t.name != null && t.name !== '';
     const needle = hasName ? normalizeWS(t.name) : '';
     // Playwright compares role names with toUpperCase() (attribute-selector rules),
@@ -1155,15 +1169,19 @@
     const seen = new Set();
     const cands = [];
     const add = (e) => { if (!seen.has(e)) { seen.add(e); cands.push(e); } };
-    (deepQueryAllUncapped('[aria-labelledby],[aria-label]', document) || []).forEach(add);
+    (deepQueryAllUncapped('[aria-labelledby],[aria-label]', curDoc()) || []).forEach(add);
     labelMap.forEach((_, control) => add(control));
-    return cands.filter(e => labelTexts(e).some(matcher));
+    const hits = cands.filter(e => labelTexts(e).some(matcher));
+    if (hits.length < 2) return hits;
+    // Playwright returns label matches in its pierce-shadow document order.
+    const hitSet = new Set(hits);
+    return (deepQueryAllUncapped('*', curDoc()) || []).filter(e => hitSet.has(e));
   }
   // getByPlaceholder / getByAltText / getByTitle: Playwright's internal:attr engine
   // — any element carrying the attribute; default is a case-insensitive substring of
   // the raw value, exact is raw equality (no whitespace normalisation).
   function nodesByAttr(attr, value, exact) {
-    const all = deepQueryAllUncapped('[' + attr + ']', document) || [];
+    const all = deepQueryAllUncapped('[' + attr + ']', curDoc()) || [];
     const v = String(value == null ? '' : value);
     const lower = v.toLowerCase();
     return all.filter(e => {
@@ -1177,12 +1195,14 @@
     if (!ctx) return withCaches(() => targetNodes(t));
     const key = JSON.stringify(t);
     if (ctx.nodes.has(key)) return ctx.nodes.get(key);
-    let out = resolveTargetNodes(t);
-    // The extension's own overlay/tooltip (which displays locator text!) is not
-    // part of the page a test will run against.
-    if (out && out.length) out = out.filter(n => !closestCrossShadow(n, OWN_UI_SELECTOR));
+    const out = withoutOwnUi(resolveTargetNodes(t));
     ctx.nodes.set(key, out);
     return out;
+  }
+  // The extension's own overlay/tooltip (which displays locator text!) is not
+  // part of the page a test will run against.
+  function withoutOwnUi(nodes) {
+    return nodes && nodes.length ? nodes.filter(n => !closestCrossShadow(n, OWN_UI_SELECTOR)) : nodes;
   }
 
   function resolveTargetNodes(t) {
@@ -1197,20 +1217,88 @@
       case 'title': return nodesByAttr('title', t.value, t.exact);
       case 'css': return nodesBySelector(t.value);
       case 'text': return nodesByText(t.value, t.exact);
-      case 'role': return nodesByRole(t);
+      case 'role': return applyNth(withoutOwnUi(nodesByRole(t)), t);
       case 'label': return nodesByLabel(t.value, t.exact);
       case 'chain': {
         const parents = targetNodes(t.parent);
-        const children = targetNodes(t.child);
-        if (!parents || !children) return null;
-        // getByText's engine also tests the scope element itself; the others only
-        // its descendants (including through shadow roots).
-        const selfOk = t.child && t.child.kind === 'text';
-        return children.filter(c => parents.some(p => (p !== c || selfOk) && composedContains(p, c)));
+        if (!parents || !t.child) return null;
+        return nodesWithin(parents, t.child);
       }
+      case 'frame': return nodesInFrame(t);
       default: return null;
     }
   }
+
+  // `nth` (a role target's position, rendered by codegen as .nth(i)) picks one
+  // element out of the full, ordered result — Playwright's `nth=` part.
+  function hasNth(t) {
+    return !!t && typeof t.nth === 'number' && t.nth >= 0 && Math.floor(t.nth) === t.nth;
+  }
+  function applyNth(nodes, t) {
+    if (!nodes || !hasNth(t)) return nodes;
+    return nodes.slice(t.nth, t.nth + 1);
+  }
+  function withoutNth(t) {
+    if (!hasNth(t)) return t;
+    const copy = Object.assign({}, t);
+    delete copy.nth;
+    return copy;
+  }
+
+  // The `child` part of a chain, evaluated inside each scope element the way
+  // Playwright evaluates `parent >> child`: scope by scope, in the scopes' order,
+  // each element once. Only descendants qualify (through shadow roots), except that
+  // getByText's engine also tests the scope element itself. A trailing .nth(i) on
+  // the child applies to the combined result, as it does in the generated code.
+  function nodesWithin(scopes, child) {
+    if (!child) return null;
+    if (child.kind === 'chain') {
+      const mids = nodesWithin(scopes, child.parent);
+      return mids ? nodesWithin(mids, child.child) : null;
+    }
+    // A frame cannot be entered from inside a chain in any generated locator.
+    if (child.kind === 'frame') return null;
+    const candidates = targetNodes(withoutNth(child));
+    if (!candidates) return null;
+    const selfOk = child.kind === 'text';
+    const out = [];
+    const seen = new Set();
+    for (const p of scopes) {
+      for (const c of candidates) {
+        if (seen.has(c) || (p === c && !selfOk) || !composedContains(p, c)) continue;
+        seen.add(c);
+        out.push(c);
+      }
+    }
+    return applyNth(out, child);
+  }
+
+  // A frame target: find the <iframe> in this document (by `selector`, which —
+  // like Playwright's frameLocator — pierces open shadow roots, or positionally as
+  // `iframe >> nth=index` for a cross-origin frame), then resolve `child` inside
+  // its document. null when the frame cannot be evaluated: several elements match
+  // the selector (Playwright's strict mode throws), or its document is not
+  // reachable from here (cross-origin) — the content script running inside that
+  // frame has to resolve the inner target itself (see unwrapFrameTarget).
+  function nodesInFrame(t) {
+    let frames;
+    if (t.selector) {
+      frames = nodesBySelector(t.selector);
+    } else {
+      const all = nodesBySelector('iframe');
+      const i = typeof t.index === 'number' && t.index >= 0 ? t.index : 0;
+      frames = all ? all.slice(i, i + 1) : null;
+    }
+    if (!frames) return null;
+    frames = withoutOwnUi(frames);
+    if (!frames.length) return [];
+    if (frames.length > 1 || !t.child) return null;
+    let doc = null;
+    try { doc = frames[0].contentDocument; } catch (e) { doc = null; }
+    if (!doc) return null;
+    return inDocument(doc, () => targetNodes(t.child));
+  }
+
   // Public (C5): how many elements Playwright would resolve `target` to, or null when
   // it cannot be evaluated (unknown kind, invalid selector).
   function countTargetMatches(t) {
@@ -1699,6 +1787,152 @@
     return 'click()';
   }
 
+  // ── Resolving a target to elements (in-browser replay) ─────────────────────
+  // The elements Playwright would resolve `target` to, in Playwright's order —
+  // always an array (empty when nothing matches or the target cannot be evaluated:
+  // unknown kind, invalid selector, cross-origin or ambiguous frame). Uses exactly
+  // the matching behind countTargetMatches, so `resolveTarget(t).length` equals
+  // `countTargetMatches(t)` whenever the count is not null.
+  //   root  optional scope: a Document (e.g. a same-origin frame's) to resolve in,
+  //         or an Element / ShadowRoot whose descendants the target is evaluated
+  //         within, like `scope.locator(...)` (getByText also tests the scope itself).
+  // Frame targets ({kind:'frame', selector, index, child}) are entered when the
+  // frame's document is reachable (same-origin); otherwise the content script that
+  // runs *inside* that frame must resolve the inner target itself — see
+  // unwrapFrameTarget().
+  function resolveTarget(target, root) {
+    if (!target) return [];
+    const r = root && (root.nodeType === 1 || root.nodeType === 9 || root.nodeType === 11) ? root : document;
+    const doc = r.nodeType === 9 ? r : (r.ownerDocument || document);
+    try {
+      const nodes = inDocument(doc, () => (r.nodeType === 9 ? targetNodes(target) : nodesWithin([r], target)));
+      return nodes ? nodes.slice() : [];
+    } catch (e) {
+      return [];
+    }
+  }
+
+  // Splits a recorded target into the frames it lives in (outermost first, exactly
+  // the {selector, index, shadowPath?} segments content.js's frameChain() builds —
+  // selector is null for a cross-origin frame) and the target inside the innermost
+  // frame. A frame's content script owns a step when `framePath` equals its own
+  // frame chain; the top document owns targets with an empty framePath. The inner
+  // target is then resolved there with resolveTarget(inner).
+  function unwrapFrameTarget(target) {
+    const framePath = [];
+    let t = target || null;
+    while (t && t.kind === 'frame') {
+      const seg = { selector: t.selector || null, index: typeof t.index === 'number' ? t.index : 0 };
+      if (Array.isArray(t.shadowPath)) seg.shadowPath = t.shadowPath.slice();
+      framePath.push(seg);
+      t = t.child || null;
+    }
+    return { framePath, inner: t };
+  }
+
+  // ── Page Object member names ─────────────────────────────────────────────────
+  // What an element is, for a Page Object: decides the helper methods codegen
+  // emits (fill / select / check / click) and the suffix of its suggested name.
+  function elementKind(el) {
+    if (!el || el.nodeType !== 1) return 'other';
+    const tag = tagOf(el);
+    if (tag === 'INPUT') {
+      const type = (el.getAttribute('type') || '').toLowerCase();
+      if (type === 'checkbox') return 'checkbox';
+      if (type === 'radio') return 'radio';
+      if (['button', 'submit', 'reset', 'image'].includes(type)) return 'button';
+      return 'input';
+    }
+    if (tag === 'TEXTAREA') return 'textarea';
+    if (tag === 'SELECT') return 'select';
+    if (tag === 'BUTTON') return 'button';
+    const role = getRole(el);
+    if (role === 'checkbox' || role === 'switch' || role === 'menuitemcheckbox') return 'checkbox';
+    if (role === 'radio' || role === 'menuitemradio') return 'radio';
+    if (role === 'button') return 'button';
+    if (role === 'link') return 'link';
+    return 'other';
+  }
+
+  // Words an identifier may be built from: ASCII letters/digits after stripping
+  // diacritics (Café → Cafe), split at camelCase humps as well.
+  function nameWords(text) {
+    const plain = String(text == null ? '' : text).normalize('NFD').replace(/[̀-ͯ]/g, '');
+    const humps = plain.replace(/([a-z])([A-Z])|([0-9])([A-Z][a-z])/g, '$1$3 $2$4').replace(/([A-Z]+)([A-Z][a-z])/g, '$1 $2');
+    return humps.match(/[A-Za-z0-9]+/g) || [];
+  }
+  // Reserved in JavaScript/TypeScript (incl. strict-mode and contextual words) or
+  // Python, plus names that would shadow a member every Page Object has.
+  const RESERVED_NAMES = new Set(('abstract any arguments as assert async await boolean break case catch class ' +
+    'const constructor continue debugger declare def default del delete do elif else enum eval except export ' +
+    'extends false finally for from function get global if implements import in instanceof interface is ' +
+    'lambda let new nonlocal not null number object of or package pass private protected prototype public ' +
+    'raise readonly return self set static string super switch symbol this throw true try type typeof ' +
+    'undefined var void while with yield none driver page goto visit').split(' '));
+  const KIND_SUFFIX = {
+    input: ['Input', ['input', 'field', 'textbox']],
+    textarea: ['Field', ['field', 'textarea', 'input']],
+    select: ['Select', ['select', 'dropdown']],
+    checkbox: ['Checkbox', ['checkbox']],
+    radio: ['Radio', ['radio']],
+    button: ['Button', ['button', 'btn']],
+    link: ['Link', ['link']]
+  };
+  const ROLE_SUFFIX = {
+    switch: ['Switch', ['switch', 'toggle']],
+    tab: ['Tab', ['tab']],
+    menuitem: ['MenuItem', ['menuitem', 'item']],
+    option: ['Option', ['option']],
+    slider: ['Slider', ['slider']],
+    textbox: ['Input', ['input', 'field', 'textbox']],
+    searchbox: ['Input', ['input', 'field', 'search']],
+    combobox: ['Input', ['input', 'combobox']],
+    heading: ['Heading', ['heading', 'title']]
+  };
+  const NAME_TEST_ATTRS = ['data-testid', 'data-test-id', 'data-qa', 'data-cy', 'data-test', 'data-automation-id', 'data-e2e'];
+
+  // A lowerCamelCase identifier for `el` as a Page Object member: built from its
+  // test id, accessible name, label, placeholder, id, name attribute or tag (the
+  // first that yields letters), at most four words, plus a suffix for its kind —
+  // "Email address" textbox → emailAddressInput, "Place order" button →
+  // placeOrderButton. Never a reserved word; never starts with a digit.
+  // `testAttributes` optionally replaces the test-id attributes consulted.
+  function suggestName(el, testAttributes) {
+    if (!el || el.nodeType !== 1) return 'element';
+    return withCaches(() => {
+      const kind = elementKind(el);
+      const role = getRole(el);
+      const suffix = KIND_SUFFIX[kind] || (role === 'switch' ? ROLE_SUFFIX.switch : ROLE_SUFFIX[role]) || null;
+      const sources = [];
+      const attrs = Array.isArray(testAttributes) && testAttributes.length ? testAttributes : NAME_TEST_ATTRS;
+      for (const attr of attrs) {
+        if (isOwnArtifactAttr(attr)) continue;
+        const v = el.getAttribute(attr);
+        if (v && !isUnstableId(v)) { sources.push(v); break; }
+      }
+      sources.push(getAccessibleName(el));
+      try { labelTexts(el).forEach(t => sources.push(t.normalized)); } catch (e) {}
+      sources.push(el.getAttribute('placeholder'));
+      if (usableId(el.id)) sources.push(el.id);
+      sources.push(el.getAttribute('name'));
+      let words = [];
+      for (const src of sources) {
+        words = nameWords(src);
+        if (words.length && suffix && suffix[1].includes(words[words.length - 1].toLowerCase())) words.pop();
+        if (words.length) break;
+      }
+      words = words.slice(0, 4);
+      if (!words.length) words = suffix ? [] : nameWords(el.tagName.toLowerCase()).slice(0, 4);
+      if (suffix) words.push(suffix[0]);
+      let id = words.map((w, i) => (i === 0 ? w.toLowerCase() : w.charAt(0).toUpperCase() + w.slice(1).toLowerCase())).join('');
+      id = id.slice(0, 48);
+      if (/^[0-9]/.test(id)) id = 'el' + id;
+      if (!id) id = 'element';
+      if (RESERVED_NAMES.has(id.toLowerCase())) id += 'Element';
+      return id;
+    });
+  }
+
   global.__LocatorLensEngine = {
     generateLocators,
     getRole,
@@ -1709,6 +1943,10 @@
     buildCSSSelector,
     deepQueryAll,
     countTargetMatches: (t) => withCaches(() => countTargetMatches(t)),
+    resolveTarget,
+    unwrapFrameTarget,
+    suggestName,
+    elementKind,
     isOwnArtifactClass,
     isUnstableClass,
     isUnstableId

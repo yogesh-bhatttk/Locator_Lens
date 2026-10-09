@@ -374,6 +374,40 @@
     }).join('\n');
   }
 
+  // ── Cypress: reading a secret, emitted once per spec when a step needs it ────
+  // Cypress 16 removed Cypress.env(); cy.env() (added in Cypress 15) replaces it but
+  // does not exist in older versions. The helper uses whichever this Cypress has and
+  // yields the value as a chain, so one spec runs on both. The value is never logged.
+  // Casts to any keep it type-correct against either version's typings.
+  var CY_SECRET_NAME = 'locatraSecret';
+  var CY_SECRET_SRC = [
+    '// Locatra: read a secret from the Cypress environment (CYPRESS_<NAME> or the env config)',
+    '// without logging it. Cypress 16 removed Cypress.env(); cy.env() replaces it (Cypress >= 15).',
+    'function locatraSecret(name$T{: string})$T{: Cypress.Chainable<string>} {',
+    '  const c$T{: any} = cy;',
+    '  if (typeof c.env === \'function\') {',
+    '    return c.env([name], { log: false }).then((vars$T{: Record<string, unknown>}) => String(vars[name] ?? \'\'));',
+    '  }',
+    '  return cy.wrap(String((Cypress$T{ as any}).env(name) ?? \'\'), { log: false });',
+    '}'
+  ];
+  function cySecretSource(lang) {
+    var ts = lang === 'typescript';
+    return CY_SECRET_SRC.map(function (l) {
+      return l.replace(/\$T\{([^}]*)\}/g, function (m, t) { return ts ? t : ''; });
+    }).join('\n');
+  }
+  function usesCySecret(stmts) {
+    return new RegExp('^\\s*' + CY_SECRET_NAME + '\\(', 'm').test(stmts.join('\n'));
+  }
+  /** The helpers a set of Cypress statements calls, as source lines to prepend. */
+  function cyHelpers(stmts, lang) {
+    var out = [];
+    if (usesCyHelper(stmts)) out.push(cyHelperSource(lang));
+    if (usesCySecret(stmts)) out.push(cySecretSource(lang));
+    return out;
+  }
+
   function cyFilter(kind, text, exact, lang) {
     return '.filter((_, el) => ' + CY_HELPER_NAME + '(el, ' + q(kind, lang) + ', ' + q(normWs(text), lang) +
       (exact ? ', true' : '') + '))';
@@ -679,7 +713,7 @@
   function secretExpr(step, fw, lang) {
     var name = secretName(step);
     if (lang === 'python') return 'os.environ.get("' + name + '", "")';
-    if (fw === 'cypress') return "Cypress.env('" + name + "')";
+    if (fw === 'cypress') return CY_SECRET_NAME + "('" + name + "')";
     return 'process.env.' + name + " ?? ''";
   }
 
@@ -846,7 +880,8 @@
       case 'uncheck': return loc + cyToggle(false);
       case 'fill':
         if (step.sensitive) {
-          return loc + '.clear().type(' + secretExpr(step, 'cypress', lang) + ', { log: false, parseSpecialCharSequences: false });';
+          return secretExpr(step, 'cypress', lang) + '.then((secret) => {\n' +
+            '  ' + loc + '.clear().type(secret, { log: false, parseSpecialCharSequences: false });\n});';
         }
         if (SET_VALUE_TYPES_CYPRESS.indexOf(step.inputType) !== -1) {
           return loc + ".invoke('val', " + q(step.value, lang) + ").trigger('input').trigger('change');";
@@ -1028,8 +1063,21 @@
 
   // ── assertions ──────────────────────────────────────────────────────────────
   // step.assertType ∈ toBeVisible | toHaveText | toContainText | toHaveValue |
-  //                   toBeEnabled | toBeChecked
+  //                   toBeEnabled | toBeChecked | toHaveURL
   // step.value carries the expected text/value, or 'false' for an unchecked assertion.
+  // toHaveURL is a page assertion: it takes no target (one, if present, is ignored)
+  // and step.value holds the expected URL (step.url as a fallback).
+  function urlAssert(step, fw, lang) {
+    var py = lang === 'python';
+    var url = q(step.value != null && step.value !== '' ? step.value : (step.url || ''), lang);
+    if (fw === 'cypress') return 'cy.url().should(' + q('eq', lang) + ', ' + url + ');';
+    if (fw === 'selenium') {
+      if (py) return 'WebDriverWait(driver, 10).until(EC.url_to_be(' + url + '))';
+      return 'await driver.wait(until.urlIs(' + url + '), 10000);';
+    }
+    return py ? 'expect(page).to_have_url(' + url + ')' : 'await expect(page).toHaveURL(' + url + ');';
+  }
+
   function pwAssert(step, lang) {
     var py = lang === 'python';
     var loc = locatorExpr(step.target, 'playwright', lang);
@@ -1111,6 +1159,7 @@
     // A step from a newer recorder, or a corrupted one, becomes a visible TODO rather
     // than a throw or a silently different action.
     if (KNOWN_ACTIONS.indexOf(a) === -1) return todo(lang, 'unsupported step "' + commentSafe(a) + '"');
+    if (a === 'assert' && step.assertType === 'toHaveURL') return urlAssert(step, fw, lang);
     if (TARGETLESS_ACTIONS.indexOf(a) === -1 && !unwrapFrames(step.target).inner) {
       return todo(lang, '"' + a + '" step has no element locator');
     }
@@ -1208,6 +1257,16 @@
   // `steps` (optional, parallel to stmts) lets Cypress place cy.origin() blocks.
   function wrapScript(stmts, fw, lang, steps) {
     stmts = stmts || [];
+    // A suggested (not yet accepted) assertion is never part of the script.
+    if (Array.isArray(steps) && steps.length === stmts.length && steps.some(isSuggested)) {
+      var keptSteps = [];
+      stmts = stmts.filter(function (s, i) {
+        if (isSuggested(steps[i])) return false;
+        keptSteps.push(steps[i]);
+        return true;
+      });
+      steps = keptSteps;
+    }
     var joined = stmts.join('\n');
     var pyOs = lang === 'python' && /\bos\.(environ|path)\b/.test(joined) ? 'import os\n' : '';
 
@@ -1226,11 +1285,12 @@
       var body = cyOriginGroups(stmts, steps).map(function (g) {
         if (!g.origin) return indent(g.stmts, '    ');
         // cy.origin() serialises its callback, so the helper must be declared inside.
-        var inner = usesCyHelper(g.stmts) ? [cyHelperSource(lang)].concat(g.stmts) : g.stmts;
+        var inner = cyHelpers(g.stmts, lang).concat(g.stmts);
         if (usesRealEvents(g.stmts)) inner = [realEventsOriginRequire(lang)].concat(inner);
         return '    cy.origin(' + q(g.origin, lang) + ', () => {\n' + indent(inner, '      ') + '\n    });';
       }).join('\n');
-      var helper = usesCyHelper(stmts) ? cyHelperSource(lang) + '\n\n' : '';
+      var helpers = cyHelpers(stmts, lang);
+      var helper = helpers.length ? helpers.join('\n\n') + '\n\n' : '';
       var realEvents = usesRealEvents(stmts) ? realEventsHeader(lang) : '';
       return realEvents + helper + "describe('recorded test', () => {\n" +
         "  it('replays the recorded flow', () => {\n" +
@@ -1241,7 +1301,11 @@
     if (lang === 'python') {
       var pyImports = ['from selenium import webdriver', 'from selenium.webdriver.common.by import By'];
       if (/Keys\./.test(joined)) pyImports.push('from selenium.webdriver.common.keys import Keys');
-      if (/\bSelect\(/.test(joined)) pyImports.push('from selenium.webdriver.support.ui import Select');
+      var uiNames = [];
+      if (/\bSelect\(/.test(joined)) uiNames.push('Select');
+      if (/\bWebDriverWait\(/.test(joined)) uiNames.push('WebDriverWait');
+      if (uiNames.length) pyImports.push('from selenium.webdriver.support.ui import ' + uiNames.join(', '));
+      if (/\bEC\./.test(joined)) pyImports.push('from selenium.webdriver.support import expected_conditions as EC');
       return pyOs + pyImports.join('\n') + '\n\n\n' +
         'driver = webdriver.Chrome()\n' +
         'driver.implicitly_wait(10)  # Selenium has no auto-wait; give elements time to appear\n' +
@@ -1250,9 +1314,10 @@
         'finally:\n' +
         '    driver.quit()\n';
     }
-    var jsHead = (/new Select\(/.test(joined))
-      ? "const { Builder, By, Key, Select } = require('selenium-webdriver');\n"
-      : "const { Builder, By, Key } = require('selenium-webdriver');\n";
+    var jsNames = ['Builder', 'By', 'Key'];
+    if (/new Select\(/.test(joined)) jsNames.push('Select');
+    if (/\buntil\./.test(joined)) jsNames.push('until');
+    var jsHead = 'const { ' + jsNames.join(', ') + " } = require('selenium-webdriver');\n";
     if (/\bassert\./.test(joined)) jsHead += "const assert = require('assert');\n";
     return jsHead + '\n' +
       '(async () => {\n' +
@@ -1266,9 +1331,404 @@
       '})();\n';
   }
 
+  function isSuggested(step) { return !!step && step.suggested === true; }
+
   function testScript(actions, fw, lang) {
-    var steps = actions || [];
+    var steps = (actions || []).filter(function (a) { return !isSuggested(a); });
     return wrapScript(steps.map(function (a) { return actionStatement(a, fw, lang); }), fw, lang, steps);
+  }
+
+  // ════════════════════════════════════════════════════════════════════════════
+  //  Page Objects
+  // ════════════════════════════════════════════════════════════════════════════
+  // pageObject(model, fw, lang) renders one class for a picked region / page:
+  //   model = { className?, pageUrl?, title?, elements: [{ name, kind, target,
+  //             inputType?, role?, matchCount?, unique? }] }
+  //   kind ∈ input | textarea | select | checkbox | radio | button | link | other
+  // Every locator goes through locatorExpr(), so exact / nth / chains / frames /
+  // shadowPath behave exactly as in recorded scripts. Member names are made valid,
+  // non-reserved and unique per language (lowerCamelCase in JS/TS, snake_case in
+  // Python); the same model always renders the same text.
+
+  var PO_RESERVED = {
+    js: ('arguments await break case catch class const constructor continue debugger default delete do else enum ' +
+      'eval export extends false finally for function if implements import in instanceof interface let new null ' +
+      'package private protected public return static super switch this throw true try typeof undefined var void ' +
+      'while with yield hasOwnProperty isPrototypeOf propertyIsEnumerable toLocaleString toString valueOf ' +
+      'page driver goto visit').split(' '),
+    python: ('False None True and as assert async await break class continue def del elif else except finally for ' +
+      'from global if import in is lambda nonlocal not or pass raise return try while with yield self page driver ' +
+      'goto match case type').split(' ')
+  };
+
+  function poWords(text) {
+    var plain = String(text == null ? '' : text);
+    if (typeof plain.normalize === 'function') plain = plain.normalize('NFD').replace(/[̀-ͯ]/g, '');
+    plain = plain.replace(/([a-z])([A-Z])|([0-9])([A-Z][a-z])/g, '$1$3 $2$4').replace(/([A-Z]+)([A-Z][a-z])/g, '$1 $2');
+    return plain.match(/[A-Za-z0-9]+/g) || [];
+  }
+
+  function cap(w) { return w.charAt(0).toUpperCase() + w.slice(1).toLowerCase(); }
+
+  function poIdent(name, py) {
+    var words = poWords(name).slice(0, 8);
+    if (!words.length) words = ['element'];
+    var id = py
+      ? words.map(function (w) { return w.toLowerCase(); }).join('_')
+      : words.map(function (w, i) { return i === 0 ? w.toLowerCase() : cap(w); }).join('');
+    if (/^[0-9]/.test(id)) id = (py ? 'el_' : 'el') + id;
+    return id.slice(0, 64);
+  }
+
+  /** A unique, non-reserved identifier; numeric suffixes resolve collisions. */
+  function poClaim(base, used, py) {
+    var id = base;
+    if (PO_RESERVED[py ? 'python' : 'js'].indexOf(id) !== -1) id += py ? '_element' : 'Element';
+    var n = 2;
+    var root = id;
+    while (Object.prototype.hasOwnProperty.call(used, id)) id = root + (py ? '_' : '') + n++;
+    used[id] = true;
+    return id;
+  }
+
+  // Path segments that name no particular page, so the title says more.
+  var PO_GENERIC_SEGMENTS = ['index', 'home', 'default', 'main', 'app', 'page'];
+
+  /** PascalCase class name: the model's, else the URL path, else the title. */
+  function poClassName(model) {
+    var words = poWords(model.className);
+    if (!words.length) {
+      // The path is checked before the title: titles put the site name first as often
+      // as last ("Northwind Books — Checkout"), so their first part named the site,
+      // while /checkout names the page.
+      var path = String(model.pageUrl || '').replace(/^[a-z][a-z0-9+.-]*:\/\/[^/]*/i, '').split(/[?#]/)[0];
+      var segs = path.split('/').filter(function (sg) { return sg && !/^\d+$/.test(sg); });
+      var last = segs.length ? segs[segs.length - 1].replace(/\.[a-z0-9]+$/i, '') : '';
+      if (last && PO_GENERIC_SEGMENTS.indexOf(last.toLowerCase()) === -1) words = poWords(last).slice(0, 4);
+    }
+    if (!words.length) {
+      // "Checkout | Shop" → Checkout: the part before a title separator.
+      var title = String(model.title || '').split(/\s[|–—\-:·]\s|[|–—·]/)[0];
+      words = poWords(title).slice(0, 4);
+    }
+    if (!words.length) words = ['Home'];
+    var name = words.map(function (w) { return /^[A-Z0-9]+$/.test(w) && w.length > 1 && model.className ? w : cap(w); }).join('');
+    if (/^[0-9]/.test(name)) name = 'Page' + name;
+    if (!/Page$/.test(name)) name += 'Page';
+    return name.slice(0, 80);
+  }
+
+  // Re-point a rendered expression's root receiver (`page.`, `driver.`) at another
+  // one (`this.page.`, `self.driver.`), leaving string literals untouched — a
+  // selector may well contain the text "driver.".
+  function rebaseReceiver(code, from, to) {
+    var out = '';
+    var i = 0;
+    while (i < code.length) {
+      var c = code.charAt(i);
+      if (c === "'" || c === '"') {
+        var j = i + 1;
+        while (j < code.length && code.charAt(j) !== c) j += code.charAt(j) === '\\' ? 2 : 1;
+        out += code.slice(i, j + 1);
+        i = j + 1;
+        continue;
+      }
+      var prev = i ? code.charAt(i - 1) : '';
+      if (code.substr(i, from.length + 1) === from + '.' && !/[\w$.]/.test(prev)) {
+        out += to + '.';
+        i += from.length + 1;
+        continue;
+      }
+      out += c;
+      i++;
+    }
+    return out;
+  }
+
+  var PO_KINDS = ['input', 'textarea', 'select', 'checkbox', 'radio', 'button', 'link', 'other'];
+  var PO_TEXT_ROLES = ['textbox', 'searchbox', 'combobox', 'spinbutton'];
+
+  /** The helper actions an element gets: fill | select | check | uncheck | click. */
+  function poActions(el) {
+    var kind = PO_KINDS.indexOf(el.kind) !== -1 ? el.kind : 'other';
+    if (kind === 'input') return el.inputType === 'file' ? [] : ['fill'];
+    if (kind === 'textarea') return ['fill'];
+    if (kind === 'select') return ['select'];
+    if (kind === 'checkbox') return ['check', 'uncheck'];
+    if (kind === 'radio') return ['check'];
+    if (kind === 'other' && PO_TEXT_ROLES.indexOf(el.role) !== -1) return ['fill'];
+    return ['click'];
+  }
+
+  function poNote(el, fw, lang) {
+    var notes = [];
+    var n = el.matchCount;
+    if (typeof n === 'number' && n !== 1) {
+      notes.push(comment(lang, n === 0
+        ? 'NOTE: this locator matched no element when the page object was generated.'
+        : 'NOTE: this locator matched ' + n + ' elements when the page object was generated.'));
+    } else if (el.unique === false) {
+      notes.push(comment(lang, 'NOTE: this locator was not unique when the page object was generated.'));
+    }
+    if (hasAmbiguousRole(el.target) && !(typeof n === 'number' && n !== 1)) {
+      notes.push(comment(lang, 'NOTE: this role locator has no accessible name and may match several elements.'));
+    }
+    if (fw === 'cypress' && hasPositionalFrame(el.target)) {
+      notes.push(comment(lang, 'NOTE: this iframe is cross-origin, so contentDocument is null and Cypress cannot reach into it.'));
+    }
+    return notes;
+  }
+
+  /** Normalised element list: valid targets only, with claimed member names. */
+  function poMembers(model, fw, lang) {
+    var py = lang === 'python';
+    var used = {};
+    var skipped = 0;
+    var members = [];
+    (Array.isArray(model.elements) ? model.elements : []).forEach(function (el) {
+      if (!el || !el.target || !unwrapFrames(el.target).inner || !locatorExpr(el.target, fw, lang)) { skipped++; return; }
+      members.push({ el: el, id: poClaim(poIdent(el.name, py), used, py) });
+    });
+    members.forEach(function (m) {
+      m.helpers = poActions(m.el).map(function (act) {
+        var base = py ? act + '_' + m.id : act + m.id.charAt(0).toUpperCase() + m.id.slice(1);
+        return { act: act, id: poClaim(base, used, py) };
+      });
+    });
+    return { members: members, skipped: skipped };
+  }
+
+  function poHeader(model, lang, skipped) {
+    var lines = [comment(lang, 'Page Object generated by Locatra' + (model.title ? ' for "' + commentSafe(model.title) + '"' : '') + '.')];
+    if (model.pageUrl) lines.push(comment(lang, 'Page: ' + commentSafe(model.pageUrl).slice(0, 80)));
+    if (skipped) lines.push(comment(lang, 'NOTE: ' + skipped + ' element(s) without a usable locator were left out.'));
+    return lines.join('\n') + '\n';
+  }
+
+  function block(lines, pad) { return indent(lines, pad); }
+
+  // ── Playwright ──────────────────────────────────────────────────────────────
+  function poPlaywright(model, lang, cls, info) {
+    var py = lang === 'python';
+    var ts = lang === 'typescript';
+    var url = model.pageUrl ? String(model.pageUrl) : '';
+    var members = info.members;
+    if (py) {
+      var body = ['def __init__(self, page: Page) -> None:'];
+      var init = ['self.page = page'];
+      members.forEach(function (m) {
+        init = init.concat(poNote(m.el, 'playwright', lang), ['self.' + m.id + ' = ' + locatorExpr(m.el.target, 'playwright', lang)]);
+      });
+      body.push(block(init, '    '));
+      if (url) body.push('', 'def goto(self) -> None:', '    self.page.goto(' + q(url, lang) + ')');
+      members.forEach(function (m) {
+        m.helpers.forEach(function (h) {
+          var recv = 'self.' + m.id;
+          body.push('');
+          if (h.act === 'fill') body.push('def ' + h.id + '(self, value: str) -> None:', '    ' + recv + '.fill(value)');
+          else if (h.act === 'select') body.push('def ' + h.id + '(self, value: str) -> None:', '    ' + recv + '.select_option(value)');
+          else body.push('def ' + h.id + '(self) -> None:', '    ' + recv + '.' + h.act + '()');
+        });
+      });
+      return poHeader(model, lang, info.skipped) + 'from playwright.sync_api import Page\n\n\n' +
+        'class ' + cls + ':\n' + block(body, '    ') + '\n';
+    }
+    var out = [];
+    if (ts) {
+      out.push('readonly page: Page;');
+      members.forEach(function (m) { out.push('readonly ' + m.id + ': Locator;'); });
+      out.push('');
+    }
+    var ctor = ['this.page = page;'];
+    members.forEach(function (m) {
+      ctor = ctor.concat(poNote(m.el, 'playwright', lang), ['this.' + m.id + ' = ' + locatorExpr(m.el.target, 'playwright', lang) + ';']);
+    });
+    out.push('constructor(page' + (ts ? ': Page' : '') + ') {', block(ctor, '  '), '}');
+    var ret = ts ? ': Promise<void>' : '';
+    if (url) out.push('', 'async goto()' + ret + ' {', '  await this.page.goto(' + q(url, lang) + ');', '}');
+    members.forEach(function (m) {
+      m.helpers.forEach(function (h) {
+        var recv = 'this.' + m.id;
+        out.push('');
+        if (h.act === 'fill' || h.act === 'select') {
+          out.push('async ' + h.id + '(value' + (ts ? ': string' : '') + ')' + ret + ' {',
+            '  await ' + recv + (h.act === 'fill' ? '.fill(value);' : '.selectOption(value);'), '}');
+        } else {
+          out.push('async ' + h.id + '()' + ret + ' {', '  await ' + recv + '.' + h.act + '();', '}');
+        }
+      });
+    });
+    var head = ts ? "import { type Page, type Locator } from '@playwright/test';\n\n" : '';
+    if (!ts) head = comment(lang, 'Usage: const ' + cls.charAt(0).toLowerCase() + cls.slice(1) + ' = new ' + cls + '(page);') + '\n\n';
+    return poHeader(model, lang, info.skipped) + head + 'export class ' + cls + ' {\n' + block(out, '  ') + '\n}\n';
+  }
+
+  // ── Selenium ────────────────────────────────────────────────────────────────
+  // Elements are looked up on every access (never cached), so a re-rendered page
+  // cannot hand back a stale element. Selenium can only search the document the
+  // driver is switched to, so when any element lives in a frame every lookup first
+  // returns to the top document and then enters that element's frames.
+  function poSelenium(model, lang, cls, info) {
+    var py = lang === 'python';
+    var ts = lang === 'typescript';
+    var url = model.pageUrl ? String(model.pageUrl) : '';
+    var members = info.members;
+    var anyFrames = members.some(function (m) { return unwrapFrames(m.el.target).frames.length > 0; });
+    var self = py ? 'self' : 'this';
+    var findOf = function (m) {
+      return rebaseReceiver(locatorExpr(m.el.target, 'selenium', lang), 'driver', self + '.driver');
+    };
+    var switchesOf = function (m) {
+      if (!anyFrames) return [];
+      var lines = [py ? 'self.driver.switch_to.default_content()' : 'await this.driver.switchTo().defaultContent();'];
+      unwrapFrames(m.el.target).frames.forEach(function (f) {
+        lines.push(rebaseReceiver(selFrameSwitch(f, lang), 'driver', self + '.driver'));
+      });
+      return lines;
+    };
+    var body = [];
+    if (py) {
+      body.push('def __init__(self, driver: WebDriver) -> None:', '    self.driver = driver');
+      if (url) body.push('', 'def goto(self) -> None:', '    ' + (anyFrames ? 'self.driver.switch_to.default_content()\n    ' : '') + 'self.driver.get(' + q(url, lang) + ')');
+      members.forEach(function (m) {
+        body.push('');
+        body = body.concat(poNote(m.el, 'selenium', lang));
+        body.push('@property', 'def ' + m.id + '(self) -> WebElement:', block(switchesOf(m).concat(['return ' + findOf(m)]), '    '));
+      });
+      members.forEach(function (m) {
+        m.helpers.forEach(function (h) {
+          var get = 'self.' + m.id;
+          body.push('');
+          var lines;
+          if (h.act === 'fill') {
+            body.push('def ' + h.id + '(self, value: str) -> None:');
+            lines = SET_VALUE_TYPES_SELENIUM.indexOf(m.el.inputType) !== -1
+              ? ['self.driver.execute_script(' + q(SET_VALUE_JS, lang) + ', ' + get + ', value)']
+              : ['el = ' + get, 'el.clear()', 'el.send_keys(value)'];
+          } else if (h.act === 'select') {
+            body.push('def ' + h.id + '(self, value: str) -> None:');
+            lines = ['Select(' + get + ').select_by_visible_text(value)'];
+          } else if (h.act === 'check' || h.act === 'uncheck') {
+            body.push('def ' + h.id + '(self) -> None:');
+            lines = ['el = ' + get, 'if ' + (h.act === 'check' ? 'not ' : '') + selCheckedExpr('el', lang) + ':', '    el.click()'];
+          } else {
+            body.push('def ' + h.id + '(self) -> None:');
+            lines = [get + '.click()'];
+          }
+          body.push(block(lines, '    '));
+        });
+      });
+      var joinedPy = body.join('\n');
+      var imports = ['from selenium.webdriver.common.by import By', 'from selenium.webdriver.remote.webdriver import WebDriver',
+        'from selenium.webdriver.remote.webelement import WebElement'];
+      if (/\bSelect\(/.test(joinedPy)) imports.push('from selenium.webdriver.support.ui import Select');
+      return poHeader(model, lang, info.skipped) + imports.join('\n') + '\n\n\n' + 'class ' + cls + ':\n' + block(body, '    ') + '\n';
+    }
+    if (ts) body.push('readonly driver: WebDriver;', '');
+    body.push('constructor(driver' + (ts ? ': WebDriver' : '') + ') {', '  this.driver = driver;', '}');
+    var ret = ts ? ': Promise<void>' : '';
+    if (url) {
+      body.push('', 'async goto()' + ret + ' {');
+      if (anyFrames) body.push('  await this.driver.switchTo().defaultContent();');
+      body.push('  await this.driver.get(' + q(url, lang) + ');', '}');
+    }
+    members.forEach(function (m) {
+      body.push('');
+      body = body.concat(poNote(m.el, 'selenium', lang));
+      if (anyFrames) {
+        body.push('async ' + m.id + '()' + (ts ? ': Promise<WebElement>' : '') + ' {',
+          block(switchesOf(m).concat(['return ' + findOf(m) + ';']), '  '), '}');
+      } else {
+        body.push(m.id + '()' + (ts ? ': WebElementPromise' : '') + ' {', '  return ' + findOf(m) + ';', '}');
+      }
+    });
+    members.forEach(function (m) {
+      m.helpers.forEach(function (h) {
+        var get = 'await this.' + m.id + '()';
+        var lines;
+        var sig = h.act === 'fill' || h.act === 'select' ? '(value' + (ts ? ': string' : '') + ')' : '()';
+        if (h.act === 'fill') {
+          lines = SET_VALUE_TYPES_SELENIUM.indexOf(m.el.inputType) !== -1
+            ? ['await this.driver.executeScript(' + q(SET_VALUE_JS, lang) + ', ' + get + ', value);']
+            : ['const el = ' + get + ';', 'await el.clear();', 'await el.sendKeys(value);'];
+        } else if (h.act === 'select') {
+          lines = ['await new Select(' + get + ').selectByVisibleText(value);'];
+        } else if (h.act === 'check' || h.act === 'uncheck') {
+          lines = ['const el = ' + get + ';', 'if (' + (h.act === 'check' ? '!' : '') + selCheckedExpr('el', lang) + ') await el.click();'];
+        } else {
+          lines = ['await (' + get + ').click();'];
+        }
+        body.push('', 'async ' + h.id + sig + ret + ' {', block(lines, '  '), '}');
+      });
+    });
+    var joined = body.join('\n');
+    var names = ['By'];
+    if (/new Select\(/.test(joined)) names.push('Select');
+    var cls0 = 'class ' + cls + ' {\n' + block(body, '  ') + '\n}\n';
+    if (ts) {
+      // @types/selenium-webdriver declares Select only in its own module.
+      var tsImports = "import { By, type WebDriver, " + (anyFrames ? 'type WebElement' : 'type WebElementPromise') +
+        " } from 'selenium-webdriver';\n";
+      if (names.indexOf('Select') !== -1) tsImports += "import { Select } from 'selenium-webdriver/lib/select.js';\n";
+      return poHeader(model, lang, info.skipped) + tsImports + '\nexport ' + cls0;
+    }
+    return poHeader(model, lang, info.skipped) + 'const { ' + names.join(', ') + " } = require('selenium-webdriver');\n\n" +
+      cls0 + '\nmodule.exports = { ' + cls + ' };\n';
+  }
+
+  // ── Cypress ─────────────────────────────────────────────────────────────────
+  function poCypress(model, lang, cls, info) {
+    var ts = lang === 'typescript';
+    var url = model.pageUrl ? String(model.pageUrl) : '';
+    var members = info.members;
+    var body = [];
+    if (url) body.push('visit()' + (ts ? ': void' : '') + ' {', '  cy.visit(' + q(url, lang) + ');', '}');
+    members.forEach(function (m) {
+      if (body.length) body.push('');
+      body = body.concat(poNote(m.el, 'cypress', lang));
+      body.push(m.id + '() {', '  return ' + locatorExpr(m.el.target, 'cypress', lang) + ';', '}');
+    });
+    members.forEach(function (m) {
+      m.helpers.forEach(function (h) {
+        var get = 'this.' + m.id + '()';
+        var sig = h.act === 'fill' || h.act === 'select' ? '(value' + (ts ? ': string' : '') + ')' : '()';
+        var lines;
+        if (h.act === 'fill') {
+          lines = SET_VALUE_TYPES_CYPRESS.indexOf(m.el.inputType) !== -1
+            ? [get + ".invoke('val', value).trigger('input').trigger('change');"]
+            // cy.type('') throws, and a literal "{" in a value is text, not a key.
+            : ["if (value === '') " + get + '.clear();', 'else ' + get + '.clear().type(value, { parseSpecialCharSequences: false });'];
+        } else if (h.act === 'select') {
+          lines = [get + '.select(value);'];
+        } else if (h.act === 'check' || h.act === 'uncheck') {
+          lines = [get + cyToggle(h.act === 'check')];
+        } else {
+          lines = [get + '.click();'];
+        }
+        if (body.length) body.push('');
+        body.push(h.id + sig + (ts ? ': void' : '') + ' {', block(lines, '  '), '}');
+      });
+    });
+    var all = body.join('\n');
+    var helper = usesCyHelper([all]) ? cyHelperSource(lang) + '\n\n' : '';
+    return poHeader(model, lang, info.skipped) + helper + 'export class ' + cls + ' {\n' + block(body, '  ') + '\n}\n';
+  }
+
+  function pageObject(model, fw, lang) {
+    model = model || {};
+    if (!isValidCombo(fw, lang)) lang = 'typescript';
+    var cls = poClassName(model);
+    var info = poMembers(model, fw, lang);
+    if (fw === 'selenium') return poSelenium(model, lang, cls, info);
+    if (fw === 'cypress') return poCypress(model, lang, cls, info);
+    return poPlaywright(model, lang, cls, info);
+  }
+
+  /** The file name a page object downloads as: <ClassName>.ts|.js|.py */
+  function pageObjectFileName(model, fw, lang) {
+    if (!isValidCombo(fw, lang)) lang = 'typescript';
+    var ext = { typescript: '.ts', javascript: '.js', python: '.py' }[lang] || '.ts';
+    return poClassName(model || {}) + ext;
   }
 
   var LLCodegen = {
@@ -1280,6 +1740,9 @@
     actionStatement: actionStatement,
     wrapScript: wrapScript,
     testScript: testScript,
+    pageObject: pageObject,
+    pageObjectClassName: function (model) { return poClassName(model || {}); },
+    pageObjectFileName: pageObjectFileName,
     q: q
   };
 

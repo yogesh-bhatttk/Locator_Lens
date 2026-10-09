@@ -2,6 +2,7 @@
 // it for side effects is enough to get the real shipping module — no shim, no copy.
 import { execFileSync } from 'node:child_process';
 import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { stripTypeScriptTypes } from 'node:module';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { JSDOM } from 'jsdom';
@@ -1096,7 +1097,9 @@ describe('fill', () => {
       'send_keys(os.environ.get("LOCATRA_PASSWORD", ""))'
     );
     expect(C.actionStatement(step, 'cypress', 'javascript')).toBe(
-      "cy.get('#pw').clear().type(Cypress.env('LOCATRA_PASSWORD'), { log: false, parseSpecialCharSequences: false });"
+      "locatraSecret('LOCATRA_PASSWORD').then((secret) => {\n" +
+        "  cy.get('#pw').clear().type(secret, { log: false, parseSpecialCharSequences: false });\n" +
+        '});'
     );
     for (const [fw, lang] of validCombos()) {
       expect(C.actionStatement(step, fw, lang), `${fw}/${lang}`).not.toContain('leak');
@@ -1456,5 +1459,349 @@ describe('Selenium accessible-name precedence', () => {
     expect(count({ kind: 'role', role: 'textbox', name: 'Code' })).toBe(0);
     expect(count({ kind: 'role', role: 'button', name: 'Gear' })).toBe(1);
     expect(count({ kind: 'role', role: 'button', name: 'Settings' })).toBe(0); // content wins over title
+  });
+});
+
+// ── F3: page URL assertions, toHaveValue, suggested steps ─────────────────────
+describe('toHaveURL assertions', () => {
+  const step = {
+    action: 'assert',
+    assertType: 'toHaveURL',
+    value: "https://shop.example/done?o='1'",
+    target: null,
+  };
+
+  it('renders a page-level assertion in every framework', () => {
+    const got = Object.fromEntries(
+      validCombos().map(([fw, lang]) => [`${fw}/${lang}`, C.actionStatement(step, fw, lang)])
+    );
+    expect(got).toEqual({
+      'playwright/typescript': "await expect(page).toHaveURL('https://shop.example/done?o=\\'1\\'');",
+      'playwright/javascript': "await expect(page).toHaveURL('https://shop.example/done?o=\\'1\\'');",
+      'playwright/python': 'expect(page).to_have_url("https://shop.example/done?o=\'1\'")',
+      'selenium/typescript': "await driver.wait(until.urlIs('https://shop.example/done?o=\\'1\\''), 10000);",
+      'selenium/javascript': "await driver.wait(until.urlIs('https://shop.example/done?o=\\'1\\''), 10000);",
+      'selenium/python': 'WebDriverWait(driver, 10).until(EC.url_to_be("https://shop.example/done?o=\'1\'"))',
+      'cypress/typescript': "cy.url().should('eq', 'https://shop.example/done?o=\\'1\\'');",
+      'cypress/javascript': "cy.url().should('eq', 'https://shop.example/done?o=\\'1\\'');",
+    });
+  });
+
+  it('ignores any target and falls back to the recorded page URL', () => {
+    const framed = { kind: 'frame', selector: '#f', index: 0, child: { kind: 'id', value: 'x' } };
+    expect(C.actionStatement({ ...step, target: framed }, 'selenium', 'javascript')).toBe(
+      C.actionStatement(step, 'selenium', 'javascript')
+    );
+    expect(
+      C.actionStatement(
+        { action: 'assert', assertType: 'toHaveURL', url: 'https://a.example/' },
+        'playwright',
+        'python'
+      )
+    ).toBe('expect(page).to_have_url("https://a.example/")');
+    expect(C.actionStatement({ action: 'assert', assertType: 'toHaveURL' }, 'cypress', 'javascript')).toBe(
+      "cy.url().should('eq', '');"
+    );
+  });
+
+  it('adds exactly the imports the wait needs', () => {
+    const steps = [{ action: 'goto', value: 'https://shop.example/' }, step];
+    const py = C.testScript(steps, 'selenium', 'python');
+    expect(py).toContain(
+      'from selenium import webdriver\nfrom selenium.webdriver.common.by import By\nfrom selenium.webdriver.support.ui import WebDriverWait\nfrom selenium.webdriver.support import expected_conditions as EC\n\n\n'
+    );
+    const withSelect = C.testScript(
+      [...steps, { action: 'selectOption', target: { kind: 'id', value: 's' }, value: 'A' }],
+      'selenium',
+      'python'
+    );
+    expect(withSelect).toContain('from selenium.webdriver.support.ui import Select, WebDriverWait\n');
+    expect(C.testScript(steps, 'selenium', 'javascript')).toMatch(
+      /^const \{ Builder, By, Key, until \} = require\('selenium-webdriver'\);\n\n/
+    );
+    expect(
+      C.testScript(
+        [...steps, { action: 'selectOption', target: { kind: 'id', value: 's' }, value: 'A' }],
+        'selenium',
+        'typescript'
+      )
+    ).toMatch(/^const \{ Builder, By, Key, Select, until \} = require\('selenium-webdriver'\);\n/);
+    // Unchanged scaffolds when no URL assertion is present.
+    expect(C.testScript([steps[0]], 'selenium', 'javascript')).toMatch(
+      /^const \{ Builder, By, Key \} = require\('selenium-webdriver'\);\n\n/
+    );
+    expect(C.testScript([steps[0]], 'selenium', 'python')).not.toMatch(/WebDriverWait|expected_conditions/);
+    expect(C.testScript(steps, 'playwright', 'typescript')).toContain(
+      "  await expect(page).toHaveURL('https://shop.example/done?o=\\'1\\'');\n"
+    );
+  });
+
+  it('produces scripts that parse', () => {
+    const steps = [{ action: 'goto', value: 'https://shop.example/' }, step];
+    const dir = mkdtempSync(join(tmpdir(), 'locatra-url-'));
+    try {
+      for (const [fw, lang] of validCombos()) {
+        if (lang === 'python') continue;
+        const file = join(dir, `${fw}-${lang}.${fw === 'selenium' ? 'cjs' : 'mjs'}`);
+        let code = C.testScript(steps, fw, lang);
+        if (lang === 'typescript') code = stripTypeScriptTypes(code);
+        writeFileSync(file, code);
+        expect(
+          () => execFileSync(process.execPath, ['--check', file], { stdio: 'pipe' }),
+          `${fw}/${lang}`
+        ).not.toThrow();
+      }
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+});
+
+describe('toHaveValue assertions', () => {
+  it('compares the current value in every framework', () => {
+    const s = {
+      action: 'assert',
+      assertType: 'toHaveValue',
+      target: { kind: 'id', value: 'qty' },
+      value: '3',
+    };
+    expect(C.actionStatement(s, 'playwright', 'typescript')).toBe(
+      "await expect(page.locator('#qty')).toHaveValue('3');"
+    );
+    expect(C.actionStatement(s, 'playwright', 'python')).toBe(
+      'expect(page.locator("#qty")).to_have_value("3")'
+    );
+    expect(C.actionStatement(s, 'selenium', 'javascript')).toBe(
+      "assert.strictEqual(await driver.findElement(By.id('qty')).getAttribute('value'), '3');"
+    );
+    expect(C.actionStatement(s, 'selenium', 'python')).toBe(
+      'assert driver.find_element(By.ID, "qty").get_attribute("value") == "3"'
+    );
+    expect(C.actionStatement(s, 'cypress', 'typescript')).toBe("cy.get('#qty').should('have.value', '3');");
+  });
+});
+
+describe('suggested steps', () => {
+  const steps = [
+    { action: 'goto', value: 'https://shop.example/' },
+    { action: 'click', target: { kind: 'id', value: 'buy' } },
+    { action: 'assert', assertType: 'toHaveURL', value: 'https://shop.example/done', suggested: true },
+    {
+      action: 'assert',
+      assertType: 'toContainText',
+      target: { kind: 'id', value: 'msg' },
+      value: 'Thanks',
+      suggested: true,
+    },
+    { action: 'assert', assertType: 'toBeVisible', target: { kind: 'id', value: 'ok' }, suggested: false },
+  ];
+  const accepted = steps.filter((s) => !s.suggested);
+
+  it('are left out of a rendered script until accepted', () => {
+    for (const [fw, lang] of validCombos()) {
+      const code = C.testScript(steps, fw, lang);
+      expect(code, `${fw}/${lang}`).toBe(C.testScript(accepted, fw, lang));
+      expect(code).not.toMatch(/done|Thanks/);
+    }
+  });
+
+  it('are dropped by wrapScript when the parallel steps mark them', () => {
+    for (const [fw, lang] of validCombos()) {
+      const stmts = steps.map((s) => C.actionStatement(s, fw, lang));
+      expect(C.wrapScript(stmts, fw, lang, steps), `${fw}/${lang}`).toBe(C.testScript(accepted, fw, lang));
+    }
+    // Without a parallel steps array the statements are taken as given.
+    const stmts = steps.map((s) => C.actionStatement(s, 'selenium', 'python'));
+    expect(C.wrapScript(stmts, 'selenium', 'python')).toContain('WebDriverWait');
+  });
+
+  it('still render on their own, for the timeline preview', () => {
+    expect(C.actionStatement(steps[3], 'playwright', 'typescript')).toBe(
+      "await expect(page.locator('#msg')).toContainText('Thanks');"
+    );
+  });
+});
+
+describe('remaining edge cases', () => {
+  it('uses the platform CSS.escape when there is one', () => {
+    const had = Object.prototype.hasOwnProperty.call(globalThis, 'CSS');
+    const prev = globalThis.CSS;
+    globalThis.CSS = { escape: (s) => 'esc(' + s + ')' };
+    try {
+      expect(C.locatorExpr({ kind: 'id', value: 'a:b' }, 'playwright', 'typescript')).toBe(
+        "page.locator('#esc(a:b)')"
+      );
+    } finally {
+      if (had) globalThis.CSS = prev;
+      else delete globalThis.CSS;
+    }
+  });
+
+  it('maps img roles to non-empty alt and SVG by local name', () => {
+    expect(C.locatorExpr({ kind: 'role', role: 'img' }, 'cypress', 'javascript')).toBe(
+      'cy.get(\'img:not([alt=""]):not([role]), svg:not([role]), [role="img"]\').first()'
+    );
+    const xp = C.locatorExpr({ kind: 'role', role: 'img', name: 'Logo' }, 'selenium', 'javascript');
+    expect(xp).toContain('(self::img and not(@role) and not(@alt=""))');
+    expect(xp).toContain('(local-name()="svg" and not(@role))');
+  });
+
+  it('chains without a parent fall back to the child; frames without one render nothing', () => {
+    const child = { kind: 'role', role: 'button', name: 'Go' };
+    expect(C.locatorExpr({ kind: 'chain', parent: null, child }, 'playwright', 'typescript')).toBe(
+      "page.getByRole('button', { name: 'Go' })"
+    );
+    expect(C.locatorExpr({ kind: 'frame', selector: '#f', index: 0 }, 'cypress', 'javascript')).toBe('');
+    expect(
+      C.actionStatement(
+        { action: 'click', target: { kind: 'frame', selector: '#f' } },
+        'playwright',
+        'python'
+      )
+    ).toBe('# TODO: "click" step has no element locator');
+    expect(C.actionStatement(null, 'playwright', 'python')).toBe('');
+  });
+
+  it('handles the remaining press, upload and fill shapes', () => {
+    expect(C.actionStatement({ action: 'press', value: '+' }, 'selenium', 'javascript')).toBe(
+      "await driver.actions().sendKeys('+').perform();"
+    );
+    expect(C.actionStatement({ action: 'press', value: 'Hyper+a' }, 'selenium', 'python')).toBe(
+      '# TODO: press "Hyper+a" — modifier not supported'
+    );
+    const target = { kind: 'id', value: 'f' };
+    expect(C.actionStatement({ action: 'upload', target, value: '' }, 'cypress', 'javascript')).toBe(
+      '// TODO: upload step with no files (Cypress cannot clear a file input)'
+    );
+    expect(C.actionStatement({ action: 'upload', target, value: [] }, 'selenium', 'javascript')).toBe(
+      "await driver.findElement(By.id('f')).clear();"
+    );
+    expect(
+      C.actionStatement({ action: 'upload', target, value: ['a.txt', 'b.txt'] }, 'selenium', 'typescript')
+    ).toContain(
+      "await driver.findElement(By.id('f')).sendKeys(['a.txt', 'b.txt'].map((p) => require('path').resolve(p)).join('\\n'));"
+    );
+    expect(
+      C.actionStatement({ action: 'upload', target, value: '"one.pdf"' }, 'playwright', 'typescript')
+    ).toContain(".setInputFiles(['one.pdf']);");
+    expect(
+      C.actionStatement(
+        { action: 'fill', target, value: '2024-01-31', inputType: 'date' },
+        'selenium',
+        'javascript'
+      )
+    ).toMatch(
+      /^await driver\.executeScript\('const el = arguments\[0\];.*', driver\.findElement\(By\.id\('f'\)\), '2024-01-31'\);$/
+    );
+    expect(
+      C.actionStatement(
+        { action: 'assert', assertType: 'toContainText', target, value: ' a \n b ' },
+        'selenium',
+        'javascript'
+      )
+    ).toBe(
+      "assert.ok((await driver.findElement(By.id('f')).getText()).replace(/\\s+/g, ' ').trim().includes('a b'));"
+    );
+  });
+
+  it('tolerates missing steps when placing cy.origin blocks', () => {
+    const code = C.wrapScript(["cy.visit('https://a.example/');", '// x'], 'cypress', 'javascript', [
+      { action: 'goto', value: 'https://a.example/' },
+      null,
+    ]);
+    expect(code).toContain("    cy.visit('https://a.example/');\n    // x\n");
+  });
+});
+
+// Cypress 16 removed Cypress.env(); cy.env() (Cypress >= 15) replaces it. Exported
+// specs read secrets through one emitted helper that works on both.
+describe('Cypress secrets on Cypress 15 and 16', () => {
+  const fill = { action: 'fill', target: { kind: 'id', value: 'pw' }, sensitive: true, secretName: 'MY_PW' };
+
+  function helperFrom(code) {
+    const start = code.indexOf('function locatraSecret(');
+    const end = code.indexOf('\n}\n', start) + 2;
+    return code.slice(start, end);
+  }
+
+  it('emits the helper once, only when a sensitive fill needs it', () => {
+    const steps = [{ action: 'goto', value: 'https://a.example/' }, fill, { ...fill, secretName: 'OTHER' }];
+    const js = C.testScript(steps, 'cypress', 'javascript');
+    expect(js.match(/function locatraSecret\(/g)).toHaveLength(1);
+    expect(js).toContain(
+      "    locatraSecret('MY_PW').then((secret) => {\n      cy.get('#pw').clear().type(secret, { log: false, parseSpecialCharSequences: false });\n    });"
+    );
+    expect(js).not.toMatch(/Cypress\.env\(['"]/);
+    expect(helperFrom(js)).toBe(
+      [
+        'function locatraSecret(name) {',
+        '  const c = cy;',
+        "  if (typeof c.env === 'function') {",
+        "    return c.env([name], { log: false }).then((vars) => String(vars[name] ?? ''));",
+        '  }',
+        "  return cy.wrap(String((Cypress).env(name) ?? ''), { log: false });",
+        '}',
+      ].join('\n')
+    );
+    expect(helperFrom(C.testScript(steps, 'cypress', 'typescript'))).toContain(
+      'function locatraSecret(name: string): Cypress.Chainable<string> {'
+    );
+    expect(
+      C.testScript([{ action: 'fill', target: fill.target, value: 'x' }], 'cypress', 'javascript')
+    ).not.toContain('locatraSecret');
+    // A TODO that only mentions the helper does not pull it in.
+    expect(C.wrapScript(['// locatraSecret(x)'], 'cypress', 'javascript')).not.toContain(
+      'function locatraSecret'
+    );
+  });
+
+  it('declares the helper again inside cy.origin(), whose callback is serialised', () => {
+    const steps = [
+      { action: 'goto', value: 'https://a.example/' },
+      { action: 'goto', value: 'https://b.example/' },
+      { ...fill, url: 'https://b.example/' },
+    ];
+    const code = C.testScript(steps, 'cypress', 'typescript');
+    expect(code.match(/function locatraSecret\(/g)).toHaveLength(2);
+    expect(code).toContain("    cy.origin('https://b.example', () => {\n      // Locatra: read a secret");
+  });
+
+  it('reads cy.env() when Cypress has it and Cypress.env() otherwise, never logging', () => {
+    const js = helperFrom(C.testScript([fill], 'cypress', 'javascript'));
+    const calls = [];
+    const chain = (v) => ({ then: (fn) => chain(fn(v)), value: v });
+    const cy16 = {
+      env: (keys, opts) => {
+        calls.push(['cy.env', keys, opts]);
+        return chain({ MY_PW: 's3cret' });
+      },
+      wrap: () => {
+        throw new Error('not used');
+      },
+    };
+    const run = (cy, Cypress) =>
+      new Function('cy', 'Cypress', js + '\nreturn locatraSecret("MY_PW");')(cy, Cypress);
+    expect(run(cy16, {}).value).toBe('s3cret');
+    expect(calls).toEqual([['cy.env', ['MY_PW'], { log: false }]]);
+    const cy14 = { wrap: (v, opts) => (calls.push(['cy.wrap', v, opts]), chain(v)) };
+    expect(run(cy14, { env: (k) => (k === 'MY_PW' ? 'old' : undefined) }).value).toBe('old');
+    expect(calls[1]).toEqual(['cy.wrap', 'old', { log: false }]);
+    expect(run(cy14, { env: () => undefined }).value).toBe('');
+    expect(run({ ...cy16, env: () => chain({}) }, {}).value).toBe('');
+  });
+
+  it('parses in both languages', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'locatra-cysecret-'));
+    try {
+      for (const lang of ['typescript', 'javascript']) {
+        let code = C.testScript([{ action: 'goto', value: 'https://a.example/' }, fill], 'cypress', lang);
+        if (lang === 'typescript') code = stripTypeScriptTypes(code);
+        const file = join(dir, `${lang}.mjs`);
+        writeFileSync(file, code);
+        expect(() => execFileSync(process.execPath, ['--check', file], { stdio: 'pipe' })).not.toThrow();
+      }
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
   });
 });
