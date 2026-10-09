@@ -1,15 +1,41 @@
 // Locatra – content-locator-engine.js
 // Playwright-oriented locator ranking (loaded before content.js).
+//
+// Every "how many elements does this locator match" answer below is meant to agree
+// with what Playwright itself would resolve — same role table, same accessible-name
+// algorithm, same text/label/attribute matching rules, same shadow-DOM traversal.
+// The reference is Playwright's injected script (roleUtils.ts, selectorEvaluator.ts,
+// injectedScript.ts); functions ported from it say so. A badge that says "unique"
+// while Playwright finds two elements (or none) is worse than no badge at all.
 (function (global) {
   'use strict';
 
   // Escape a string for use as a CSS identifier. Every browser we target has
-  // CSS.escape; the fallback exists so the engine can also be exercised in a
-  // headless DOM that doesn't implement it.
+  // CSS.escape; the fallback (a port of the CSSOM spec algorithm) exists so the
+  // engine can also be exercised in a headless DOM that doesn't implement it.
   function cssEscape(value) {
     const s = String(value == null ? '' : value);
     if (typeof CSS !== 'undefined' && CSS && typeof CSS.escape === 'function') return CSS.escape(s);
-    return s.replace(/([!"#$%&'()*+,./:;<=>?@[\\\]^`{|}~])/g, '\\$1').replace(/^(\d)/, '\\3$1 ');
+    let out = '';
+    for (let i = 0; i < s.length; i++) {
+      const ch = s.charCodeAt(i);
+      const c = s.charAt(i);
+      if (ch === 0) { out += '\uFFFD'; continue; }
+      if ((ch >= 1 && ch <= 31) || ch === 127 ||
+          (i === 0 && ch >= 48 && ch <= 57) ||
+          (i === 1 && ch >= 48 && ch <= 57 && s.charCodeAt(0) === 45)) {
+        out += '\\' + ch.toString(16) + ' ';
+        continue;
+      }
+      if (i === 0 && s.length === 1 && ch === 45) { out += '\\' + c; continue; }
+      if (ch >= 128 || ch === 45 || ch === 95 || (ch >= 48 && ch <= 57) ||
+          (ch >= 65 && ch <= 90) || (ch >= 97 && ch <= 122)) {
+        out += c;
+        continue;
+      }
+      out += '\\' + c;
+    }
+    return out;
   }
 
   // Wrap a value as the source text of a single-quoted JS string literal — i.e. what
@@ -40,6 +66,65 @@
       .replace(/'/g, "\\'") + "'";
   }
 
+  // A value for a double-quoted CSS attribute selector ([attr="..."]). Backslash and
+  // quote need a backslash; control characters (a newline in a data-qa value, say)
+  // are not allowed raw inside a CSS string at all and must become a hex escape
+  // ("\a "), otherwise the selector is invalid and throws in querySelectorAll.
+  function attrSelectorValue(v) {
+    return String(v == null ? '' : v)
+      .replace(/\\/g, '\\\\')
+      .replace(/"/g, '\\"')
+      .replace(/[\x00-\x1f\x7f]/g, (c) => '\\' + c.charCodeAt(0).toString(16) + ' '); // eslint-disable-line no-control-regex
+  }
+
+  // ── Our own DOM artifacts ────────────────────────────────────────────────────
+  // content.js decorates the page (hover outline, Lab highlights, …) with ll-* /
+  // locatra-* classes and data-ll-* attributes. They exist only while the extension
+  // is looking at the page, so a locator built on one is guaranteed to fail in a test.
+  function isOwnArtifactClass(cls) {
+    return /^(ll-|locatra-)/.test(String(cls || ''));
+  }
+  function isOwnArtifactAttr(attr) {
+    return /^data-(ll|locatra)-/.test(String(attr || ''));
+  }
+  const OWN_UI_SELECTOR = '[id^="ll-"], [id^="locatra-"]';
+  function isOwnArtifactId(id) {
+    return /^(ll-|locatra-)/.test(String(id || ''));
+  }
+
+  // ── Per-analysis caches ──────────────────────────────────────────────────────
+  // generateLocators() runs on every pick *and* on every captured click while
+  // recording, and one call resolves many targets that share work (the full element
+  // list, every element's text, accessible names, computed styles). The DOM cannot
+  // change inside one synchronous call, so everything is memoised for exactly the
+  // duration of the call and dropped afterwards. Calls nest safely (a depth counter).
+  let ctx = null;
+  function beginCaches() {
+    if (ctx) { ctx.depth++; return; }
+    ctx = {
+      depth: 1,
+      roots: new Map(), query: new Map(), style: new Map(), hidden: new Map(),
+      hiddenTree: new Map(), role: new Map(), name: new Map(), text: new Map(),
+      before: new Map(), after: new Map(), content: new Map(), nodes: new Map(),
+      labelMap: null
+    };
+  }
+  function endCaches() {
+    if (ctx && --ctx.depth === 0) ctx = null;
+  }
+  function withCaches(fn) {
+    beginCaches();
+    try { return fn(); } finally { endCaches(); }
+  }
+  function cached(bucket, key, compute) {
+    if (!ctx) return compute();
+    const m = ctx[bucket];
+    if (m.has(key)) return m.get(key);
+    const v = compute();
+    m.set(key, v);
+    return v;
+  }
+
   // ── Shadow-DOM-piercing query ────────────────────────────────────────────────
   // document.querySelectorAll (and root.querySelectorAll) never descends into shadow
   // roots. Every place that needs "every matching element on the page" — uniqueness
@@ -47,151 +132,793 @@
   // inside an open shadow root is actually found instead of silently producing zero
   // matches (or a false "unique") for pages built with web components.
   //
-  // Each level uses one native querySelectorAll('*') call (fast, unbounded — same
-  // cost as before for the common case with no shadow DOM at all) and only recurses
-  // into shadow roots discovered among those elements. Recursion is guarded by a cap
-  // on shadow roots visited, not on light-DOM node count, so an ordinary large flat
-  // page costs nothing extra while a pathological chain of nested shadow roots can't
-  // blow the stack or hang the tab.
-  const DEEP_QUERY_SHADOW_ROOT_CAP = 500;
-  function deepQueryAll(selector, root, cap) {
-    const scope0 = root || document;
-    if (selector !== '*') {
-      try { scope0.querySelectorAll(selector); } catch (e) { return null; } // invalid selector
-    }
+  // Order matches Playwright's own pierce-shadow query (selectorEvaluator _queryCSS),
+  // so .first()/.nth(i) agree with it: a root's own matches first, then the scope's
+  // own shadow root (when the scope is a host), then each shadow root found in that
+  // root, in document order of its host — recursively. (Verified in Chromium: for
+  // <button/> <host>#shadow<button/></host> <button/>, Playwright returns the two
+  // light buttons before the shadow one.)
+  //
+  // Each root is searched with one native querySelectorAll(selector). Discovering the
+  // shadow roots needs one querySelectorAll('*') per root, which is memoised per
+  // analysis. Only nesting *depth* is guarded (against a pathological chain blowing
+  // the stack); there is no cap on how many roots or elements are visited, because a
+  // cap silently turns "3 matches" into "unique" or "not found".
+  const DEEP_QUERY_MAX_DEPTH = 256;
+  function rootsUnder(scope) {
+    return cached('roots', scope, () => {
+      const out = [];
+      (function collect(root, depth) {
+        out.push(root);
+        if (depth >= DEEP_QUERY_MAX_DEPTH) return;
+        if (root.shadowRoot) collect(root.shadowRoot, depth + 1);
+        let all;
+        try { all = root.querySelectorAll('*'); } catch (e) { return; }
+        for (let i = 0; i < all.length; i++) {
+          const sr = all[i].shadowRoot;
+          if (sr) collect(sr, depth + 1);
+        }
+      })(scope, 0);
+      return out;
+    });
+  }
+
+  function deepQueryAllUncapped(selector, scope) {
+    let perScope = ctx ? ctx.query.get(scope) : null;
+    if (perScope && perScope.has(selector)) return perScope.get(selector);
+    try { scope.querySelectorAll(selector); } catch (e) { return null; } // invalid selector
     const out = [];
-    const max = typeof cap === 'number' ? cap : Infinity;
-    let shadowRootsVisited = 0;
-    (function walk(scope) {
-      if (out.length >= max) return;
-      let all;
-      try { all = scope.querySelectorAll('*'); } catch (e) { return; }
-      for (let i = 0; i < all.length && out.length < max; i++) {
-        const el = all[i];
-        if (selector === '*' || el.matches(selector)) out.push(el);
-      }
-      for (let i = 0; i < all.length && shadowRootsVisited < DEEP_QUERY_SHADOW_ROOT_CAP; i++) {
-        if (all[i].shadowRoot) { shadowRootsVisited++; walk(all[i].shadowRoot); }
-      }
-    })(scope0);
+    const roots = rootsUnder(scope);
+    for (let r = 0; r < roots.length; r++) {
+      let found;
+      try { found = roots[r].querySelectorAll(selector); } catch (e) { continue; }
+      for (let i = 0; i < found.length; i++) out.push(found[i]);
+    }
+    if (ctx) {
+      if (!perScope) { perScope = new Map(); ctx.query.set(scope, perScope); }
+      perScope.set(selector, out);
+    }
     return out;
   }
 
-  // ── ARIA role lookup ───────────────────────────────────────────────────────
+  // Public signature kept: (selector, root?, cap?) → Element[] | null (invalid selector).
+  function deepQueryAll(selector, root, cap) {
+    const all = deepQueryAllUncapped(selector, root || document);
+    if (!all) return null;
+    const max = typeof cap === 'number' ? cap : Infinity;
+    return all.length > max ? all.slice(0, max) : all.slice();
+  }
+
+  // Composed-tree helpers (cross shadow boundaries the way Playwright does).
+  function parentElementOrShadowHost(el) {
+    if (el.parentElement) return el.parentElement;
+    const p = el.parentNode;
+    if (p && p.nodeType === 11 && p.host) return p.host;
+    return null;
+  }
+  function composedContains(ancestor, node) {
+    let n = node;
+    while (n) {
+      if (n === ancestor) return true;
+      n = n.nodeType === 11 ? (n.host || null) : n.parentNode;
+    }
+    return false;
+  }
+  function closestCrossShadow(el, selector) {
+    let e = el;
+    while (e) {
+      const c = e.closest(selector);
+      if (c) return c;
+      const root = e.getRootNode ? e.getRootNode() : null;
+      e = root && root.nodeType === 11 ? root.host : null;
+    }
+    return null;
+  }
+  function tagOf(el) {
+    return typeof el.tagName === 'string' ? el.tagName.toUpperCase() : '';
+  }
+
+  // ── Visibility for the accessibility tree (port of isElementHiddenForAria) ──
+  // getByRole() skips hidden elements by default, so a count that includes them
+  // reports "2 matches" where Playwright finds one. Uses computed style only (no
+  // layout), which also works in jsdom.
+  const IS_JSDOM = typeof navigator !== 'undefined' && /jsdom/i.test(navigator.userAgent || '');
+  function computedStyle(el, pseudo) {
+    const bucket = pseudo === '::before' ? 'before' : pseudo === '::after' ? 'after' : 'style';
+    return cached(bucket, el, () => {
+      if (pseudo && IS_JSDOM) return null; // not implemented there (and noisy)
+      try {
+        const view = el.ownerDocument && el.ownerDocument.defaultView;
+        return view ? view.getComputedStyle(el, pseudo || null) : null;
+      } catch (e) { return null; }
+    });
+  }
+  function isIgnoredForAria(el) {
+    const t = tagOf(el);
+    return t === 'STYLE' || t === 'SCRIPT' || t === 'NOSCRIPT' || t === 'TEMPLATE';
+  }
+  function isStyleVisibilityVisible(el, style) {
+    if (!style) return true;
+    if (typeof el.checkVisibility === 'function') {
+      try { if (!el.checkVisibility()) return false; } catch (e) {}
+    } else {
+      const ds = el.closest('details,summary');
+      if (ds !== el && ds && tagOf(ds) === 'DETAILS' && !ds.open) return false;
+    }
+    return style.visibility === 'visible' || !style.visibility;
+  }
+  function belongsToHiddenTree(el) {
+    return cached('hiddenTree', el, () => {
+      const parent = el.parentElement;
+      if (parent && parent.shadowRoot && 'assignedSlot' in el && !el.assignedSlot) return true;
+      const style = computedStyle(el);
+      if (style && style.display === 'none') return true;
+      if ((el.getAttribute('aria-hidden') || '').toLowerCase() === 'true') return true;
+      const up = parentElementOrShadowHost(el);
+      return up ? belongsToHiddenTree(up) : false;
+    });
+  }
+  function isHiddenForAria(el) {
+    return cached('hidden', el, () => {
+      if (isIgnoredForAria(el)) return true;
+      const style = computedStyle(el);
+      const isSlot = el.nodeName === 'SLOT';
+      if (style && style.display === 'contents' && !isSlot) {
+        for (let c = el.firstChild; c; c = c.nextSibling) {
+          if (c.nodeType === 1 && !isHiddenForAria(c)) return false;
+          if (c.nodeType === 3 && /\S/.test(c.nodeValue || '')) return false;
+        }
+        return true;
+      }
+      const optionInSelect = el.nodeName === 'OPTION' && !!el.closest('select');
+      if (!optionInSelect && !isSlot && !isStyleVisibilityVisible(el, style)) return true;
+      return belongsToHiddenTree(el);
+    });
+  }
+
+  // ── ARIA role lookup (port of Playwright's getAriaRole) ─────────────────────
+  const VALID_ROLES = new Set(('alert alertdialog application article banner blockquote button caption cell ' +
+    'checkbox code columnheader combobox complementary contentinfo definition deletion dialog directory ' +
+    'document emphasis feed figure form generic grid gridcell group heading img insertion link list ' +
+    'listbox listitem log main mark marquee math meter menu menubar menuitem menuitemcheckbox ' +
+    'menuitemradio navigation none note option paragraph presentation progressbar radio radiogroup ' +
+    'region row rowgroup rowheader scrollbar search searchbox separator slider spinbutton status strong ' +
+    'subscript superscript switch tab table tablist tabpanel term textbox time timer toolbar tooltip ' +
+    'tree treegrid treeitem').split(' '));
+
+  const ANCESTOR_PREVENTING_LANDMARK = 'article:not([role]), aside:not([role]), main:not([role]), ' +
+    'nav:not([role]), section:not([role]), [role=article], [role=complementary], [role=main], ' +
+    '[role=navigation], [role=region]';
+
+  const GLOBAL_ARIA_ATTRS = [
+    ['aria-atomic'], ['aria-busy'], ['aria-controls'], ['aria-current'], ['aria-describedby'],
+    ['aria-details'], ['aria-dropeffect'], ['aria-flowto'], ['aria-grabbed'], ['aria-hidden'],
+    ['aria-keyshortcuts'],
+    ['aria-label', ['caption', 'code', 'deletion', 'emphasis', 'generic', 'insertion', 'paragraph', 'presentation', 'strong', 'subscript', 'superscript']],
+    ['aria-labelledby', ['caption', 'code', 'deletion', 'emphasis', 'generic', 'insertion', 'paragraph', 'presentation', 'strong', 'subscript', 'superscript']],
+    ['aria-live'], ['aria-owns'], ['aria-relevant'], ['aria-roledescription', ['generic']]
+  ];
+  function hasGlobalAriaAttribute(el, forRole) {
+    return GLOBAL_ARIA_ATTRS.some(([attr, prohibited]) =>
+      !(prohibited && prohibited.includes(forRole || '')) && el.hasAttribute(attr));
+  }
+  function hasTabIndex(el) {
+    return !Number.isNaN(Number(String(el.getAttribute('tabindex'))));
+  }
+  function isNativelyDisabled(el) {
+    if (!['BUTTON', 'INPUT', 'SELECT', 'TEXTAREA', 'OPTION', 'OPTGROUP'].includes(tagOf(el))) return false;
+    try { return el.matches(':disabled'); } catch (e) { return el.hasAttribute('disabled'); }
+  }
+  function isFocusable(el) {
+    if (isNativelyDisabled(el)) return false;
+    const t = tagOf(el);
+    let native = false;
+    if (['BUTTON', 'DETAILS', 'SELECT', 'TEXTAREA'].includes(t)) native = true;
+    else if (t === 'A' || t === 'AREA') native = el.hasAttribute('href');
+    else if (t === 'INPUT') native = !el.hidden;
+    return native || hasTabIndex(el);
+  }
+  function idRefs(el, ref) {
+    if (!ref) return [];
+    const root = el.getRootNode ? el.getRootNode() : null;
+    if (!root || (root.nodeType !== 9 && root.nodeType !== 11)) return [];
+    const out = [];
+    for (const id of ref.split(' ').filter(Boolean)) {
+      let found = null;
+      try {
+        found = typeof root.getElementById === 'function'
+          ? root.getElementById(id)
+          : root.querySelector('#' + cssEscape(id));
+      } catch (e) {}
+      if (found && !out.includes(found)) out.push(found);
+    }
+    return out;
+  }
+
+  const INPUT_TYPE_TO_ROLE = {
+    button: 'button', checkbox: 'checkbox', image: 'button', number: 'spinbutton',
+    radio: 'radio', range: 'slider', reset: 'button', submit: 'button'
+  };
+  function headingFn() { return 'heading'; }
   const IMPLICIT_ROLES = {
-    a: (el) => el.href ? 'link' : null,
-    button: () => 'button',
-    h1: () => 'heading', h2: () => 'heading', h3: () => 'heading',
-    h4: () => 'heading', h5: () => 'heading', h6: () => 'heading',
-    img: (el) => (el.alt !== undefined ? 'img' : null),
-    input: (el) => {
-      const t = (el.type || 'text').toLowerCase();
-      const map = {
-        text: 'textbox', email: 'textbox', password: 'textbox',
-        search: 'searchbox', tel: 'textbox', url: 'textbox',
-        number: 'spinbutton', checkbox: 'checkbox', radio: 'radio',
-        submit: 'button', reset: 'button', button: 'button',
-        range: 'slider',
-      };
-      return map[t] || null;
+    A: (e) => e.hasAttribute('href') ? 'link' : null,
+    AREA: (e) => e.hasAttribute('href') ? 'link' : null,
+    ARTICLE: () => 'article',
+    ASIDE: () => 'complementary',
+    BLOCKQUOTE: () => 'blockquote',
+    BUTTON: () => 'button',
+    CAPTION: () => 'caption',
+    CODE: () => 'code',
+    DATALIST: () => 'listbox',
+    DD: () => 'definition',
+    DEL: () => 'deletion',
+    DETAILS: () => 'group',
+    DFN: () => 'term',
+    DIALOG: () => 'dialog',
+    DT: () => 'term',
+    EM: () => 'emphasis',
+    FIELDSET: () => 'group',
+    FIGURE: () => 'figure',
+    // <header>/<footer> are only landmarks at page level; nested in sectioning
+    // content they are generic (no role).
+    FOOTER: (e) => closestCrossShadow(e, ANCESTOR_PREVENTING_LANDMARK) ? null : 'contentinfo',
+    // <form>/<section> are landmarks only when they have an explicit name.
+    FORM: (e) => (e.hasAttribute('aria-label') || e.hasAttribute('aria-labelledby')) ? 'form' : null,
+    H1: headingFn, H2: headingFn, H3: headingFn, H4: headingFn, H5: headingFn, H6: headingFn,
+    HEADER: (e) => closestCrossShadow(e, ANCESTOR_PREVENTING_LANDMARK) ? null : 'banner',
+    HR: () => 'separator',
+    HTML: () => 'document',
+    // alt="" marks a decorative image (role presentation) unless something else makes
+    // it interesting. Testing `el.alt !== undefined` was always true.
+    IMG: (e) => (e.getAttribute('alt') === '' && !e.getAttribute('title') && !hasGlobalAriaAttribute(e) && !hasTabIndex(e)) ? 'presentation' : 'img',
+    INPUT: (e) => {
+      const type = String(e.type || '').toLowerCase();
+      if (type === 'search') return e.hasAttribute('list') ? 'combobox' : 'searchbox';
+      if (['email', 'tel', 'text', 'url', ''].includes(type)) {
+        const list = idRefs(e, e.getAttribute('list'))[0];
+        return list && tagOf(list) === 'DATALIST' ? 'combobox' : 'textbox';
+      }
+      if (type === 'hidden') return null;
+      if (type === 'file') return 'button';
+      return INPUT_TYPE_TO_ROLE[type] || 'textbox';
     },
-    select: () => 'combobox',
-    textarea: () => 'textbox',
-    nav: () => 'navigation',
-    main: () => 'main',
-    table: () => 'table',
-    tr: () => 'row',
-    td: () => 'cell',
-    th: () => 'columnheader',
-    ul: () => 'list',
-    ol: () => 'list',
-    li: () => 'listitem',
-    dialog: () => 'dialog',
-    form: () => 'form',
-    article: () => 'article',
-    aside: () => 'complementary',
-    header: () => 'banner',
-    footer: () => 'contentinfo',
-    section: () => 'region',
-    menuitem: () => 'menuitem',
+    INS: () => 'insertion',
+    LI: () => 'listitem',
+    MAIN: () => 'main',
+    MARK: () => 'mark',
+    MATH: () => 'math',
+    MENU: () => 'list',
+    METER: () => 'meter',
+    NAV: () => 'navigation',
+    OL: () => 'list',
+    OPTGROUP: () => 'group',
+    OPTION: () => 'option',
+    OUTPUT: () => 'status',
+    P: () => 'paragraph',
+    PROGRESS: () => 'progressbar',
+    SEARCH: () => 'search',
+    SECTION: (e) => (e.hasAttribute('aria-label') || e.hasAttribute('aria-labelledby')) ? 'region' : null,
+    SELECT: (e) => (e.hasAttribute('multiple') || e.size > 1) ? 'listbox' : 'combobox',
+    STRONG: () => 'strong',
+    SUB: () => 'subscript',
+    SUP: () => 'superscript',
+    SVG: () => 'img',
+    TABLE: () => 'table',
+    TBODY: () => 'rowgroup',
+    TD: (e) => {
+      const table = closestCrossShadow(e, 'table');
+      const r = table ? getExplicitRole(table) : '';
+      return (r === 'grid' || r === 'treegrid') ? 'gridcell' : 'cell';
+    },
+    TEXTAREA: () => 'textbox',
+    TFOOT: () => 'rowgroup',
+    TH: (e) => {
+      const scope = e.getAttribute('scope');
+      if (scope === 'col' || scope === 'colgroup') return 'columnheader';
+      if (scope === 'row' || scope === 'rowgroup') return 'rowheader';
+      const next = e.nextElementSibling;
+      const prev = e.previousElementSibling;
+      const row = e.parentElement && tagOf(e.parentElement) === 'TR' ? e.parentElement : null;
+      if (!next && !prev) {
+        if (row) {
+          const table = closestCrossShadow(row, 'table');
+          if (table && table.rows && table.rows.length <= 1) return null;
+        }
+        return 'columnheader';
+      }
+      const isTh = (x) => !!x && tagOf(x) === 'TH';
+      const isFilledTd = (x) => !!x && tagOf(x) === 'TD' && !!((x.textContent || '').trim() || x.children.length > 0);
+      if (isTh(next) && isTh(prev)) return 'columnheader';
+      if (isFilledTd(next) || isFilledTd(prev)) return 'rowheader';
+      return 'columnheader';
+    },
+    THEAD: () => 'rowgroup',
+    TIME: () => 'time',
+    TR: () => 'row',
+    UL: () => 'list'
   };
 
+  // Which tags can carry each implicit role, so counting a role only has to look at
+  // [role] elements plus those tags instead of computing the role of every node.
+  // Roles not listed (none/presentation can be inherited by many tags) scan '*'.
+  const ROLE_CANDIDATE_TAGS = {
+    link: 'a,area', button: 'button,input', heading: 'h1,h2,h3,h4,h5,h6',
+    textbox: 'input,textarea', searchbox: 'input', combobox: 'input,select',
+    listbox: 'select,datalist', checkbox: 'input', radio: 'input', spinbutton: 'input',
+    slider: 'input', img: 'img,svg', article: 'article', complementary: 'aside',
+    blockquote: 'blockquote', caption: 'caption', code: 'code', definition: 'dd',
+    deletion: 'del', group: 'details,fieldset,optgroup', term: 'dfn,dt', dialog: 'dialog',
+    emphasis: 'em', figure: 'figure', contentinfo: 'footer', form: 'form', banner: 'header',
+    separator: 'hr', document: 'html', insertion: 'ins', listitem: 'li', main: 'main',
+    mark: 'mark', math: 'math', list: 'menu,ol,ul', meter: 'meter', navigation: 'nav',
+    option: 'option', status: 'output', paragraph: 'p', progressbar: 'progress',
+    search: 'search', region: 'section', strong: 'strong', subscript: 'sub',
+    superscript: 'sup', table: 'table', rowgroup: 'tbody,tfoot,thead', cell: 'td',
+    gridcell: 'td', columnheader: 'th', rowheader: 'th', time: 'time', row: 'tr'
+  };
+  const PRESENTATION_INHERITANCE_PARENTS = {
+    DD: ['DL', 'DIV'], DIV: ['DL'], DT: ['DL', 'DIV'], LI: ['OL', 'UL'], TBODY: ['TABLE'],
+    TD: ['TR'], TFOOT: ['TABLE'], TH: ['TR'], THEAD: ['TABLE'], TR: ['THEAD', 'TBODY', 'TFOOT', 'TABLE']
+  };
+
+  // The first *valid* token wins (role="foo button" is a button, as in Playwright and
+  // browsers); an unknown first token used to become the role.
+  function getExplicitRole(el) {
+    const raw = el.getAttribute && el.getAttribute('role');
+    if (!raw) return null;
+    return raw.split(' ').map(r => r.trim()).find(r => VALID_ROLES.has(r)) || null;
+  }
+  function getImplicitRoleOwn(el) {
+    const fn = IMPLICIT_ROLES[tagOf(el)];
+    return (fn && fn(el)) || null;
+  }
+  function getImplicitRole(el) {
+    const implicit = getImplicitRoleOwn(el);
+    if (!implicit) return null;
+    let ancestor = el;
+    while (ancestor) {
+      const parent = parentElementOrShadowHost(ancestor);
+      const parents = PRESENTATION_INHERITANCE_PARENTS[tagOf(ancestor)];
+      if (!parents || !parent || !parents.includes(tagOf(parent))) break;
+      const pr = getExplicitRole(parent);
+      if ((pr === 'none' || pr === 'presentation') && !(hasGlobalAriaAttribute(parent, pr) || isFocusable(parent))) return pr;
+      ancestor = parent;
+    }
+    return implicit;
+  }
   function getRole(el) {
-    const explicit = el.getAttribute('role');
-    if (explicit) return explicit.trim().split(' ')[0];
-    const tag = el.tagName.toLowerCase();
-    const fn = IMPLICIT_ROLES[tag];
-    return fn ? fn(el) : null;
+    if (!el || el.nodeType !== 1) return null;
+    return cached('role', el, () => {
+      const explicit = getExplicitRole(el);
+      if (!explicit) return getImplicitRole(el);
+      if (explicit === 'none' || explicit === 'presentation') {
+        const implicit = getImplicitRole(el);
+        if (hasGlobalAriaAttribute(el, implicit) || isFocusable(el)) return implicit;
+      }
+      return explicit;
+    });
   }
 
+  // Port of Playwright's getAriaLevel: native <hN> first, then aria-level.
   function getHeadingLevel(el) {
-    const m = el.tagName.match(/^H([1-6])$/i);
-    return m ? parseInt(m[1]) : null;
-  }
-
-  // ── Accessible name computation ────────────────────────────────────────────
-  // IDREF attributes (aria-labelledby, label[for]) are scoped to the element's own
-  // root, not the document: inside a shadow root, document.getElementById can never
-  // see the label, so a properly-labelled web component looked unnamed.
-  function scopeOf(el) {
-    const root = el.getRootNode ? el.getRootNode() : document;
-    return root && typeof root.getElementById === 'function' ? root : document;
-  }
-
-  function getAccessibleName(el) {
-    const ariaLabel = el.getAttribute('aria-label');
-    if (ariaLabel && ariaLabel.trim()) return ariaLabel.trim();
-
-    const scope = scopeOf(el);
-    const labelledBy = el.getAttribute('aria-labelledby');
-    if (labelledBy) {
-      const names = labelledBy.trim().split(/\s+/)
-        .map(id => scope.getElementById(id))
-        .filter(Boolean)
-        .map(e => e.textContent.trim())
-        .filter(Boolean);
-      if (names.length) return names.join(' ');
+    const m = /^H([1-6])$/.exec(tagOf(el));
+    if (m) return parseInt(m[1], 10);
+    if (['heading', 'listitem', 'row', 'treeitem'].includes(getRole(el) || '')) {
+      const attr = el.getAttribute('aria-level');
+      const v = attr === null ? NaN : Number(attr);
+      if (Number.isInteger(v) && v >= 1) return v;
     }
-
-    const tag = el.tagName.toLowerCase();
-    if (['input', 'select', 'textarea'].includes(tag)) {
-      if (el.id) {
-        const label = scope.querySelector(`label[for="${cssEscape(el.id)}"]`);
-        if (label) return label.textContent.trim();
-      }
-      const parentLabel = el.closest('label');
-      if (parentLabel) {
-        const clone = parentLabel.cloneNode(true);
-        clone.querySelectorAll('input,select,textarea').forEach(e => e.remove());
-        const t = clone.textContent.trim();
-        if (t) return t;
-      }
-    }
-
-    const textRoles = ['button', 'link', 'heading', 'menuitem', 'tab', 'option'];
-    const role = getRole(el);
-    if (role && textRoles.includes(role)) {
-      const t = (el.innerText || el.textContent || '').trim();
-      if (t) return t.slice(0, 80);
-    }
-
-    const title = el.getAttribute('title');
-    if (title && title.trim()) return title.trim();
-
-    if (tag === 'img') {
-      const alt = el.getAttribute('alt');
-      if (alt && alt.trim()) return alt.trim();
-    }
-
-    const ph = el.getAttribute('placeholder');
-    if (ph && ph.trim()) return ph.trim();
-
-    if (tag === 'input' && ['submit', 'button'].includes((el.type || '').toLowerCase())) {
-      const v = el.value;
-      if (v && v.trim()) return v.trim();
-    }
-
     return null;
+  }
+
+  // ── Text normalisation ───────────────────────────────────────────────────────
+  // Playwright's normalizeWhiteSpace — applied to page text *and* to the needle.
+  function normalizeWS(s) {
+    return String(s == null ? '' : s).replace(/[\u200b\u00ad]/g, '').trim().replace(/\s+/g, ' ');
+  }
+
+  // Shorten a long string to a word-bounded prefix. Only usable with substring
+  // (non-exact) matching — a truncated value can never match exactly.
+  function snippet(text, max) {
+    if (text.length <= max) return { value: text, truncated: false };
+    let cut = text.slice(0, max);
+    const sp = cut.lastIndexOf(' ');
+    if (sp > max / 2) cut = cut.slice(0, sp);
+    return { value: cut.trim(), truncated: true };
+  }
+
+  // ── Element text (port of Playwright's elementText) ─────────────────────────
+  // textContent-like (no layout, hidden text included — exactly what getByText
+  // sees), with shadow-root content appended and <input type=submit|button> read
+  // from its value. Cached per analysis.
+  function shouldSkipForText(node) {
+    const n = node.nodeName;
+    if (n === 'SCRIPT' || n === 'NOSCRIPT' || n === 'STYLE') return true;
+    const d = node.ownerDocument;
+    return !!(d && d.head && d.head.contains(node));
+  }
+  function elementText(root) {
+    return cached('text', root, () => {
+      const value = { full: '', normalized: '', lower: null };
+      if (shouldSkipForText(root)) return value;
+      if (root.nodeName === 'INPUT' && (root.type === 'submit' || root.type === 'button')) {
+        value.full = root.value || '';
+      } else {
+        for (let child = root.firstChild; child; child = child.nextSibling) {
+          if (child.nodeType === 3) value.full += child.nodeValue || '';
+          else if (child.nodeType === 1) value.full += elementText(child).full;
+        }
+        if (root.shadowRoot) value.full += elementText(root.shadowRoot).full;
+      }
+      value.normalized = normalizeWS(value.full);
+      return value;
+    });
+  }
+  function lowerOf(t) {
+    if (t.lower == null) t.lower = t.normalized.toLowerCase();
+    return t.lower;
+  }
+  // Playwright's createTextMatcher for internal:text / internal:label: exact → full
+  // normalized equality (case-sensitive); default → case-insensitive substring.
+  function textMatcher(value, exact) {
+    const needle = normalizeWS(value);
+    if (exact) return (t) => t.normalized === needle;
+    const lower = needle.toLowerCase();
+    return (t) => lowerOf(t).includes(lower);
+  }
+  // 'none' | 'self' | 'selfAndChildren' — getByText only returns 'self' elements:
+  // the smallest element containing the text, never an ancestor of a match.
+  function elementMatchesText(el, matcher) {
+    if (shouldSkipForText(el)) return 'none';
+    if (!matcher(elementText(el))) return 'none';
+    for (let child = el.firstChild; child; child = child.nextSibling) {
+      if (child.nodeType === 1 && matcher(elementText(child))) return 'selfAndChildren';
+    }
+    if (el.shadowRoot && matcher(elementText(el.shadowRoot))) return 'selfAndChildren';
+    return 'self';
+  }
+
+  // ── Labels ──────────────────────────────────────────────────────────────────
+  const LABELABLE = new Set(['BUTTON', 'INPUT', 'METER', 'OUTPUT', 'PROGRESS', 'SELECT', 'TEXTAREA']);
+  function labelControl(label) {
+    if ('control' in label) return label.control;
+    const f = label.getAttribute('for');
+    if (f) {
+      const root = label.getRootNode();
+      const c = root && typeof root.getElementById === 'function' ? root.getElementById(f) : null;
+      return c && LABELABLE.has(tagOf(c)) && !(tagOf(c) === 'INPUT' && c.type === 'hidden') ? c : null;
+    }
+    return label.querySelector('button, input:not([type=hidden]), meter, output, progress, select, textarea');
+  }
+  function buildLabelMap() {
+    if (!ctx.labelMap) {
+      ctx.labelMap = new Map();
+      const labels = deepQueryAllUncapped('label', document) || [];
+      for (const label of labels) {
+        let c = null;
+        try { c = labelControl(label); } catch (e) {}
+        if (!c) continue;
+        if (!ctx.labelMap.has(c)) ctx.labelMap.set(c, []);
+        ctx.labelMap.get(c).push(label);
+      }
+    }
+    return ctx.labelMap;
+  }
+  // element.labels walks the tree per control; resolving every label once and
+  // inverting is O(DOM) for the whole analysis instead of O(controls × DOM).
+  function labelsFor(el) {
+    const t = tagOf(el);
+    if (!LABELABLE.has(t) || (t === 'INPUT' && el.type === 'hidden')) return [];
+    if (!ctx) {
+      if (el.labels) return Array.from(el.labels);
+      return [];
+    }
+    let list = buildLabelMap().get(el);
+    // A control outside `document` (detached, another frame) was not indexed.
+    if (!list && el.labels && !el.isConnected) list = Array.from(el.labels);
+    return list || [];
+  }
+  function labelledByElements(el) {
+    const ref = el.getAttribute('aria-labelledby');
+    if (ref === null) return null;
+    const refs = idRefs(el, ref);
+    return refs.length ? refs : null;
+  }
+  // Port of Playwright's getElementLabels — exactly what getByLabel() matches
+  // against: aria-labelledby targets, else aria-label, else associated <label>s.
+  // Any element qualifies (a <button aria-label="Close"> is found by getByLabel).
+  function labelTexts(el) {
+    const lb = labelledByElements(el);
+    if (lb) return lb.map(l => elementText(l));
+    const al = el.getAttribute('aria-label');
+    if (al !== null && al.trim()) return [{ full: al, normalized: normalizeWS(al), lower: null }];
+    return labelsFor(el).map(l => elementText(l));
+  }
+
+  // ── Accessible name computation (port of Playwright's getElementAccessibleName) ──
+  // aria-labelledby beats aria-label, which beats native labelling (label, alt,
+  // value…), then name-from-content for roles that allow it, then title — the
+  // accname order Playwright implements. Descendant alt/aria-label/control values
+  // contribute to name-from-content.
+  function allowsNameFromContent(role, targetDescendant) {
+    const always = ['button', 'cell', 'checkbox', 'columnheader', 'gridcell', 'heading', 'link', 'menuitem',
+      'menuitemcheckbox', 'menuitemradio', 'option', 'radio', 'row', 'rowheader', 'switch', 'tab',
+      'tooltip', 'treeitem'].includes(role);
+    const descendant = targetDescendant && ['', 'caption', 'code', 'contentinfo', 'definition', 'deletion',
+      'emphasis', 'insertion', 'list', 'listitem', 'mark', 'none', 'paragraph', 'presentation', 'region',
+      'row', 'rowgroup', 'section', 'strong', 'subscript', 'superscript', 'table', 'term', 'time'].includes(role);
+    return always || descendant;
+  }
+  const NAME_PROHIBITED = new Set(['caption', 'code', 'definition', 'deletion', 'emphasis', 'generic',
+    'insertion', 'mark', 'paragraph', 'presentation', 'strong', 'subscript', 'suggestion', 'superscript',
+    'term', 'time']);
+
+  // CSS generated content (icon fonts, "*" required markers) is part of the name.
+  function parseCSSContent(el, value, isPseudo) {
+    const toks = [];
+    const s = String(value);
+    let i = 0;
+    while (i < s.length) {
+      const c = s[i];
+      if (/\s/.test(c)) { i++; continue; }
+      if (c === '"' || c === "'") {
+        let j = i + 1;
+        let out = '';
+        while (j < s.length && s[j] !== c) {
+          if (s[j] === '\\') {
+            const m = /^\\([0-9a-fA-F]{1,6})\s?/.exec(s.slice(j));
+            if (m) { out += String.fromCodePoint(parseInt(m[1], 16)); j += m[0].length; continue; }
+            out += s[j + 1] || '';
+            j += 2;
+            continue;
+          }
+          out += s[j++];
+        }
+        toks.push({ t: 'str', v: out });
+        i = j + 1;
+        continue;
+      }
+      if (c === '/') { toks.push({ t: 'delim' }); i++; continue; }
+      const attr = /^attr\(\s*([-\w]+)\s*\)/i.exec(s.slice(i));
+      if (attr) { toks.push({ t: 'attr', v: attr[1] }); i += attr[0].length; continue; }
+      const fn = /^[-\w]+\([^)]*\)/.exec(s.slice(i));
+      const other = fn || /^[^\s/"']+/.exec(s.slice(i));
+      toks.push({ t: 'other' });
+      i += other ? other[0].length : 1;
+    }
+    let use = toks;
+    const d = toks.findIndex(t => t.t === 'delim');
+    if (d !== -1) use = toks.slice(d + 1);
+    else if (!isPseudo) return undefined;
+    let acc = '';
+    for (const t of use) {
+      if (t.t === 'str') acc += t.v;
+      else if (t.t === 'attr') acc += el.getAttribute(t.v) || '';
+      else return undefined;
+    }
+    return acc;
+  }
+  function cssContent(el, pseudo) {
+    const bucket = 'content';
+    const key = pseudo ? null : el;
+    const compute = () => {
+      const style = computedStyle(el, pseudo);
+      let content;
+      if (style) {
+        const v = style.content;
+        if (v && v !== 'none' && v !== 'normal' && style.display !== 'none' && style.visibility !== 'hidden') {
+          try { content = parseCSSContent(el, v, !!pseudo); } catch (e) {}
+        }
+      }
+      if (pseudo && content !== undefined && (style.display || 'inline') !== 'inline') content = ' ' + content + ' ';
+      return content;
+    };
+    return key ? cached(bucket, key, compute) : compute();
+  }
+
+  function nameFromLabels(labels, o) {
+    return labels.map(label => textAlternative(label, {
+      visited: o.visited, inLabel: { hidden: isHiddenForAria(label) }
+    })).filter(Boolean).join(' ');
+  }
+
+  function textAlternative(element, o) {
+    if (o.visited.has(element)) return '';
+    const childO = Object.assign({}, o, { inTarget: o.inTarget === 'self' ? 'descendant' : o.inTarget });
+    const hiddenTraversal = !!((o.inLabelledBy && o.inLabelledBy.hidden) || (o.inNative && o.inNative.hidden) ||
+      (o.inLabel && o.inLabel.hidden));
+    if (isIgnoredForAria(element) || (!hiddenTraversal && isHiddenForAria(element))) {
+      o.visited.add(element);
+      return '';
+    }
+    const labelledBy = labelledByElements(element);
+    if (!o.inLabelledBy) {
+      const n = (labelledBy || []).map(ref => textAlternative(ref, {
+        visited: o.visited, inLabelledBy: { hidden: isHiddenForAria(ref) }
+      })).join(' ');
+      if (n) return n;
+    }
+    const role = getRole(element) || '';
+    const tag = tagOf(element);
+
+    // Embedded controls contribute their value, not their label.
+    if (o.inLabel || o.inLabelledBy || o.inTarget === 'descendant') {
+      if (!(labelledBy || []).includes(element)) {
+        if (role === 'textbox') {
+          o.visited.add(element);
+          if (tag === 'INPUT' || tag === 'TEXTAREA') return element.value || '';
+          return element.textContent || '';
+        }
+        if (role === 'combobox' || role === 'listbox') {
+          o.visited.add(element);
+          let selected;
+          if (tag === 'SELECT') {
+            selected = Array.from(element.selectedOptions || []);
+            if (!selected.length && element.options && element.options.length) selected.push(element.options[0]);
+          } else {
+            const listbox = role === 'combobox'
+              ? Array.from(element.querySelectorAll('*')).find(e => getRole(e) === 'listbox')
+              : element;
+            selected = listbox
+              ? Array.from(listbox.querySelectorAll('[aria-selected="true"]')).filter(e => getRole(e) === 'option')
+              : [];
+          }
+          if (!selected.length && tag === 'INPUT') return element.value || '';
+          return selected.map(opt => textAlternative(opt, childO)).join(' ');
+        }
+        if (['progressbar', 'scrollbar', 'slider', 'spinbutton', 'meter'].includes(role)) {
+          o.visited.add(element);
+          if (element.hasAttribute('aria-valuetext')) return element.getAttribute('aria-valuetext') || '';
+          if (element.hasAttribute('aria-valuenow')) return element.getAttribute('aria-valuenow') || '';
+          return element.getAttribute('value') || '';
+        }
+        if (role === 'menu') { o.visited.add(element); return ''; }
+      }
+    }
+
+    const ariaLabel = element.getAttribute('aria-label') || '';
+    if (ariaLabel.trim()) { o.visited.add(element); return ariaLabel; }
+
+    if (role !== 'presentation' && role !== 'none') {
+      const type = tag === 'INPUT' ? String(element.type || '').toLowerCase() : '';
+      // <input type=submit|button|reset>: value before title.
+      if (tag === 'INPUT' && ['button', 'submit', 'reset'].includes(type)) {
+        o.visited.add(element);
+        const value = element.value || '';
+        if (value.trim()) return value;
+        if (type === 'submit') return 'Submit';
+        if (type === 'reset') return 'Reset';
+        return element.getAttribute('title') || '';
+      }
+      if (tag === 'INPUT' && type === 'file') {
+        o.visited.add(element);
+        const labels = labelsFor(element);
+        if (labels.length && !o.inLabelledBy) return nameFromLabels(labels, o);
+        return 'Choose File';
+      }
+      if (tag === 'INPUT' && type === 'image') {
+        o.visited.add(element);
+        const labels = labelsFor(element);
+        if (labels.length && !o.inLabelledBy) return nameFromLabels(labels, o);
+        const alt = element.getAttribute('alt') || '';
+        if (alt.trim()) return alt;
+        const title = element.getAttribute('title') || '';
+        if (title.trim()) return title;
+        return 'Submit';
+      }
+      if (!labelledBy && tag === 'BUTTON') {
+        o.visited.add(element);
+        const labels = labelsFor(element);
+        if (labels.length) return nameFromLabels(labels, o);
+      }
+      if (!labelledBy && tag === 'OUTPUT') {
+        o.visited.add(element);
+        const labels = labelsFor(element);
+        if (labels.length) return nameFromLabels(labels, o);
+        return element.getAttribute('title') || '';
+      }
+      if (!labelledBy && (tag === 'TEXTAREA' || tag === 'SELECT' || tag === 'INPUT')) {
+        o.visited.add(element);
+        const labels = labelsFor(element);
+        if (labels.length) return nameFromLabels(labels, o);
+        const usePlaceholder = (tag === 'INPUT' && ['text', 'password', 'search', 'tel', 'email', 'url'].includes(type)) || tag === 'TEXTAREA';
+        const placeholder = element.getAttribute('placeholder') || '';
+        const title = element.getAttribute('title') || '';
+        if (!usePlaceholder || title) return title;
+        return placeholder;
+      }
+      if (!labelledBy && (tag === 'FIELDSET' || tag === 'FIGURE' || tag === 'TABLE')) {
+        o.visited.add(element);
+        const want = tag === 'FIELDSET' ? 'LEGEND' : tag === 'FIGURE' ? 'FIGCAPTION' : 'CAPTION';
+        for (let child = element.firstElementChild; child; child = child.nextElementSibling) {
+          if (tagOf(child) === want) {
+            return textAlternative(child, Object.assign({}, childO, { inNative: { hidden: isHiddenForAria(child) } }));
+          }
+        }
+        if (tag === 'TABLE') {
+          const summary = element.getAttribute('summary') || '';
+          if (summary) return summary;
+        } else {
+          return element.getAttribute('title') || '';
+        }
+      }
+      if (tag === 'IMG' || tag === 'AREA') {
+        o.visited.add(element);
+        const alt = element.getAttribute('alt') || '';
+        if (alt.trim()) return alt;
+        return element.getAttribute('title') || '';
+      }
+      if (tag === 'SVG' || element.ownerSVGElement) {
+        o.visited.add(element);
+        for (let child = element.firstElementChild; child; child = child.nextElementSibling) {
+          if (tagOf(child) === 'TITLE' && child.ownerSVGElement) {
+            return textAlternative(child, Object.assign({}, childO, { inLabelledBy: { hidden: isHiddenForAria(child) } }));
+          }
+        }
+      }
+    }
+
+    const summaryContent = tag === 'SUMMARY' && role !== 'presentation' && role !== 'none';
+    if (allowsNameFromContent(role, o.inTarget === 'descendant') || summaryContent ||
+        o.inLabelledBy || o.inLabel || o.inNative) {
+      o.visited.add(element);
+      const acc = accumulatedText(element, childO);
+      const check = o.inTarget === 'self' ? acc.trim() : acc;
+      if (check) return acc;
+    }
+    if ((role !== 'presentation' && role !== 'none') || tag === 'IFRAME') {
+      o.visited.add(element);
+      const title = element.getAttribute('title') || '';
+      if (title.trim()) return title;
+    }
+    o.visited.add(element);
+    return '';
+  }
+  function accumulatedText(element, o) {
+    const tokens = [];
+    const visit = (node, skipSlotted) => {
+      if (skipSlotted && node.assignedSlot) return;
+      if (node.nodeType === 1) {
+        const style = computedStyle(node);
+        const display = (style && style.display) || 'inline';
+        let token = textAlternative(node, o);
+        if (display !== 'inline' || node.nodeName === 'BR') token = ' ' + token + ' ';
+        tokens.push(token);
+      } else if (node.nodeType === 3) {
+        tokens.push(node.textContent || '');
+      }
+    };
+    tokens.push(cssContent(element, '::before') || '');
+    const content = cssContent(element);
+    if (content !== undefined) {
+      tokens.push(content);
+    } else {
+      const assigned = element.nodeName === 'SLOT' && element.assignedNodes ? element.assignedNodes() : [];
+      if (assigned.length) {
+        for (const child of assigned) visit(child, false);
+      } else {
+        for (let child = element.firstChild; child; child = child.nextSibling) visit(child, true);
+        if (element.shadowRoot) {
+          for (let child = element.shadowRoot.firstChild; child; child = child.nextSibling) visit(child, true);
+        }
+      }
+    }
+    tokens.push(cssContent(element, '::after') || '');
+    return tokens.join('');
+  }
+
+  // Normalised accessible name ('' when none) — what getByRole's name option is
+  // matched against.
+  function accessibleName(el) {
+    return cached('name', el, () => {
+      if (NAME_PROHIBITED.has(getRole(el) || '')) return '';
+      return normalizeWS(textAlternative(el, { visited: new Set(), inTarget: 'self' }));
+    });
+  }
+  // Public: the accessible name, or null when the element has none.
+  function getAccessibleName(el) {
+    if (!el || el.nodeType !== 1) return null;
+    try { return accessibleName(el) || null; } catch (e) { return null; }
   }
 
   // ── A11y Audit Engine ──────────────────────────────────────────────────────
@@ -202,7 +929,7 @@
     const name = getAccessibleName(el);
 
     // 1. Missing Alt Text
-    if (tag === 'img' && !el.getAttribute('alt')) {
+    if (tag === 'img' && !el.hasAttribute('alt')) {
       issues.push({ severity: 'high', message: 'Missing [alt] text on image. Screen readers will skip this or read the filename.' });
     }
 
@@ -219,7 +946,7 @@
     // 3. Redundant Role
     const explicitRole = el.getAttribute('role');
     if (explicitRole) {
-      const implicit = IMPLICIT_ROLES[tag] ? IMPLICIT_ROLES[tag](el) : null;
+      const implicit = getImplicitRoleOwn(el);
       if (explicitRole === implicit) {
         issues.push({ severity: 'low', message: `Redundant role="${explicitRole}". Browsers already treat <${tag}> as this role.` });
       }
@@ -240,231 +967,373 @@
   }
 
   // ── Check if a string looks auto-generated / unstable ─────────────────────
+  // A class is "unstable" when it is emitted by a build tool or runtime and changes
+  // between builds or renders. Hand-written names — btn-primary, text-center,
+  // form-control, nav-wrapper, col-md-6, card__title, MuiButton-root — are stable
+  // even though they contain hyphens and short tokens; the old "2–4 letters, dash,
+  // 6+ chars" rule flagged every one of those as generated.
+  const UNSTABLE_CLASS_PATTERNS = [
+    /^sc-[A-Za-z0-9]{4,}$/,                          // styled-components (sc-bdVaJa)
+    /^css-(?=[a-z0-9]*\d)[a-z0-9]{4,}(-[\w-]+)?$/i,  // emotion / css-in-js (css-1x2y3z, css-1dbjc4n-Button)
+    /^emotion-\d+$/,
+    /^jss\d+$/,                                      // JSS
+    /^(makeStyles|Mui[A-Za-z]*|Private[A-Za-z]*|jss)[A-Za-z0-9]*-[A-Za-z0-9]+-\d+$/, // makeStyles-root-12, MuiButton-root-123
+    /^[A-Za-z][A-Za-z0-9-]*_[A-Za-z0-9-]+__(?=[A-Za-z0-9_-]*\d)[A-Za-z0-9_-]{5,}$/, // CSS modules [name]_[local]__[hash]
+    /^[A-Za-z][A-Za-z0-9-]*-module__[A-Za-z0-9-]+___?[A-Za-z0-9_-]{5,}$/,            // CSS modules [file]-module__[local]___[hash]
+    /^_(?=[A-Za-z0-9_-]*\d)[A-Za-z0-9_-]{5,}$/,      // css-loader [hash:base64] (_3xK9a)
+    /^svelte-[a-z0-9]{5,}$/,                         // Svelte scoped styles
+    /^ng-tns-/,                                      // Angular animation scope
+    /^ng-(touched|untouched|pristine|dirty|valid|invalid|pending|star-inserted|animating|trigger)\b/ // Angular state
+  ];
+  // A segment that looks like a hash: letters and digits interleaved several times
+  // (a1B2c, 1dbjc4n, e1q3ycj70), or a long digit run. "300px", "h264", "col12",
+  // "2xl" have at most one letter/digit switch and stay stable.
+  function looksLikeHash(seg) {
+    if (/\d{5,}/.test(seg)) return true;
+    if (!/^[A-Za-z0-9]{5,}$/.test(seg) || !/\d/.test(seg) || !/[A-Za-z]/.test(seg)) return false;
+    let switches = 0;
+    for (let i = 1; i < seg.length; i++) {
+      if (/\d/.test(seg[i]) !== /\d/.test(seg[i - 1])) switches++;
+    }
+    return switches >= 3;
+  }
   function isUnstableClass(cls) {
-    return /^(sc-|css-|emotion-|makeStyles|jss\d|MuiButton-root-\d|[a-z]{2,4}-[a-zA-Z0-9]{6,}$)/.test(cls)
-      || /[a-zA-Z0-9]{7,}/.test(cls) && /\d{3,}/.test(cls);
+    const c = String(cls || '');
+    if (!c) return false;
+    if (UNSTABLE_CLASS_PATTERNS.some(re => re.test(c))) return true;
+    return c.split(/[-_:/]+/).some(looksLikeHash);
   }
 
   function hasUnstableClasses(el) {
     if (!el.className || typeof el.className !== 'string') return false;
-    return el.className.trim().split(/\s+/).some(isUnstableClass);
+    return el.className.trim().split(/\s+/).some(c => !isOwnArtifactClass(c) && isUnstableClass(c));
   }
 
+  // Ids generated per render/build. Hand-written ids (user-name, main, step-2,
+  // login-form) are kept.
+  const UNSTABLE_ID_PATTERNS = [
+    /^\d+$/,                                    // pure number
+    /:[rR][0-9a-zA-Z]*:/,                       // React useId (:r0:, :R1a:, radix-:r3:)
+    /«[^»]*»/,                                  // React 19 useId («r1»)
+    /^(radix|headlessui|downshift|react-aria|reach)-/i,
+    /^react-select-\d+/,
+    /^(mat|cdk)-[a-z-]+-\d+$/,                  // Angular Material (mat-input-0)
+    /^mui-\d+$/i,
+    /^ember\d+$/,
+    /^ext-(gen|comp|element)-?\d+/,             // ExtJS
+    /^j_id/,                                    // JSF
+    /^yui_/,
+    /[0-9a-f]{8}-?[0-9a-f]{4}-?[0-9a-f]{4}-?[0-9a-f]{4}-?[0-9a-f]{12}/i, // UUID
+    /[_-]\d{3,}$/,                              // input_1234, field-123
+    /\d{5,}/                                    // long digit runs
+  ];
   function isUnstableId(id) {
     if (!id) return false;
-    return /^\d+$/.test(id) || /[_-]\d{3,}$/.test(id) || /\d{5,}/.test(id);
+    const s = String(id);
+    if (UNSTABLE_ID_PATTERNS.some(re => re.test(s))) return true;
+    // A hex-ish hash segment (section-a3f9b2c1), not a word.
+    return s.split(/[-_:.]+/).some(seg => /^[0-9a-f]{8,}$/i.test(seg) && /\d/.test(seg) && /[a-f]/i.test(seg));
+  }
+  function usableId(id) {
+    return !!id && !isUnstableId(id) && !isOwnArtifactId(id);
   }
 
   // ── Build a reliable CSS selector fallback ─────────────────────────────────
+  // Walks up from the element adding one level at a time and stops as soon as the
+  // selector matches exactly this element (counted across shadow roots, as
+  // Playwright would). An ancestor with a stable, unique id anchors the path
+  // (`#id > … > el`); the old code returned the bare `#ancestorId` at that point,
+  // discarding the path and targeting the ancestor instead of the element.
   function buildCSSSelector(el, doc) {
     // Defaults to the element's own document, which is what makes this usable for an
     // <iframe> element that lives in the parent document rather than in ours.
+    // The guard comes first: reading el.ownerDocument threw on a null element.
+    if (!el || !el.tagName) return 'body';
     const d = doc || el.ownerDocument || document;
-    const parts = [];
-    let current = el;
-    while (current && current !== d.body && parts.length < 5) {
-      let part = current.tagName.toLowerCase();
-      if (current.id && !isUnstableId(current.id)) {
+    if (el === d.body || el === d.documentElement) return el.tagName.toLowerCase();
+    return withCaches(() => {
+      const resolvesToEl = (sel) => {
+        const found = deepQueryAllUncapped(sel, d);
+        return !!found && found.length === 1 && found[0] === el;
+      };
+      const parts = [];
+      let current = el;
+      let sel = '';
+      while (current && current !== d.body && current !== d.documentElement) {
         // CSS.escape: ids legally contain ':' '.' '[' etc. (Tailwind, Rails, Angular
         // all emit them). Unescaped, the returned string is an invalid selector that
         // throws in querySelectorAll and produces uncompilable generated code.
-        return `#${cssEscape(current.id)}`;
-      }
-      const stableClasses = current.className && typeof current.className === 'string'
-        ? current.className.trim().split(/\s+/).filter(c => c && !isUnstableClass(c))
-        : [];
-      if (stableClasses.length) {
-        // Utility-class frameworks (Tailwind's sm:flex, w-1/2, …) are common and
-        // pass isUnstableClass — but ':' and '/' are CSS-special and left the
-        // selector invalid without this, exactly like the unescaped id case above.
-        part += '.' + stableClasses.slice(0, 2).map(cssEscape).join('.');
-      }
-      // Nth-child fallback
-      const siblings = current.parentElement
-        ? Array.from(current.parentElement.children).filter(c => c.tagName === current.tagName)
-        : [];
-      if (siblings.length > 1) {
-        const idx = siblings.indexOf(current) + 1;
-        part += `:nth-of-type(${idx})`;
-      }
-      parts.unshift(part);
-      current = current.parentElement;
-    }
-    // The walk stops *at* <body>, so <body> itself produced an empty string — and
-    // `page.locator('')` is a runtime error in every framework and throws inside
-    // querySelectorAll here. The context-menu path falls back to document.body when
-    // it has no tracked element, so this was reachable by right-clicking.
-    return parts.join(' > ') || (el.tagName ? el.tagName.toLowerCase() : 'body');
-  }
-
-  // ── Find a unique parent for chaining ──────────────────────────────────────
-  function findUniqueParent(el) {
-    let parent = el.parentElement;
-    while (parent && parent !== document.body) {
-      const pTestId = parent.getAttribute('data-testid');
-      const pId = (!isUnstableId(parent.id)) ? parent.id : null;
-      const pRole = getRole(parent);
-      const pName = getAccessibleName(parent);
-      
-      if (pTestId || pId || (pRole && pName)) {
-        return { el: parent, testId: pTestId, id: pId, role: pRole, name: pName };
-      }
-      parent = parent.parentElement;
-    }
-    return null;
-  }
-
-  // ── Live uniqueness: how many elements does a locator actually match? ───────
-  // Counts are capped at 10 (we only care about unique vs ambiguous) for speed.
-  const UNIQ_CAP = 10;
-  // Hard ceiling on nodes examined per count. generateLocators() runs on every pick
-  // AND on every captured click while recording, and each candidate locator triggers
-  // its own count — so an uncapped walk that reads innerText (which forces a layout
-  // flush per node) turned a click on a large page into a visible freeze.
-  const SCAN_CAP = 4000;
-
-  // A chained locator resolves its child inside a parent, so both sides have to be
-  // materialised before they can be intersected — which is why these return nodes
-  // rather than a running count. `cap` bounds the work: UNIQ_CAP is enough to answer
-  // "unique or not", while a chain needs a wider child scan because the matches
-  // inside the parent may not be the first ones found in the document.
-  const CHAIN_CAP = 200;
-
-  function attrSelectorValue(v) {
-    return String(v == null ? '' : v).replace(/\\/g, '\\\\').replace(/"/g, '\\"');
-  }
-  function nodesBySelector(sel, cap) {
-    try {
-      return deepQueryAll(sel, document, cap);
-    } catch (e) { return null; }
-  }
-  // textContent, not innerText: innerText is layout-dependent and forces a reflow on
-  // every node touched. For "does this text match exactly one element" the difference
-  // is whitespace normalisation, which we do ourselves.
-  function normText(node) {
-    return (node.textContent || '').trim();
-  }
-  function nodesByText(text, cap) {
-    const out = [];
-    const all = deepQueryAll('*', document, SCAN_CAP);
-    for (let i = 0; i < all.length && out.length < cap; i++) {
-      const node = all[i];
-      if (normText(node) !== text) continue;
-      // innermost only (mirrors Playwright getByText) — skip if a child holds the same text
-      let childHas = false;
-      for (let c = 0; c < node.children.length; c++) {
-        if (normText(node.children[c]) === text) { childHas = true; break; }
-      }
-      if (!childHas) out.push(node);
-    }
-    return out;
-  }
-  function nodesByRole(role, name, cap) {
-    const out = [];
-    const all = deepQueryAll('*', document, SCAN_CAP);
-    for (let i = 0; i < all.length && out.length < cap; i++) {
-      if (getRole(all[i]) !== role) continue;
-      if (name && getAccessibleName(all[i]) !== name) continue;
-      out.push(all[i]);
-    }
-    return out;
-  }
-  function nodesByLabel(labelText, cap) {
-    const out = [];
-    const controls = deepQueryAll('input, select, textarea', document, Infinity);
-    for (let i = 0; i < controls.length && out.length < cap; i++) {
-      if (getAccessibleName(controls[i]) === labelText) out.push(controls[i]);
-    }
-    return out;
-  }
-  // Per-analysis memo. generateLocators() runs on every pick *and* on every captured
-  // click while recording, and the same target is now resolved more than once — a
-  // chain's child is usually the very role locator already counted above it. The DOM
-  // cannot change inside one call, so resolving each distinct target once is free
-  // correctness-wise and keeps this off the path that used to freeze large pages.
-  let matchCache = null;
-
-  function targetNodes(t, cap) {
-    if (!t) return null;
-    if (!matchCache) return resolveTargetNodes(t, cap);
-    const key = cap + '|' + JSON.stringify(t);
-    if (matchCache.has(key)) return matchCache.get(key);
-    const out = resolveTargetNodes(t, cap);
-    matchCache.set(key, out);
-    return out;
-  }
-
-  function resolveTargetNodes(t, cap) {
-    switch (t.kind) {
-      case 'testid': return nodesBySelector('[' + t.attr + '="' + attrSelectorValue(t.value) + '"]', cap);
-      case 'id': return nodesBySelector('#' + cssEscape(String(t.value)), cap);
-      case 'name': return nodesBySelector('[name="' + attrSelectorValue(t.value) + '"]', cap);
-      case 'placeholder': return nodesBySelector('[placeholder="' + attrSelectorValue(t.value) + '"]', cap);
-      case 'altText': return nodesBySelector('img[alt="' + attrSelectorValue(t.value) + '"]', cap);
-      case 'title': return nodesBySelector('[title="' + attrSelectorValue(t.value) + '"]', cap);
-      case 'css': return nodesBySelector(t.value, cap);
-      case 'text': return nodesByText(t.value, cap);
-      case 'role': return nodesByRole(t.role, t.name, cap);
-      case 'label': return nodesByLabel(t.value, cap);
-      case 'chain': {
-        const parents = targetNodes(t.parent, CHAIN_CAP);
-        const children = targetNodes(t.child, CHAIN_CAP);
-        if (!parents || !children) return null;
-        const out = [];
-        for (let i = 0; i < children.length && out.length < cap; i++) {
-          const c = children[i];
-          for (let p = 0; p < parents.length; p++) {
-            if (parents[p] !== c && parents[p].contains(c)) { out.push(c); break; }
-          }
+        if (usableId(current.id)) {
+          const anchored = ['#' + cssEscape(current.id)].concat(parts).join(' > ');
+          if (resolvesToEl(anchored)) return anchored;
         }
-        return out;
+        let part = cssEscape(current.tagName.toLowerCase());
+        const stableClasses = current.className && typeof current.className === 'string'
+          ? current.className.trim().split(/\s+/).filter(c => c && !isOwnArtifactClass(c) && !isUnstableClass(c))
+          : [];
+        if (stableClasses.length) {
+          // Utility-class frameworks (Tailwind's sm:flex, w-1/2, …) are common and
+          // pass isUnstableClass — but ':' and '/' are CSS-special and left the
+          // selector invalid without this, exactly like the unescaped id case above.
+          part += '.' + stableClasses.slice(0, 2).map(cssEscape).join('.');
+        }
+        // Nth-of-type disambiguation among same-tag siblings
+        const siblings = current.parentElement
+          ? Array.from(current.parentElement.children).filter(c => c.tagName === current.tagName)
+          : [];
+        if (siblings.length > 1) {
+          part += `:nth-of-type(${siblings.indexOf(current) + 1})`;
+        }
+        parts.unshift(part);
+        sel = parts.join(' > ');
+        if (resolvesToEl(sel)) return sel;
+        current = current.parentElement;
+      }
+      // Reached <body> (or a shadow root's top) without a unique match: anchor at
+      // <body> when the walk got there — the full child-combinator path is unique in
+      // the light DOM.
+      if (current === d.body && parts.length) {
+        const anchored = 'body > ' + parts.join(' > ');
+        if (resolvesToEl(anchored)) return anchored;
+      }
+      // The walk stops *at* <body>, so <body> itself produced an empty string — and
+      // `page.locator('')` is a runtime error in every framework and throws inside
+      // querySelectorAll here. The context-menu path falls back to document.body when
+      // it has no tracked element, so this was reachable by right-clicking.
+      return sel || el.tagName.toLowerCase();
+    });
+  }
+
+  // ── Live uniqueness: which elements does a locator actually match? ───────────
+  // Every matcher mirrors Playwright's default semantics. Nothing is capped: a scan
+  // cap made elements past the first N invisible, producing a false "unique" or a
+  // false "not found" on large pages (and never reached shadow content, which is
+  // visited last).
+  function nodesBySelector(sel) {
+    try { return deepQueryAllUncapped(sel, document); } catch (e) { return null; }
+  }
+  function nodesByText(value, exact) {
+    const matcher = textMatcher(value, exact);
+    const all = deepQueryAllUncapped('*', document) || [];
+    const out = [];
+    let lastNone = null;
+    for (let i = 0; i < all.length; i++) {
+      const el = all[i];
+      // A descendant of a non-matching element cannot contain the substring either.
+      if (!exact && lastNone && lastNone.contains(el)) continue;
+      const m = elementMatchesText(el, matcher);
+      if (m === 'none') lastNone = el;
+      if (m === 'self') out.push(el);
+    }
+    return out;
+  }
+  function nodesByRole(t) {
+    const cand = ROLE_CANDIDATE_TAGS[t.role];
+    const all = deepQueryAllUncapped(cand ? '[role],' + cand : '*', document) || [];
+    const hasName = t.name != null && t.name !== '';
+    const needle = hasName ? normalizeWS(t.name) : '';
+    // Playwright compares role names with toUpperCase() (attribute-selector rules),
+    // text with toLowerCase(); mirrored exactly.
+    const upper = needle.toUpperCase();
+    const out = [];
+    for (let i = 0; i < all.length; i++) {
+      const el = all[i];
+      if (getRole(el) !== t.role) continue;
+      if (t.level && getHeadingLevel(el) !== t.level) continue;
+      if (isHiddenForAria(el)) continue;
+      if (hasName) {
+        const n = accessibleName(el);
+        if (t.exact ? n !== needle : !n.toUpperCase().includes(upper)) continue;
+      }
+      out.push(el);
+    }
+    return out;
+  }
+  function nodesByLabel(value, exact) {
+    const matcher = textMatcher(value, exact);
+    const labelMap = buildLabelMap();
+    const seen = new Set();
+    const cands = [];
+    const add = (e) => { if (!seen.has(e)) { seen.add(e); cands.push(e); } };
+    (deepQueryAllUncapped('[aria-labelledby],[aria-label]', document) || []).forEach(add);
+    labelMap.forEach((_, control) => add(control));
+    return cands.filter(e => labelTexts(e).some(matcher));
+  }
+  // getByPlaceholder / getByAltText / getByTitle: Playwright's internal:attr engine
+  // — any element carrying the attribute; default is a case-insensitive substring of
+  // the raw value, exact is raw equality (no whitespace normalisation).
+  function nodesByAttr(attr, value, exact) {
+    const all = deepQueryAllUncapped('[' + attr + ']', document) || [];
+    const v = String(value == null ? '' : value);
+    const lower = v.toLowerCase();
+    return all.filter(e => {
+      const a = e.getAttribute(attr) || '';
+      return exact ? a === v : a.toLowerCase().includes(lower);
+    });
+  }
+
+  function targetNodes(t) {
+    if (!t) return null;
+    if (!ctx) return withCaches(() => targetNodes(t));
+    const key = JSON.stringify(t);
+    if (ctx.nodes.has(key)) return ctx.nodes.get(key);
+    let out = resolveTargetNodes(t);
+    // The extension's own overlay/tooltip (which displays locator text!) is not
+    // part of the page a test will run against.
+    if (out && out.length) out = out.filter(n => !closestCrossShadow(n, OWN_UI_SELECTOR));
+    ctx.nodes.set(key, out);
+    return out;
+  }
+
+  function resolveTargetNodes(t) {
+    switch (t.kind) {
+      // The attribute *name* is user-configured (custom test attributes) and may hold
+      // CSS-special characters (data:qa) — escaped, or the selector is invalid.
+      case 'testid': return nodesBySelector('[' + cssEscape(t.attr) + '="' + attrSelectorValue(t.value) + '"]');
+      case 'id': return nodesBySelector('#' + cssEscape(String(t.value)));
+      case 'name': return nodesBySelector('[name="' + attrSelectorValue(t.value) + '"]');
+      case 'placeholder': return nodesByAttr('placeholder', t.value, t.exact);
+      case 'altText': return nodesByAttr('alt', t.value, t.exact);
+      case 'title': return nodesByAttr('title', t.value, t.exact);
+      case 'css': return nodesBySelector(t.value);
+      case 'text': return nodesByText(t.value, t.exact);
+      case 'role': return nodesByRole(t);
+      case 'label': return nodesByLabel(t.value, t.exact);
+      case 'chain': {
+        const parents = targetNodes(t.parent);
+        const children = targetNodes(t.child);
+        if (!parents || !children) return null;
+        // getByText's engine also tests the scope element itself; the others only
+        // its descendants (including through shadow roots).
+        const selfOk = t.child && t.child.kind === 'text';
+        return children.filter(c => parents.some(p => (p !== c || selfOk) && composedContains(p, c)));
       }
       default: return null;
     }
   }
+  // Public (C5): how many elements Playwright would resolve `target` to, or null when
+  // it cannot be evaluated (unknown kind, invalid selector).
   function countTargetMatches(t) {
     if (!t) return null;
     try {
-      const nodes = targetNodes(t, UNIQ_CAP);
-      return nodes ? Math.min(nodes.length, UNIQ_CAP) : null;
+      const nodes = targetNodes(t);
+      return nodes ? nodes.length : null;
     } catch (e) { return null; }
   }
 
-  // Builds the two fields every locator card carries — the bare Playwright expression
-  // and the actionable statement wrapping it — from one source instead of writing the
-  // same expression twice per call site, which several of the methods below used to
-  // do (a future change to one copy and not the other is exactly how these drift).
-  function withAction(code, el) {
-    return { code, fullCode: `await ${code}.${suggestAction(el)};` };
-  }
-
-  // ── Main locator generation engine ────────────────────────────────────────
-  function generateLocators(el, customTestAttributes) {
-    const locators = [];
-    const tag = el.tagName.toLowerCase();
-    const role = getRole(el);
-    const name = getAccessibleName(el);
-
-    // 1. data-testid / data-qa / data-cy / data-test / custom
-    for (const attr of customTestAttributes) {
-      const val = el.getAttribute(attr);
-      if (val) {
+  // ── Displayed code from a target ────────────────────────────────────────────
+  // One source for every card's `code`, so it can never disagree with `target`.
+  function codeFor(t) {
+    const exactOpt = t.exact ? ', { exact: true }' : '';
+    switch (t.kind) {
+      case 'testid':
         // getByTestId() takes a plain string — no CSS-selector escaping needed, and
         // it's the locator Playwright actually recommends. Attributes without a
         // dedicated API fall back to a CSS attribute selector, which does need the
         // value escaped for the double-quoted selector (a value containing a `"`,
         // e.g. a testid embedding JSON, otherwise breaks the selector outright).
+        return t.attr === 'data-testid'
+          ? `page.getByTestId(${jsStr(t.value)})`
+          : `page.locator(${jsStr('[' + cssEscape(t.attr) + '="' + attrSelectorValue(t.value) + '"]')})`;
+      case 'role': {
+        const o = [];
+        if (t.name) {
+          o.push('name: ' + jsStr(t.name));
+          if (t.exact) o.push('exact: true');
+        }
+        if (t.level) o.push('level: ' + t.level);
+        return `page.getByRole(${jsStr(t.role)}${o.length ? ', { ' + o.join(', ') + ' }' : ''})`;
+      }
+      case 'label': return `page.getByLabel(${jsStr(t.value)}${exactOpt})`;
+      case 'placeholder': return `page.getByPlaceholder(${jsStr(t.value)}${exactOpt})`;
+      case 'altText': return `page.getByAltText(${jsStr(t.value)}${exactOpt})`;
+      case 'title': return `page.getByTitle(${jsStr(t.value)}${exactOpt})`;
+      case 'text': return `page.getByText(${jsStr(t.value)}${exactOpt})`;
+      case 'id': return `page.locator(${jsStr('#' + cssEscape(t.value))})`;
+      case 'name': return `page.locator(${jsStr('[name="' + attrSelectorValue(t.value) + '"]')})`;
+      case 'chain': return `${codeFor(t.parent)}.${codeFor(t.child).replace(/^page\./, '')}`;
+      case 'css': default: return `page.locator(${jsStr(t.value)})`;
+    }
+  }
+
+  // Builds the two fields every locator card carries — the bare Playwright expression
+  // and the actionable statement wrapping it.
+  function withAction(code, el) {
+    return { code, fullCode: `await ${code}.${suggestAction(el)};` };
+  }
+
+  // ── Find a unique parent for chaining ──────────────────────────────────────
+  // Only an ancestor that is itself unique on the page is useful as a scope; one
+  // that matches several elements just moves the ambiguity up a level.
+  const ROLES_NOT_FOR_LOCATORS = new Set(['presentation', 'none', 'generic']);
+  function findUniqueParent(el, attrs) {
+    let parent = parentElementOrShadowHost(el);
+    const d = el.ownerDocument || document;
+    let tried = 0;
+    while (parent && parent !== d.body && parent !== d.documentElement && tried < 8) {
+      let target = null;
+      for (const attr of attrs) {
+        if (isOwnArtifactAttr(attr)) continue;
+        const v = parent.getAttribute(attr);
+        if (v) { target = { kind: 'testid', attr, value: v }; break; }
+      }
+      if (!target && usableId(parent.id)) target = { kind: 'id', value: parent.id };
+      if (!target) {
+        const r = getRole(parent);
+        if (r && !ROLES_NOT_FOR_LOCATORS.has(r)) {
+          const n = accessibleName(parent);
+          if (n && n.length <= 80) target = { kind: 'role', role: r, name: n };
+        }
+      }
+      if (target) {
+        tried++;
+        const nodes = targetNodes(target);
+        if (nodes && nodes.length === 1 && nodes[0] === parent) return { el: parent, target };
+      }
+      parent = parentElementOrShadowHost(parent);
+    }
+    return null;
+  }
+
+  // Kinds whose default matching is a case-insensitive substring and which accept
+  // { exact: true } (C5).
+  const EXACTABLE = new Set(['role', 'text', 'label', 'placeholder', 'altText', 'title']);
+
+  // ── Main locator generation engine ────────────────────────────────────────
+  function generateLocators(el, customTestAttributes) {
+    beginCaches();
+    try {
+      return generateLocatorsImpl(el, Array.isArray(customTestAttributes) ? customTestAttributes : []);
+    } finally {
+      endCaches();
+    }
+  }
+
+  function generateLocatorsImpl(el, customTestAttributes) {
+    const locators = [];
+    const tag = el.tagName.toLowerCase();
+    const role = getRole(el);
+    const name = getAccessibleName(el);
+    // `exactValue`: the value to use if the locator has to be made exact (null when
+    // the shown value is a truncated prefix and so cannot be).
+    const add = (spec) => {
+      spec.rank = locators.length + 1;
+      Object.assign(spec, withAction(codeFor(spec.target), el));
+      locators.push(spec);
+      return spec;
+    };
+
+    // 1. data-testid / data-qa / data-cy / data-test / custom
+    for (const attr of customTestAttributes) {
+      if (isOwnArtifactAttr(attr)) continue;
+      const val = el.getAttribute(attr);
+      if (val) {
         const isTestId = attr === 'data-testid';
-        const code = isTestId
-          ? `page.getByTestId(${jsStr(val)})`
-          : `page.locator(${jsStr('[' + attr + '="' + attrSelectorValue(val) + '"]')})`;
-        locators.push({
-          rank: 1,
+        add({
           method: isTestId ? 'getByTestId()' : 'locator() / Custom attribute',
           matchedAttr: `${attr}="${val}"`,
           stability: 'BEST',
           target: { kind: 'testid', attr: attr, value: val },
-          ...withAction(code, el),
           explanation: `Uses the <${attr}> attribute which is purpose-built for testing or custom configuration. This is highly stable.`,
           why: 'Stable / Custom test attribute'
         });
@@ -473,66 +1342,64 @@
     }
 
     // 2. getByRole
-    if (role && name) {
-      let codeBase = `page.getByRole(${jsStr(role)}, { name: ${jsStr(name)} })`;
-      let extra = '';
-      if (role === 'heading') {
-        const level = getHeadingLevel(el);
-        if (level) {
-          codeBase = `page.getByRole(${jsStr(role)}, { name: ${jsStr(name)}, level: ${level} })`;
-          extra = ` at level ${level}`;
-        }
-      }
-      locators.push({
-        rank: locators.length + 1,
+    if (role && name && !ROLES_NOT_FOR_LOCATORS.has(role)) {
+      const level = role === 'heading' ? getHeadingLevel(el) : null;
+      const short = snippet(name, 80);
+      const extra = level ? ` at level ${level}` : '';
+      add({
         method: 'getByRole()',
-        matchedAttr: `role="${role}", name="${name}"${extra}`,
+        matchedAttr: `role="${role}", name="${short.value}"${extra}`,
         stability: 'BEST',
-        target: { kind: 'role', role: role, name: name, level: (role === 'heading' ? getHeadingLevel(el) : null) },
-        ...withAction(codeBase, el),
-        explanation: `Finds the element by its ARIA role "${role}" and accessible name "${name}". This is Playwright's most recommended locator — it tests your app the same way screen readers use it.`,
+        target: { kind: 'role', role: role, name: short.value, level: level || null },
+        exactValue: short.truncated ? null : short.value,
+        explanation: `Finds the element by its ARIA role "${role}" and accessible name "${short.value}". This is Playwright's most recommended locator — it tests your app the same way screen readers use it.`,
         why: 'Semantic ARIA role'
       });
-    } else if (role && !name) {
-      locators.push({
-        rank: locators.length + 1,
+    } else if (role && !name && !ROLES_NOT_FOR_LOCATORS.has(role)) {
+      add({
         method: 'getByRole()',
         matchedAttr: `role="${role}" (no accessible name found)`,
         stability: 'OK',
         target: { kind: 'role', role: role },
-        ...withAction(`page.getByRole(${jsStr(role)})`, el),
         explanation: `Finds by role "${role}" but without a name filter — this may match multiple elements. Add an accessible name (aria-label, visible text) to make it unique.`,
         why: 'Role only — may be ambiguous'
       });
     }
 
-    // 3. getByLabel
-    if (['input', 'select', 'textarea'].includes(tag)) {
-      let labelText = null;
-      if (el.id) {
-        const lbl = scopeOf(el).querySelector(`label[for="${cssEscape(el.id)}"]`);
-        if (lbl) labelText = lbl.textContent.trim();
-      }
-      if (!labelText) {
-        const pLabel = el.closest('label');
-        if (pLabel) {
-          const clone = pLabel.cloneNode(true);
-          clone.querySelectorAll('input,select,textarea').forEach(e => e.remove());
-          labelText = clone.textContent.trim() || null;
+    // 3. getByLabel — the same label sources getByLabel() itself matches
+    // (aria-labelledby, aria-label, <label for>, wrapping <label>).
+    const isFormControl = ['input', 'select', 'textarea'].includes(tag) && !(tag === 'input' && el.type === 'hidden');
+    const labelRoles = ['textbox', 'searchbox', 'combobox', 'listbox', 'checkbox', 'radio', 'switch', 'slider', 'spinbutton'];
+    if (isFormControl || (role && labelRoles.includes(role) && (el.hasAttribute('aria-labelledby') || el.hasAttribute('aria-label')))) {
+      const candidates = [];
+      const lb = labelledByElements(el);
+      if (!lb && !(el.getAttribute('aria-label') || '').trim()) {
+        // A wrapping label also contains the control's own text (a <select>'s
+        // options); try the label text without it first — it reads better and,
+        // being a substring, still matches.
+        for (const lab of labelsFor(el)) {
+          const clone = lab.cloneNode(true);
+          clone.querySelectorAll('input,select,textarea,button').forEach(e => e.remove());
+          candidates.push(normalizeWS(clone.textContent));
         }
       }
-      if (!labelText) labelText = el.getAttribute('aria-label') || null;
-      if (labelText) {
-        locators.push({
-          rank: locators.length + 1,
+      labelTexts(el).forEach(t => candidates.push(t.normalized));
+      for (const text of candidates) {
+        if (!text) continue;
+        const short = snippet(text, 80);
+        const target = { kind: 'label', value: short.value };
+        const nodes = targetNodes(target);
+        if (!nodes || !nodes.includes(el)) continue;
+        add({
           method: 'getByLabel()',
-          matchedAttr: `label text: "${labelText}"`,
+          matchedAttr: `label text: "${short.value}"`,
           stability: 'BEST',
-          target: { kind: 'label', value: labelText },
-          ...withAction(`page.getByLabel(${jsStr(labelText)})`, el),
-          explanation: `Finds the ${tag} element by its associated label "${labelText}". Ideal for form inputs — directly reflects what the user sees on screen.`,
+          target,
+          exactValue: short.truncated ? null : short.value,
+          explanation: `Finds the ${tag} element by its associated label "${short.value}". Ideal for form inputs — directly reflects what the user sees on screen.`,
           why: 'Associated label text'
         });
+        break;
       }
     }
 
@@ -540,31 +1407,29 @@
     const placeholder = el.getAttribute('placeholder');
     if (placeholder && placeholder.trim()) {
       const ph = placeholder.trim();
-      locators.push({
-        rank: locators.length + 1,
+      add({
         method: 'getByPlaceholder()',
         matchedAttr: `placeholder="${ph}"`,
         stability: 'GOOD',
         target: { kind: 'placeholder', value: ph },
-        ...withAction(`page.getByPlaceholder(${jsStr(ph)})`, el),
-        explanation: `Finds the input by its placeholder text "${placeholder.trim()}". Good when no label is present — but note placeholder text can change with copy updates.`,
+        exactValue: placeholder,
+        explanation: `Finds the input by its placeholder text "${ph}". Good when no label is present — but note placeholder text can change with copy updates.`,
         why: 'Placeholder attribute'
       });
     }
 
     // 5. getByAltText
-    if (tag === 'img') {
+    if (tag === 'img' || tag === 'area' || (tag === 'input' && el.type === 'image')) {
       const alt = el.getAttribute('alt');
       if (alt && alt.trim()) {
         const altText = alt.trim();
-        locators.push({
-          rank: locators.length + 1,
+        add({
           method: 'getByAltText()',
           matchedAttr: `alt="${altText}"`,
           stability: 'GOOD',
           target: { kind: 'altText', value: altText },
-          ...withAction(`page.getByAltText(${jsStr(altText)})`, el),
-          explanation: `Finds the image by its alt text "${alt.trim()}". The correct semantic approach for images — also important for accessibility.`,
+          exactValue: alt,
+          explanation: `Finds the image by its alt text "${altText}". The correct semantic approach for images — also important for accessibility.`,
           why: 'Alt text attribute'
         });
       }
@@ -574,53 +1439,42 @@
     const titleAttr = el.getAttribute('title');
     if (titleAttr && titleAttr.trim()) {
       const titleText = titleAttr.trim();
-      locators.push({
-        rank: locators.length + 1,
+      add({
         method: 'getByTitle()',
         matchedAttr: `title="${titleText}"`,
         stability: 'GOOD',
         target: { kind: 'title', value: titleText },
-        ...withAction(`page.getByTitle(${jsStr(titleText)})`, el),
-        explanation: `Finds the element by its title attribute "${titleAttr.trim()}". Useful for icon buttons and tooltip elements without visible text.`,
+        exactValue: titleAttr,
+        explanation: `Finds the element by its title attribute "${titleText}". Useful for icon buttons and tooltip elements without visible text.`,
         why: 'Title attribute'
       });
     }
 
-    // 7. getByText
-    const visibleText = (el.innerText || el.textContent || '').trim();
-    if (visibleText && visibleText.length <= 100 && !['input', 'select', 'textarea', 'img'].includes(tag)) {
-      const shortText = visibleText.slice(0, 60);
-      // Bounded, layout-free ambiguity probe. Reading innerText here walked the whole
-      // document flushing layout per node whenever the text was in fact unique.
-      const allMatchingText = deepQueryAll('*', document, SCAN_CAP);
-      let textMatchCount = 0;
-      for (let i = 0; i < allMatchingText.length; i++) {
-        if (normText(allMatchingText[i]) === visibleText) textMatchCount++;
-        if (textMatchCount > 3) break;
-      }
-      const stability = textMatchCount > 2 ? 'OK' : 'GOOD';
-      const warning = textMatchCount > 2 ? ' Warning: this text may match multiple elements — consider using getByRole() instead.' : '';
-      locators.push({
-        rank: locators.length + 1,
+    // 7. getByText — the text Playwright's text engine sees (textContent-based,
+    // whitespace-normalised), not layout-dependent innerText, so the target
+    // actually resolves to the element it was built from. Longer text uses a
+    // word-bounded prefix, which only works as a substring (never exact).
+    const visibleText = elementText(el).normalized;
+    if (visibleText && visibleText.length <= 200 && !['input', 'select', 'textarea', 'img'].includes(tag)) {
+      const short = snippet(visibleText, visibleText.length <= 80 ? 80 : 60);
+      add({
         method: 'getByText()',
-        matchedAttr: `visible text: "${shortText}"`,
-        stability,
-        target: { kind: 'text', value: shortText },
-        ...withAction(`page.getByText(${jsStr(shortText)})`, el),
-        explanation: `Finds by visible text content "${visibleText.slice(0, 60)}".${warning} Best used for non-interactive elements like paragraphs and labels.`,
+        matchedAttr: `visible text: "${short.value}"`,
+        stability: 'GOOD',
+        target: { kind: 'text', value: short.value },
+        exactValue: short.truncated ? null : short.value,
+        explanation: `Finds by visible text content "${short.value}". Best used for non-interactive elements like paragraphs and labels.`,
         why: 'Visible text content'
       });
     }
 
     // 8. locator() by stable ID
-    if (el.id && !isUnstableId(el.id)) {
-      locators.push({
-        rank: locators.length + 1,
+    if (usableId(el.id)) {
+      add({
         method: "locator('#id')",
         matchedAttr: `id="${el.id}"`,
         stability: 'OK',
         target: { kind: 'id', value: el.id },
-        ...withAction(`page.locator(${jsStr('#' + cssEscape(el.id))})`, el),
         explanation: `Uses the element's ID "${el.id}". Acceptable if the ID is hand-written and stable — avoid if IDs are auto-generated (e.g. "btn-47" or "input_1234").`,
         why: 'ID attribute'
       });
@@ -629,18 +1483,42 @@
     // 9. CSS attribute selectors (name, type combos)
     const name_attr = el.getAttribute('name');
     if (name_attr && ['input', 'select', 'textarea'].includes(tag)) {
-      const nameSel = `[name="${attrSelectorValue(name_attr)}"]`;
-      locators.push({
-        rank: locators.length + 1,
+      add({
         method: "locator('[name]')",
         matchedAttr: `name="${name_attr}"`,
         stability: 'OK',
         target: { kind: 'name', value: name_attr },
-        ...withAction(`page.locator(${jsStr(nameSel)})`, el),
         explanation: `Uses the name attribute "${name_attr}". Moderately stable — name attributes are usually semantic but multiple elements can share the same name (e.g. radio groups).`,
         why: 'Name attribute'
       });
     }
+
+    // ── Live uniqueness, with Playwright's matching semantics ────────────────
+    // When the default (substring, case-insensitive) match is ambiguous but the
+    // exact match is unique, switch the locator to { exact: true } (C5).
+    const measure = (l) => {
+      let nodes = null;
+      try { nodes = targetNodes(l.target); } catch (e) { nodes = null; }
+      if (nodes && nodes.length > 1 && EXACTABLE.has(l.target.kind) && l.exactValue != null && l.exactValue !== '') {
+        const exactTarget = Object.assign({}, l.target, { exact: true });
+        if (exactTarget.kind === 'role') exactTarget.name = l.exactValue;
+        else exactTarget.value = l.exactValue;
+        let exactNodes = null;
+        try { exactNodes = targetNodes(exactTarget); } catch (e) {}
+        if (exactNodes && exactNodes.length === 1 && exactNodes[0] === el) {
+          l.target = exactTarget;
+          Object.assign(l, withAction(codeFor(l.target), el));
+          nodes = exactNodes;
+        }
+      }
+      if (nodes) {
+        l.matchCount = nodes.length;
+        l.matchesElement = nodes.includes(el);
+        l.unique = nodes.length === 1 && l.matchesElement;
+      }
+      delete l.exactValue;
+    };
+    locators.forEach(measure);
 
     // 10. Chained / Filtered Locator (The Pro Approach)
     //
@@ -650,69 +1528,67 @@
     // non-Playwright translation — and every recorded step whose best locator was
     // this one — silently dropped the parent scope and addressed the *first* matching
     // row instead of the one the user clicked.
-    const uParent = findUniqueParent(el);
-    if (uParent && locators.length > 0) {
-      let pCode = '';
-      let pTarget = null;
-      if (uParent.testId) {
-        pCode = `page.getByTestId(${jsStr(uParent.testId)})`;
-        pTarget = { kind: 'testid', attr: 'data-testid', value: uParent.testId };
-      } else if (uParent.id) {
-        pCode = `page.locator(${jsStr('#' + cssEscape(uParent.id))})`;
-        pTarget = { kind: 'id', value: uParent.id };
-      }
-      else if (uParent.role && uParent.name) {
-        pCode = `page.getByRole(${jsStr(uParent.role)}, { name: ${jsStr(uParent.name)} })`;
-        pTarget = { kind: 'role', role: uParent.role, name: uParent.name };
-      }
-
-      const childLoc = locators[0];
-      if (pCode && childLoc.target) {
-        const chainCode = `${pCode}.${childLoc.code.replace(/^page\./, '')}`;
-        locators.push({
-          rank: locators.length + 1,
-          method: 'Chained/Filtered',
-          matchedAttr: `Parent: ${uParent.testId || uParent.id || uParent.name}`,
-          stability: 'BEST',
-          target: { kind: 'chain', parent: pTarget, child: childLoc.target },
-          ...withAction(chainCode, el),
-          explanation: `Uses a unique parent (${uParent.id || uParent.role}) to narrow down the search. This is the pro approach for elements in lists, tables, or complex dashboards where name alone is ambiguous.`,
-          why: 'Context-specific uniqueness'
-        });
-      }
+    const childLoc = locators.find(l => l.matchesElement && l.target && l.target.kind !== 'id' && l.target.kind !== 'name');
+    const uParent = childLoc ? findUniqueParent(el, customTestAttributes) : null;
+    if (uParent && childLoc) {
+      const pt = uParent.target;
+      const pLabel = pt.kind === 'role' ? pt.name : pt.value;
+      const l = add({
+        method: 'Chained/Filtered',
+        matchedAttr: `Parent: ${pLabel}`,
+        stability: 'BEST',
+        target: { kind: 'chain', parent: pt, child: childLoc.target },
+        explanation: `Uses a unique parent (${pt.kind === 'role' ? pt.role : pLabel}) to narrow down the search. This is the pro approach for elements in lists, tables, or complex dashboards where name alone is ambiguous.`,
+        why: 'Context-specific uniqueness'
+      });
+      measure(l);
     }
 
-    // 10. CSS selector fallback
+    // 11. CSS selector fallback (built to be unique; skipped when it would just
+    // repeat another card's code, e.g. the #id card).
     const cssSelector = buildCSSSelector(el);
     const hasUnstable = hasUnstableClasses(el);
-    locators.push({
-      rank: locators.length + 1,
-      method: 'locator() CSS',
-      matchedAttr: cssSelector,
-      stability: hasUnstable ? 'AVOID' : 'OK',
-      target: { kind: 'css', value: cssSelector },
-      ...withAction(`page.locator(${jsStr(cssSelector)})`, el),
-      explanation: hasUnstable
-        ? `This CSS selector contains auto-generated class names (like styled-components or MUI classes) that regenerate on every build. Using this WILL cause your tests to break regularly. Use a semantic locator instead.`
-        : `CSS selector fallback. Use only when semantic locators are not available. Prefer IDs and data attributes over class-based selectors.`,
-      why: 'CSS selector (fallback)'
-    });
-
-    // ── Live uniqueness: tag each locator with how many elements it matches ───
-    matchCache = new Map();
-    try {
-      locators.forEach(l => {
-        const c = countTargetMatches(l.target);
-        if (c != null) { l.matchCount = c; l.unique = (c === 1); }
+    const cssCode = codeFor({ kind: 'css', value: cssSelector });
+    if (!locators.some(l => l.code === cssCode)) {
+      const l = add({
+        method: 'locator() CSS',
+        matchedAttr: cssSelector,
+        stability: hasUnstable ? 'AVOID' : 'OK',
+        target: { kind: 'css', value: cssSelector },
+        explanation: hasUnstable
+          ? `This CSS selector contains auto-generated class names (like styled-components or MUI classes) that regenerate on every build. Using this WILL cause your tests to break regularly. Use a semantic locator instead.`
+          : `CSS selector fallback. Use only when semantic locators are not available. Prefer IDs and data attributes over class-based selectors.`,
+        why: 'CSS selector (fallback)'
       });
-    } finally {
-      matchCache = null;
+      measure(l);
     }
 
-    // ── Stability-First Sorting ──────────────────────────────────────────────
+    // Mark what isn't unique, in words, on the card itself.
+    locators.forEach(l => {
+      if (typeof l.matchCount !== 'number') return;
+      if (!l.matchesElement) {
+        l.explanation += ' Note: on this page it does not resolve to the selected element (hidden from the accessibility tree, or the text belongs to a child) — do not use it as-is.';
+      } else if (l.matchCount > 1) {
+        l.ambiguous = true;
+        l.explanation += ` Matches ${l.matchCount} elements on this page — not unique; Playwright's strict mode will reject it unless narrowed.`;
+        if (l.target.kind === 'text' && l.matchCount > 2) l.stability = 'OK';
+      }
+    });
+
+    // ── Ranking: unique first, then stability ────────────────────────────────
+    // A BEST locator that matches two elements is worse than an OK one that
+    // matches only this element: locators[0] is what the recorder writes into the
+    // test, so it must never be ambiguous while a unique alternative exists.
     const stabilityWeight = { 'BEST': 4, 'GOOD': 3, 'OK': 2, 'AVOID': 1 };
-    
+    const group = (l) => {
+      if (typeof l.matchCount !== 'number') return 1; // could not be evaluated
+      if (l.unique) return 0;
+      if (l.matchesElement) return 2;                   // ambiguous
+      return 3;                                         // misses the element
+    };
     locators.sort((a, b) => {
+      const ga = group(a), gb = group(b);
+      if (ga !== gb) return ga - gb;
       const wa = stabilityWeight[a.stability] || 0;
       const wb = stabilityWeight[b.stability] || 0;
       if (wa !== wb) return wb - wa;
@@ -724,17 +1600,17 @@
 
     // ── Build avoid list ───────────────────────────────────────────────────────
     const avoidList = [];
-    if (hasUnstableClasses(el)) {
-      const bad = el.className.trim().split(/\s+/).filter(isUnstableClass).slice(0, 3);
+    if (hasUnstable) {
+      const bad = el.className.trim().split(/\s+/).filter(c => !isOwnArtifactClass(c) && isUnstableClass(c)).slice(0, 3);
       avoidList.push({
-        locator: `page.locator('.${bad[0]}')`,
-        reason: `"${bad[0]}" is an auto-generated class (styled-components / CSS-in-JS). It changes on every build and will break your tests.`
+        locator: `page.locator(${jsStr('.' + cssEscape(bad[0]))})`,
+        reason: `"${bad[0]}" is an auto-generated class (styled-components / CSS-in-JS / CSS modules). It changes on every build and will break your tests.`
       });
     }
     if (el.id && isUnstableId(el.id)) {
       avoidList.push({
-        locator: `page.locator('#${el.id}')`,
-        reason: `The ID "${el.id}" appears auto-generated (contains large numbers). It may change between page loads or deploys.`
+        locator: `page.locator(${jsStr('#' + cssEscape(el.id))})`,
+        reason: `The ID "${el.id}" appears auto-generated (framework-generated or contains large numbers). It may change between page loads or deploys.`
       });
     }
     avoidList.push({
@@ -752,7 +1628,7 @@
     let isInShadow = false;
     let shadowHost = null;
     const root = el.getRootNode();
-    if (root instanceof ShadowRoot) {
+    if (root && root.nodeType === 11 && root.host) {
       isInShadow = true;
       shadowHost = root.host.tagName.toLowerCase();
       if (root.host.id) shadowHost += `#${root.host.id}`;
@@ -772,7 +1648,7 @@
       title: titleAttr || null,
       name: name_attr || null,
       href: tag === 'a' ? el.getAttribute('href') : null,
-      classes: typeof el.className === 'string' ? el.className.trim().split(/\s+/).filter(Boolean).slice(0, 6) : [],
+      classes: typeof el.className === 'string' ? el.className.trim().split(/\s+/).filter(c => c && !isOwnArtifactClass(c)).slice(0, 6) : [],
       hasUnstableClasses: hasUnstable,
       isInShadow,
       shadowHost,
@@ -798,7 +1674,10 @@
     } else if (role === 'button' || role === 'link') {
       proTip = `Great — this element has a data-testid. Use getByTestId() as primary and getByRole() as a backup assertion: expect(page.getByRole('${role}', { name: '...' })).toBeVisible()`;
     } else {
-      proTip = `Combine your locator with an assertion: await expect(page.getByRole('${role || tag}')).toBeVisible() — Playwright auto-retries this until the element appears or times out.`;
+      // A tag name is not a role: getByRole('div') silently matches nothing, so an
+      // element without one is asserted through its test id instead.
+      const assertOn = role ? `page.getByRole(${jsStr(role)})` : `page.getByTestId(${jsStr(el.getAttribute('data-testid'))})`;
+      proTip = `Combine your locator with an assertion: await expect(${assertOn}).toBeVisible() — Playwright auto-retries this until the element appears or times out.`;
     }
 
     const a11y = analyzeA11y(el);
@@ -823,8 +1702,15 @@
   global.__LocatorLensEngine = {
     generateLocators,
     getRole,
+    // No per-call cache here: callers such as the Stress Test name thousands of
+    // elements one by one, and building the page-wide label index for each would be
+    // O(n²). Without a cache the native element.labels is used instead.
     getAccessibleName,
     buildCSSSelector,
-    deepQueryAll
+    deepQueryAll,
+    countTargetMatches: (t) => withCaches(() => countTargetMatches(t)),
+    isOwnArtifactClass,
+    isUnstableClass,
+    isUnstableId
   };
 })(typeof globalThis !== 'undefined' ? globalThis : window);
