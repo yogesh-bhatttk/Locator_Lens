@@ -13,6 +13,12 @@
 //       addresses the <iframe> in its parent document; when the frame is
 //       cross-origin its element is unreachable, so only `index` is known and the
 //       generators fall back to positional frame addressing. Nests for deep frames.
+//       Optional `shadowPath` (an <iframe> inside shadow DOM): one CSS selector per
+//       tree, outermost first — the first host in the parent document, each further
+//       host in the previous host's shadow root, the <iframe> in the last root.
+//       Selenium and Cypress walk it host by host, since neither one's CSS pierces
+//       shadow roots; Playwright keeps using `selector`, which its CSS resolves
+//       across the composed tree.
 //
 // An `action` step is: { action, target?, value?, key?, url?, width?, height? }
 //   action ∈ click | dblclick | check | uncheck | fill | selectOption | press | goto | viewport
@@ -25,12 +31,23 @@
   // quote. JS/TS use single quotes; Python uses double quotes. CSS attribute
   // selectors below always use double quotes internally, which q() then escapes
   // correctly for whichever language is active.
+  // Every C0 control, DEL and the two Unicode line separators are written as escapes:
+  // Python rejects a raw NUL in source outright, and a raw control character in a
+  // pasted test is invisible at best. \xNN and \uNNNN mean the same thing in JS/TS
+  // and Python string literals.
+  var NAMED_ESCAPES = { '\n': '\\n', '\r': '\\r', '\t': '\\t' };
+  function escapeControls(s) {
+    // eslint-disable-next-line no-control-regex
+    return s.replace(/[\x00-\x1f\x7f\u2028\u2029]/g, function (c) {
+      if (NAMED_ESCAPES[c]) return NAMED_ESCAPES[c];
+      var code = c.charCodeAt(0);
+      if (code > 0xff) return '\\u' + code.toString(16);
+      return '\\x' + (code < 16 ? '0' : '') + code.toString(16);
+    });
+  }
+
   function q(value, lang) {
-    var s = String(value == null ? '' : value)
-      .replace(/\\/g, '\\\\')
-      .replace(/\r/g, '\\r')
-      .replace(/\n/g, '\\n')
-      .replace(/\t/g, '\\t');
+    var s = escapeControls(String(value == null ? '' : value).replace(/\\/g, '\\\\'));
     if (lang === 'python') {
       return '"' + s.replace(/"/g, '\\"') + '"';
     }
@@ -41,11 +58,20 @@
   // [name="..."]. Without this, a value containing a double quote (placeholders and
   // aria-labels routinely do: 'Search "all" items') closed the selector early and
   // emitted code that throws at runtime. q() then escapes the result again for
-  // whichever host language wraps it.
+  // whichever host language wraps it. A raw newline is not allowed inside a CSS
+  // string either, so control characters become CSS hex escapes.
   function attrSel(value) {
     return String(value == null ? '' : value)
       .replace(/\\/g, '\\\\')
-      .replace(/"/g, '\\"');
+      .replace(/"/g, '\\"')
+      // eslint-disable-next-line no-control-regex
+      .replace(/[\x00-\x1f\x7f]/g, function (c) { return '\\' + c.charCodeAt(0).toString(16) + ' '; });
+  }
+
+  // Collapse whitespace the way Playwright's text/name matching (and the recorder)
+  // do, so Selenium/Cypress compare like with like.
+  function normWs(value) {
+    return String(value == null ? '' : value).replace(/\s+/g, ' ').trim();
   }
 
   // Escape a value for use as a CSS identifier (the "foo" in #foo). Uses the platform
@@ -93,79 +119,385 @@
   }
 
   // ── implicit ARIA role → selector helpers (for Selenium/Cypress) ────────────
-  var ROLE_CSS = {
-    button: 'button, [role="button"]',
-    link: 'a[href], [role="link"]',
-    checkbox: 'input[type="checkbox"], [role="checkbox"]',
-    radio: 'input[type="radio"], [role="radio"]',
-    textbox: 'input:not([type="button"]):not([type="submit"]):not([type="checkbox"]):not([type="radio"]), textarea, [role="textbox"]',
-    heading: 'h1, h2, h3, h4, h5, h6, [role="heading"]',
-    img: 'img, [role="img"]',
-    list: 'ul, ol, [role="list"]',
-    listitem: 'li, [role="listitem"]',
-    combobox: 'select, [role="combobox"]',
-    table: 'table, [role="table"]'
-  };
-  var ROLE_XPATH = {
-    button: 'self::button or @role="button"',
-    link: 'self::a or @role="link"',
-    checkbox: '(self::input and @type="checkbox") or @role="checkbox"',
-    radio: '(self::input and @type="radio") or @role="radio"',
-    textbox: 'self::textarea or (self::input and (not(@type) or @type="text")) or @role="textbox"',
-    heading: 'self::h1 or self::h2 or self::h3 or self::h4 or self::h5 or self::h6 or @role="heading"',
-    img: 'self::img or @role="img"',
-    combobox: 'self::select or @role="combobox"'
+  // One table drives both the CSS (Cypress, unnamed Selenium) and the XPath (named
+  // Selenium) form, so the two can never disagree. It mirrors Playwright's implicit
+  // role mapping (injected roleUtils): a native element only carries its implicit
+  // role when it has no explicit role attribute, hence the :not([role]) on each.
+  //   tag        element name
+  //   typeIn     input types (any listed; 'text' also covers a missing type)
+  //   typeNotIn  input types excluded
+  //   has/lacks  attributes that must be present / absent
+  //   notEmpty   attribute that, when present, must not be ""
+  //   inGrid     only inside a [role=grid]/[role=treegrid] table
+  var TEXTBOX_EXCLUDED = ['hidden', 'file', 'button', 'submit', 'reset', 'image', 'checkbox', 'radio', 'number', 'range', 'search'];
+  var ROLE_NATIVE = {
+    button: [{ tag: 'button' }, { tag: 'input', typeIn: ['button', 'submit', 'reset', 'image', 'file'] }],
+    link: [{ tag: 'a', has: ['href'] }, { tag: 'area', has: ['href'] }],
+    checkbox: [{ tag: 'input', typeIn: ['checkbox'] }],
+    radio: [{ tag: 'input', typeIn: ['radio'] }],
+    textbox: [{ tag: 'textarea' }, { tag: 'input', typeNotIn: TEXTBOX_EXCLUDED, lacks: ['list'] }],
+    searchbox: [{ tag: 'input', typeIn: ['search'], lacks: ['list'] }],
+    combobox: [{ tag: 'select', lacks: ['multiple'] }, { tag: 'input', typeIn: ['text', 'email', 'tel', 'url', 'search'], has: ['list'] }],
+    listbox: [{ tag: 'select', has: ['multiple'] }, { tag: 'datalist' }],
+    option: [{ tag: 'option' }],
+    spinbutton: [{ tag: 'input', typeIn: ['number'] }],
+    slider: [{ tag: 'input', typeIn: ['range'] }],
+    heading: [{ tag: 'h1' }, { tag: 'h2' }, { tag: 'h3' }, { tag: 'h4' }, { tag: 'h5' }, { tag: 'h6' }],
+    img: [{ tag: 'img', notEmpty: 'alt' }, { tag: 'svg' }],
+    list: [{ tag: 'ul' }, { tag: 'ol' }, { tag: 'menu' }],
+    listitem: [{ tag: 'li' }],
+    table: [{ tag: 'table' }],
+    row: [{ tag: 'tr' }],
+    rowgroup: [{ tag: 'thead' }, { tag: 'tbody' }, { tag: 'tfoot' }],
+    cell: [{ tag: 'td' }],
+    gridcell: [{ tag: 'td', inGrid: true }],
+    columnheader: [{ tag: 'th', typeAttr: 'scope', typeNotIn: ['row', 'rowgroup'] }],
+    rowheader: [{ tag: 'th', typeAttr: 'scope', typeIn: ['row', 'rowgroup'] }],
+    navigation: [{ tag: 'nav' }],
+    main: [{ tag: 'main' }],
+    dialog: [{ tag: 'dialog' }],
+    form: [{ tag: 'form', has: ['aria-label'] }, { tag: 'form', has: ['aria-labelledby'] }],
+    region: [{ tag: 'section', has: ['aria-label'] }, { tag: 'section', has: ['aria-labelledby'] }],
+    banner: [{ tag: 'header' }],
+    contentinfo: [{ tag: 'footer' }],
+    complementary: [{ tag: 'aside' }],
+    article: [{ tag: 'article' }],
+    group: [{ tag: 'fieldset' }, { tag: 'details' }, { tag: 'optgroup' }],
+    separator: [{ tag: 'hr' }],
+    progressbar: [{ tag: 'progress' }],
+    meter: [{ tag: 'meter' }],
+    status: [{ tag: 'output' }],
+    paragraph: [{ tag: 'p' }],
+    figure: [{ tag: 'figure' }],
+    term: [{ tag: 'dt' }, { tag: 'dfn' }],
+    definition: [{ tag: 'dd' }],
+    blockquote: [{ tag: 'blockquote' }],
+    caption: [{ tag: 'caption' }],
+    code: [{ tag: 'code' }],
+    emphasis: [{ tag: 'em' }],
+    strong: [{ tag: 'strong' }],
+    deletion: [{ tag: 'del' }],
+    insertion: [{ tag: 'ins' }],
+    mark: [{ tag: 'mark' }],
+    search: [{ tag: 'search' }]
   };
 
-  function roleCss(role) { return ROLE_CSS[role] || ('[role="' + role + '"]'); }
+  /** The native alternatives for a role, narrowed to one heading level if given. */
+  function roleNatives(role, level) {
+    var natives = ROLE_NATIVE[role] || [];
+    if (role === 'heading' && level) {
+      natives = natives.filter(function (n) { return n.tag === 'h' + level; });
+    }
+    return natives;
+  }
+
+  function nativeCss(n) {
+    var attrPart = '';
+    (n.has || []).forEach(function (a) { attrPart += '[' + a + ']'; });
+    (n.lacks || []).forEach(function (a) { attrPart += ':not([' + a + '])'; });
+    if (n.notEmpty) attrPart += ':not([' + n.notEmpty + '=""])';
+    var typeAttr = n.typeAttr || 'type';
+    (n.typeNotIn || []).forEach(function (t) { attrPart += ':not([' + typeAttr + '="' + t + '"])'; });
+    attrPart += ':not([role])';
+    var heads = [n.tag];
+    if (n.typeIn) {
+      heads = n.typeIn.map(function (t) { return n.tag + '[' + typeAttr + '="' + t + '"]'; });
+      if (n.typeIn.indexOf('text') !== -1) heads.unshift(n.tag + ':not([' + typeAttr + '])');
+    }
+    var prefixes = n.inGrid ? ['[role="grid"] ', '[role="treegrid"] '] : [''];
+    var out = [];
+    prefixes.forEach(function (p) { heads.forEach(function (h) { out.push(p + h + attrPart); }); });
+    return out;
+  }
+
+  function nativeXpath(n) {
+    var parts = ['self::' + n.tag, 'not(@role)'];
+    if (n.tag === 'svg') parts[0] = 'local-name()="svg"'; // SVG namespace: self::svg misses it
+    var typeAttr = '@' + (n.typeAttr || 'type');
+    if (n.typeIn) {
+      var any = n.typeIn.map(function (t) { return typeAttr + '="' + t + '"'; });
+      if (n.typeIn.indexOf('text') !== -1) any.unshift('not(' + typeAttr + ')');
+      parts.push('(' + any.join(' or ') + ')');
+    }
+    (n.typeNotIn || []).forEach(function (t) { parts.push('not(' + typeAttr + '="' + t + '")'); });
+    (n.has || []).forEach(function (a) { parts.push('@' + a); });
+    (n.lacks || []).forEach(function (a) { parts.push('not(@' + a + ')'); });
+    if (n.notEmpty) parts.push('not(@' + n.notEmpty + '="")');
+    if (n.inGrid) parts.push('ancestor::table[@role="grid" or @role="treegrid"]');
+    return '(' + parts.join(' and ') + ')';
+  }
+
+  function explicitRole(role, level) {
+    return { css: '[role="' + attrSel(role) + '"]' + (level ? '[aria-level="' + level + '"]' : ''),
+      xpath: '(@role=' + xpathLiteral(role) + (level ? ' and @aria-level="' + level + '"' : '') + ')' };
+  }
+
+  function roleCss(role, level) {
+    var sels = [];
+    roleNatives(role, level).forEach(function (n) { sels = sels.concat(nativeCss(n)); });
+    sels.push(explicitRole(role, level).css);
+    return sels.join(', ');
+  }
+
+  function roleNodeXpath(role, level) {
+    var alts = roleNatives(role, level).map(nativeXpath);
+    alts.push(explicitRole(role, level).xpath);
+    return alts.join(' or ');
+  }
+
+  // ── accessible-name / label matching in XPath 1.0 (Selenium) ───────────────
+  // Playwright's getByRole name and getByLabel do not look at text content alone: a
+  // form control is named by <label for>, a wrapping <label>, aria-labelledby,
+  // aria-label, title, placeholder, or (buttons) its value. `contains` is
+  // case-sensitive here — the recorded name comes from the element itself, so it is
+  // never missed, and it can only match fewer elements than Playwright's
+  // case-insensitive default.
+  function xpMatch(expr, lit, exact) {
+    return exact ? 'normalize-space(' + expr + ')=' + lit : 'contains(normalize-space(' + expr + '), ' + lit + ')';
+  }
+
+  // Only the name sources a role can actually use are emitted, which keeps the
+  // generated XPath readable: labels, values and placeholders are form-control
+  // sources; text content names everything else (and ARIA widgets like
+  // div[role=checkbox]).
+  var LABELLED_ROLES = ['button', 'textbox', 'searchbox', 'combobox', 'listbox', 'checkbox', 'radio', 'spinbutton', 'slider', 'meter', 'progressbar', 'status'];
+  var PLACEHOLDER_ROLES = ['textbox', 'searchbox', 'combobox'];
+  var ALT_ROLES = ['img', 'button', 'link'];
+
+  // Strict precedence, as in Playwright's accessible-name computation: the first
+  // source that is present decides the name, so a later source can never add a
+  // match (a button with aria-label="Close" is not also named by its text).
+  // Each source is a [present, matches] pair; a match implies presence.
+  function nameXpath(name, exact, role) {
+    var lit = xpathLiteral(normWs(name));
+    var m = function (e) { return xpMatch(e, lit, exact); };
+    var has = function (e) { return 'normalize-space(' + e + ')!=""'; };
+    var formish = LABELLED_ROLES.indexOf(role) !== -1;
+    var sources = [
+      ['@aria-labelledby', '@aria-labelledby = //*[@id][' + m('.') + ']/@id'],
+      [has('@aria-label'), m('@aria-label')]
+    ];
+    if (formish) {
+      sources.push([
+        '(@id and @id = //label[' + has('.') + ']/@for) or ancestor::label[' + has('.') + ']',
+        '(@id and @id = //label[' + m('.') + ']/@for) or ancestor::label[' + m('.') + ']'
+      ]);
+    }
+    if (role === 'button') {
+      var btn = 'self::input and (@type="button" or @type="submit" or @type="reset")';
+      sources.push(['(' + btn + ' and ' + has('@value') + ')', '(' + btn + ' and ' + m('@value') + ')']);
+    }
+    if (ALT_ROLES.indexOf(role) !== -1) {
+      var altEl = 'self::img or self::area or (self::input and @type="image")';
+      sources.push(['((' + altEl + ') and ' + has('@alt') + ')', '((' + altEl + ') and ' + m('@alt') + ')']);
+    }
+    var guard = function (e) { return formish ? '(not(self::input or self::select or self::textarea) and (' + e + '))' : '(' + e + ')'; };
+    sources.push([guard(has('.') + ' or .//img[' + has('@alt') + ']'), guard(m('.') + ' or .//img[' + m('@alt') + ']')]);
+    sources.push([has('@title'), m('@title')]);
+    if (PLACEHOLDER_ROLES.indexOf(role) !== -1) sources.push([has('@placeholder'), m('@placeholder')]);
+    var expr = sources[sources.length - 1][1];
+    for (var i = sources.length - 2; i >= 0; i--) {
+      expr = '(' + sources[i][1] + ') or (not(' + sources[i][0] + ') and (' + expr + '))';
+    }
+    return expr;
+  }
+
+
+  var LABELABLE_XPATH = '(self::input and not(@type="hidden")) or self::textarea or self::select or self::button or self::meter or self::output or self::progress';
+  var LABELABLE_CSS = 'input:not([type="hidden"]), textarea, select, button, meter, output, progress, [aria-label], [aria-labelledby]';
+
+  function labelXpath(text, exact) {
+    var lit = xpathLiteral(normWs(text));
+    var m = function (e) { return xpMatch(e, lit, exact); };
+    return '(@aria-labelledby and @aria-labelledby = //*[@id][' + m('.') + ']/@id)' +
+      ' or ' + m('@aria-label') +
+      ' or ((' + LABELABLE_XPATH + ') and ((@id and @id = //label[' + m('.') + ']/@for) or ancestor::label[' + m('.') + ']))';
+  }
+
+  // Deepest element whose text matches — `//*[contains(., X)]` alone returns <html>
+  // first, because every ancestor's string-value contains the text too.
+  var TEXT_SKIP = 'self::script or self::style or self::noscript or self::template';
+  function textXpath(text, exact, rel) {
+    var lit = xpathLiteral(normWs(text));
+    var m = xpMatch('.', lit, exact);
+    return (rel ? './/*' : '//*') + '[not(ancestor-or-self::head or ' + TEXT_SKIP + ') and ' + m +
+      ' and not(.//*[not(' + TEXT_SKIP + ') and ' + m + '])]';
+  }
+
+  // ── Cypress: the accessible-name helper emitted once per spec ───────────────
+  // Cypress has no getByRole/getByLabel and no XPath, so role-with-name and label
+  // locators select the candidate elements by CSS and narrow them with .filter()
+  // through this helper. `$T{...}` holds TypeScript-only annotations.
+  var CY_HELPER_NAME = 'locatraMatch';
+  var CY_HELPER_SRC = [
+    '// Locatra: match an element by its accessible name (kind \'name\') or by its label',
+    '// (kind \'label\') the way Playwright\'s getByRole / getByLabel do.',
+    'function locatraMatch(el$T{: HTMLElement}, kind$T{: string}, text$T{: string}, exact$T{?: boolean})$T{: boolean} {',
+    '  const norm = (s$T{?: string | null})$T{: string} => String(s == null ? \'\' : s).replace(/\\s+/g, \' \').trim();',
+    '  const hit = (s$T{?: string | null})$T{: boolean} => {',
+    '    const v = norm(s);',
+    '    return exact ? v === text : v !== \'\' && v.indexOf(text) !== -1;',
+    '  };',
+    '  const doc = el.ownerDocument;',
+    '  const byIds = (ids$T{: string | null})$T{: string} => norm((ids || \'\').split(/\\s+/).map((id) => {',
+    '    const n = id ? doc.getElementById(id) : null;',
+    '    return n ? n.textContent : \'\';',
+    '  }).join(\' \'));',
+    '  const labels = Array.from((el$T{ as HTMLInputElement}).labels || []).map((l) => l.textContent).join(\' \');',
+    '  if (kind === \'label\') {',
+    '    return hit(byIds(el.getAttribute(\'aria-labelledby\'))) || hit(el.getAttribute(\'aria-label\')) || hit(labels);',
+    '  }',
+    '  const tag = el.tagName.toLowerCase();',
+    '  const type = (el.getAttribute(\'type\') || \'\').toLowerCase();',
+    '  const content = (n$T{: Node})$T{: string} => {',
+    '    if (n.nodeType === 3) return n.nodeValue || \'\';',
+    '    if (n.nodeType !== 1) return \'\';',
+    '    const e = n$T{ as Element};',
+    '    const t = e.tagName.toLowerCase();',
+    '    if (t === \'script\' || t === \'style\' || t === \'template\' || e.getAttribute(\'aria-hidden\') === \'true\') return \'\';',
+    '    if (e !== el && e.getAttribute(\'aria-label\')) return \' \' + e.getAttribute(\'aria-label\') + \' \';',
+    '    if (t === \'img\') return \' \' + (e.getAttribute(\'alt\') || \'\') + \' \';',
+    '    return Array.from(e.childNodes).map(content).join(\'\');',
+    '  };',
+    '  let name = byIds(el.getAttribute(\'aria-labelledby\')) || norm(el.getAttribute(\'aria-label\')) || norm(labels);',
+    '  if (!name && tag === \'input\' && [\'button\', \'submit\', \'reset\'].indexOf(type) !== -1) name = norm((el$T{ as HTMLInputElement}).value);',
+    '  if (!name && (tag === \'img\' || tag === \'area\' || (tag === \'input\' && type === \'image\'))) name = norm(el.getAttribute(\'alt\'));',
+    '  if (!name && [\'input\', \'select\', \'textarea\'].indexOf(tag) === -1) name = norm(content(el));',
+    '  if (!name) name = norm(el.getAttribute(\'title\')) || norm(el.getAttribute(\'placeholder\'));',
+    '  return hit(name);',
+    '}'
+  ];
+  function cyHelperSource(lang) {
+    var ts = lang === 'typescript';
+    return CY_HELPER_SRC.map(function (l) {
+      return l.replace(/\$T\{([^}]*)\}/g, function (m, t) { return ts ? t : ''; });
+    }).join('\n');
+  }
+
+  function cyFilter(kind, text, exact, lang) {
+    return '.filter((_, el) => ' + CY_HELPER_NAME + '(el, ' + q(kind, lang) + ', ' + q(normWs(text), lang) +
+      (exact ? ', true' : '') + '))';
+  }
+
+  // Regex literal for an exact cy.contains(): whole (whitespace-trimmed) text only.
+  function cyExactTextRegex(text) {
+    var body = normWs(text)
+      .replace(/[\\^$.*+?()[\]{}|/]/g, '\\$&')
+      .replace(/ /g, '\\s+');
+    body = escapeControls(body);
+    return '/^\\s*' + body + '\\s*$/';
+  }
 
   // ── key name mapping (recorder captures DOM e.key like "Enter") ─────────────
-  var KEY_CYPRESS = { Enter: '{enter}', Tab: '{tab}', Escape: '{esc}', Backspace: '{backspace}', Delete: '{del}', ArrowUp: '{uparrow}', ArrowDown: '{downarrow}', ArrowLeft: '{leftarrow}', ArrowRight: '{rightarrow}' };
-  var KEY_SELENIUM = { Enter: 'ENTER', Tab: 'TAB', Escape: 'ESCAPE', Backspace: 'BACK_SPACE', Delete: 'DELETE', ArrowUp: 'ARROW_UP', ArrowDown: 'ARROW_DOWN', ArrowLeft: 'ARROW_LEFT', ArrowRight: 'ARROW_RIGHT', ' ': 'SPACE' };
+  var KEY_CYPRESS = { Enter: '{enter}', Escape: '{esc}', Backspace: '{backspace}', Delete: '{del}', ArrowUp: '{uparrow}', ArrowDown: '{downarrow}', ArrowLeft: '{leftarrow}', ArrowRight: '{rightarrow}', Home: '{home}', End: '{end}', PageUp: '{pageup}', PageDown: '{pagedown}', Insert: '{insert}' };
+  // Key names cy.realPress() (cypress-real-events) accepts — a subset of its
+  // keyCodeDefinitions that matches DOM e.key values one-to-one. Space is 'Space'.
+  var REAL_PRESS_MODS = ['Control', 'Alt', 'Shift', 'Meta'];
+  var REAL_PRESS_NAMED = ['Enter', 'Tab', 'Escape', 'Space', 'Backspace', 'Delete', 'Insert', 'Home', 'End', 'PageUp', 'PageDown',
+    'ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight'];
+  for (var fk = 1; fk <= 24; fk++) REAL_PRESS_NAMED.push('F' + fk);
+  var REAL_PRESS_CHARS = '0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ*+-;=,.`[\\]\'/)!@#$%^&(:<_>?~{|}"';
+  var KEY_SELENIUM = { Enter: 'ENTER', Tab: 'TAB', Escape: 'ESCAPE', Backspace: 'BACK_SPACE', Delete: 'DELETE', ArrowUp: 'ARROW_UP', ArrowDown: 'ARROW_DOWN', ArrowLeft: 'ARROW_LEFT', ArrowRight: 'ARROW_RIGHT', ' ': 'SPACE', Space: 'SPACE', Home: 'HOME', End: 'END', PageUp: 'PAGE_UP', PageDown: 'PAGE_DOWN', Insert: 'INSERT', F1: 'F1', F2: 'F2', F3: 'F3', F4: 'F4', F5: 'F5', F6: 'F6', F7: 'F7', F8: 'F8', F9: 'F9', F10: 'F10', F11: 'F11', F12: 'F12' };
+  var MOD_SELENIUM = { Shift: 'SHIFT', Control: 'CONTROL', Alt: 'ALT', Meta: 'META' };
+
+  /** Split a Playwright-style key combo ('Shift+Tab', 'Control++', ' ') into parts. */
+  function parseKeyCombo(value) {
+    var v = String(value == null ? '' : value);
+    if (v === '' || v === '+') return { mods: [], key: v };
+    var mods, key;
+    if (/\+\+$/.test(v)) {
+      key = '+';
+      mods = v.slice(0, -2).split('+');
+    } else {
+      var parts = v.split('+');
+      key = parts.pop();
+      mods = parts;
+    }
+    return { mods: mods.filter(function (m) { return m !== ''; }), key: key };
+  }
 
   // ════════════════════════════════════════════════════════════════════════════
   //  Locator expressions
   // ════════════════════════════════════════════════════════════════════════════
 
+  function hasNth(t) { return typeof t.nth === 'number' && t.nth >= 0 && Math.floor(t.nth) === t.nth; }
+
+  /**
+   * A role locator with no name and no position can match several elements:
+   * Playwright's strict mode would throw on it, Cypress refuses to click a
+   * multi-element subject, and Selenium silently takes the first. Known-unique
+   * targets (matchCount/unique from the engine) are not ambiguous.
+   */
+  function isAmbiguousRole(t) {
+    return !!t && t.kind === 'role' && !t.name && !hasNth(t) && t.matchCount !== 1 && t.unique !== true;
+  }
+
+  function hasAmbiguousRole(t) {
+    if (!t) return false;
+    if (t.kind === 'frame') return hasAmbiguousRole(t.child);
+    if (t.kind === 'chain') return hasAmbiguousRole(t.parent) || hasAmbiguousRole(t.child);
+    return isAmbiguousRole(t);
+  }
+
   function pwLocator(t, lang) {
     var py = lang === 'python';
     var m = function (camel, snake) { return py ? snake : camel; };
+    // `{ exact: true }` / `exact=True` for the text-matching kinds (C5).
+    var ex = function () {
+      if (!t.exact) return '';
+      return py ? ', exact=True' : ', { exact: true }';
+    };
     switch (t.kind) {
       case 'testid':
         if (t.attr === 'data-testid') return 'page.' + m('getByTestId', 'get_by_test_id') + '(' + q(t.value, lang) + ')';
-        return 'page.locator(' + q('[' + t.attr + '="' + attrSel(t.value) + '"]', lang) + ')';
+        return 'page.locator(' + q('[' + cssIdent(t.attr) + '="' + attrSel(t.value) + '"]', lang) + ')';
       case 'role': {
         var opts = [];
         if (t.name) opts.push(py ? 'name=' + q(t.name, lang) : 'name: ' + q(t.name, lang));
+        if (t.name && t.exact) opts.push(py ? 'exact=True' : 'exact: true');
         if (t.level) opts.push(py ? 'level=' + t.level : 'level: ' + t.level);
         var optStr = '';
         if (opts.length) optStr = py ? ', ' + opts.join(', ') : ', { ' + opts.join(', ') + ' }';
-        return 'page.' + m('getByRole', 'get_by_role') + '(' + q(t.role, lang) + optStr + ')';
+        return 'page.' + m('getByRole', 'get_by_role') + '(' + q(t.role, lang) + optStr + ')' +
+          (hasNth(t) ? '.nth(' + t.nth + ')' : '');
       }
-      case 'label': return 'page.' + m('getByLabel', 'get_by_label') + '(' + q(t.value, lang) + ')';
-      case 'placeholder': return 'page.' + m('getByPlaceholder', 'get_by_placeholder') + '(' + q(t.value, lang) + ')';
-      case 'altText': return 'page.' + m('getByAltText', 'get_by_alt_text') + '(' + q(t.value, lang) + ')';
-      case 'title': return 'page.' + m('getByTitle', 'get_by_title') + '(' + q(t.value, lang) + ')';
-      case 'text': return 'page.' + m('getByText', 'get_by_text') + '(' + q(t.value, lang) + ')';
+      case 'label': return 'page.' + m('getByLabel', 'get_by_label') + '(' + q(t.value, lang) + ex() + ')';
+      case 'placeholder': return 'page.' + m('getByPlaceholder', 'get_by_placeholder') + '(' + q(t.value, lang) + ex() + ')';
+      case 'altText': return 'page.' + m('getByAltText', 'get_by_alt_text') + '(' + q(t.value, lang) + ex() + ')';
+      case 'title': return 'page.' + m('getByTitle', 'get_by_title') + '(' + q(t.value, lang) + ex() + ')';
+      case 'text': return 'page.' + m('getByText', 'get_by_text') + '(' + q(t.value, lang) + ex() + ')';
       case 'id': return 'page.locator(' + q('#' + cssIdent(t.value), lang) + ')';
       case 'name': return 'page.locator(' + q('[name="' + attrSel(t.value) + '"]', lang) + ')';
       case 'css': default: return 'page.locator(' + q(t.value || 'body', lang) + ')';
     }
   }
 
+  // Attribute selector for the attribute-matching kinds: equality when the engine
+  // asked for an exact match, otherwise substring (Playwright's default semantics).
+  function attrMatchSel(attr, value, exact) {
+    return '[' + attr + (exact ? '="' : '*="') + attrSel(value) + '"]';
+  }
+
   function cyLocator(t, lang) {
     switch (t.kind) {
-      case 'testid': return 'cy.get(' + q('[' + t.attr + '="' + attrSel(t.value) + '"]', lang) + ')';
+      case 'testid': return 'cy.get(' + q('[' + cssIdent(t.attr) + '="' + attrSel(t.value) + '"]', lang) + ')';
       case 'role': {
-        var sel = roleCss(t.role);
-        if (t.name) return 'cy.get(' + q(sel, lang) + ').contains(' + q(t.name, lang) + ')';
-        return 'cy.get(' + q(sel, lang) + ')';
+        var expr = 'cy.get(' + q(roleCss(t.role, t.level), lang) + ')';
+        // .contains(name) used to yield the deepest element containing the text — a
+        // <span> inside the button, never an <input> named by its <label>, and never
+        // something a chained .find() could continue from. Filter by accessible name.
+        if (t.name) expr += cyFilter('name', t.name, t.exact, lang);
+        if (hasNth(t)) expr += '.eq(' + t.nth + ')';
+        else if (isAmbiguousRole(t)) expr += '.first()';
+        return expr;
       }
-      case 'label': return 'cy.get(' + q('[aria-label="' + attrSel(t.value) + '"]', lang) + ')';
-      case 'placeholder': return 'cy.get(' + q('[placeholder="' + attrSel(t.value) + '"]', lang) + ')';
-      case 'altText': return 'cy.get(' + q('img[alt="' + attrSel(t.value) + '"]', lang) + ')';
-      case 'title': return 'cy.get(' + q('[title="' + attrSel(t.value) + '"]', lang) + ')';
-      case 'text': return 'cy.contains(' + q(t.value, lang) + ')';
+      case 'label': return 'cy.get(' + q(LABELABLE_CSS, lang) + ')' + cyFilter('label', t.value, t.exact, lang);
+      case 'placeholder': return 'cy.get(' + q(attrMatchSel('placeholder', t.value, t.exact), lang) + ')';
+      case 'altText': return 'cy.get(' + q(attrMatchSel('alt', t.value, t.exact), lang) + ')';
+      case 'title': return 'cy.get(' + q(attrMatchSel('title', t.value, t.exact), lang) + ')';
+      case 'text':
+        if (t.exact) return 'cy.contains(' + cyExactTextRegex(t.value) + ')';
+        return 'cy.contains(' + q(t.value, lang) + ')';
       case 'id': return 'cy.get(' + q('#' + cssIdent(t.value), lang) + ')';
       case 'name': return 'cy.get(' + q('[name="' + attrSel(t.value) + '"]', lang) + ')';
       case 'css': default: return 'cy.get(' + q(t.value || 'body', lang) + ')';
@@ -186,29 +518,30 @@
   // `rel` renders the expression for use inside a parent element's search scope.
   // An absolute "//*[…]" handed to element.find_element still searches the whole
   // document — the leading dot is what actually scopes it to the parent.
-  function roleXpath(role, name, rel) {
-    var node = ROLE_XPATH[role] || ('@role="' + attrSel(role) + '"');
+  function roleXpath(t, rel) {
+    var node = roleNodeXpath(t.role, t.level);
     var axis = rel ? './/*' : '//*';
-    if (name) {
-      // xpathLiteral() keeps quotes in the name intact — the previous version deleted
-      // every double quote from the accessible name, so a button labelled Delete "row"
-      // produced an xpath that silently matched the wrong element (or nothing).
-      return axis + '[(' + node + ') and contains(normalize-space(.), ' + xpathLiteral(name) + ')]';
-    }
-    return axis + '[' + node + ']';
+    // xpathLiteral() (inside nameXpath) keeps quotes in the name intact — an older
+    // version deleted every double quote, so Delete "row" matched the wrong element.
+    var xp = t.name
+      ? axis + '[(' + node + ') and (' + nameXpath(t.name, t.exact, t.role) + ')]'
+      : axis + '[' + node + ']';
+    if (hasNth(t)) xp = '(' + xp + ')[' + (t.nth + 1) + ']';
+    return xp;
   }
 
   function selLocator(t, lang, rel) {
+    var axis = rel ? './/*' : '//*';
     switch (t.kind) {
-      case 'testid': return selFind('css', '[' + t.attr + '="' + attrSel(t.value) + '"]', lang);
+      case 'testid': return selFind('css', '[' + cssIdent(t.attr) + '="' + attrSel(t.value) + '"]', lang);
       case 'role':
-        if (t.name) return selFind('xpath', roleXpath(t.role, t.name, rel), lang);
-        return selFind('css', roleCss(t.role), lang);
-      case 'label': return selFind('css', '[aria-label="' + attrSel(t.value) + '"]', lang);
-      case 'placeholder': return selFind('css', '[placeholder="' + attrSel(t.value) + '"]', lang);
-      case 'altText': return selFind('css', 'img[alt="' + attrSel(t.value) + '"]', lang);
-      case 'title': return selFind('css', '[title="' + attrSel(t.value) + '"]', lang);
-      case 'text': return selFind('xpath', (rel ? './/*' : '//*') + '[contains(normalize-space(.), ' + xpathLiteral(t.value) + ')]', lang);
+        if (t.name || hasNth(t)) return selFind('xpath', roleXpath(t, rel), lang);
+        return selFind('css', roleCss(t.role, t.level), lang);
+      case 'label': return selFind('xpath', axis + '[' + labelXpath(t.value, t.exact) + ']', lang);
+      case 'placeholder': return selFind('css', attrMatchSel('placeholder', t.value, t.exact), lang);
+      case 'altText': return selFind('css', attrMatchSel('alt', t.value, t.exact), lang);
+      case 'title': return selFind('css', attrMatchSel('title', t.value, t.exact), lang);
+      case 'text': return selFind('xpath', textXpath(t.value, t.exact, rel), lang);
       case 'id': return selFind('id', t.value, lang);
       case 'name': return selFind('name', t.value, lang);
       case 'css': default: return selFind('css', t.value || 'body', lang);
@@ -253,10 +586,18 @@
     var frames = [];
     var t = target;
     while (t && t.kind === 'frame') {
-      frames.push({ selector: t.selector, index: t.index });
+      var f = { selector: t.selector, index: t.index };
+      if (t.selector && validShadowPath(t.shadowPath)) f.shadowPath = t.shadowPath;
+      frames.push(f);
       t = t.child;
     }
     return { frames: frames, inner: t || null };
+  }
+
+  function validShadowPath(p) {
+    if (!Array.isArray(p) || p.length < 2) return false;
+    for (var i = 0; i < p.length; i++) if (typeof p[i] !== 'string' || !p[i]) return false;
+    return true;
   }
 
   function frameEnterExpr(frame, fw, lang) {
@@ -265,6 +606,14 @@
       var base = sel
         ? 'cy.get(' + q(sel, lang) + ')'
         : "cy.get('iframe').eq(" + (frame.index || 0) + ')';
+      if (frame.shadowPath) {
+        // cy.get/find stay inside one tree (and includeShadowDom matches a selector
+        // within a single root, not a path across several), so step host by host.
+        base = 'cy.get(' + q(frame.shadowPath[0], lang) + ')';
+        for (var h = 1; h < frame.shadowPath.length; h++) {
+          base += '.shadow().find(' + q(frame.shadowPath[h], lang) + ')';
+        }
+      }
       // The no-plugin recipe: reach the frame's body, then continue inside it.
       return base + ".its('0.contentDocument.body').should('not.be.empty').then(cy.wrap)";
     }
@@ -303,8 +652,96 @@
   }
 
   // ════════════════════════════════════════════════════════════════════════════
-  //  Action statements (one line, no wrapper indentation)
+  //  Action statements (no wrapper indentation; may span several lines)
   // ════════════════════════════════════════════════════════════════════════════
+
+  var KNOWN_ACTIONS = ['click', 'dblclick', 'check', 'uncheck', 'fill', 'selectOption', 'hover', 'press', 'goto', 'viewport', 'assert', 'upload'];
+  var TARGETLESS_ACTIONS = ['press', 'goto', 'viewport'];
+
+  function comment(lang, text) {
+    return (lang === 'python' ? '# ' : '// ') + text;
+  }
+
+  /** A recorded value, safe to quote inside a one-line comment. */
+  function commentSafe(value) {
+    // eslint-disable-next-line no-control-regex
+    return String(value == null ? '' : value).replace(/[\x00-\x1f\x7f\u2028\u2029]/g, ' ').slice(0, 80);
+  }
+
+  function todo(lang, text) { return comment(lang, 'TODO: ' + text); }
+
+  // ── sensitive values (C4) ──────────────────────────────────────────────────
+  function secretName(step) {
+    var n = step && step.secretName;
+    return (typeof n === 'string' && /^[A-Za-z_][A-Za-z0-9_]*$/.test(n)) ? n : 'LOCATRA_PASSWORD';
+  }
+
+  function secretExpr(step, fw, lang) {
+    var name = secretName(step);
+    if (lang === 'python') return 'os.environ.get("' + name + '", "")';
+    if (fw === 'cypress') return "Cypress.env('" + name + "')";
+    return 'process.env.' + name + " ?? ''";
+  }
+
+  function fillValueExpr(step, fw, lang) {
+    return step.sensitive ? secretExpr(step, fw, lang) : q(step.value, lang);
+  }
+
+  // ── uploads (C6) ───────────────────────────────────────────────────────────
+  function uploadFiles(value) {
+    if (Array.isArray(value)) return value.map(String);
+    var v = value == null ? '' : String(value);
+    try {
+      var parsed = JSON.parse(v);
+      if (Array.isArray(parsed)) return parsed.map(String);
+      if (typeof parsed === 'string') return parsed ? [parsed] : [];
+    } catch (e) {}
+    return v ? [v] : [];
+  }
+
+  function listLiteral(items, lang) {
+    return '[' + items.map(function (i) { return q(i, lang); }).join(', ') + ']';
+  }
+
+  function uploadNote(lang) {
+    return comment(lang, 'NOTE: these file paths must exist relative to where the test runs');
+  }
+
+  // ── notes prepended to Selenium/Cypress statements ─────────────────────────
+  function hasPositionalFrame(t) {
+    while (t && t.kind === 'frame') {
+      if (!t.selector) return true;
+      t = t.child;
+    }
+    return false;
+  }
+
+  function statementNotes(step, fw, lang) {
+    var notes = [];
+    if (hasAmbiguousRole(step.target)) {
+      notes.push(comment(lang, 'NOTE: this role locator has no accessible name and may match several elements; ' +
+        (fw === 'cypress' ? '.first() picks the first one.' : 'the first match is used.')));
+    }
+    if (fw === 'cypress' && hasPositionalFrame(step.target)) {
+      notes.push(comment(lang, 'NOTE: this iframe is cross-origin, so contentDocument is null and Cypress cannot reach into it.'));
+      notes.push(comment(lang, 'Test that page in its own spec (cy.visit/cy.origin) or set chromeWebSecurity: false (Chromium only).'));
+    }
+    return notes;
+  }
+
+  function withNotes(notes, stmt) {
+    return notes.length ? notes.join('\n') + '\n' + stmt : stmt;
+  }
+
+  // Input types whose value cannot be typed reliably (Selenium types dates in the
+  // browser's locale order; a slider or colour picker has no keyboard text entry).
+  var SET_VALUE_TYPES_SELENIUM = ['range', 'color', 'date', 'time', 'datetime-local', 'month', 'week'];
+  var SET_VALUE_TYPES_CYPRESS = ['range', 'color'];
+  // Uses the prototype's value setter so frameworks that track the DOM value
+  // (React) notice the change, then fires the events a user's input would.
+  var SET_VALUE_JS = "const el = arguments[0]; const d = Object.getOwnPropertyDescriptor(Object.getPrototypeOf(el), 'value'); " +
+    "if (d && d.set) d.set.call(el, arguments[1]); else el.value = arguments[1]; " +
+    "el.dispatchEvent(new Event('input', { bubbles: true })); el.dispatchEvent(new Event('change', { bubbles: true }));";
 
   function pwStatement(step, lang) {
     var py = lang === 'python';
@@ -326,33 +763,126 @@
       case 'dblclick': return aw + loc + '.dblclick()' + semi;
       case 'check': return aw + loc + '.check()' + semi;
       case 'uncheck': return aw + loc + '.uncheck()' + semi;
-      case 'fill': return aw + loc + (py ? '.fill(' : '.fill(') + q(step.value, lang) + ')' + semi;
+      // fill() also sets range/color/date inputs, so inputType needs no special case.
+      case 'fill': return aw + loc + '.fill(' + fillValueExpr(step, 'playwright', lang) + ')' + semi;
+      case 'upload':
+        return uploadNote(lang) + '\n' + aw + loc + (py ? '.set_input_files(' : '.setInputFiles(') +
+          listLiteral(uploadFiles(step.value), lang) + ')' + semi;
       case 'selectOption':
         if (py) return loc + '.select_option(' + q(step.value, lang) + ')';
         return 'await ' + loc + '.selectOption(' + q(step.value, lang) + ');';
-      default: return aw + loc + '.click()' + semi;
+      default: return todo(lang, 'unsupported step "' + commentSafe(a) + '"');
     }
   }
 
-  function cyKey(key) { return KEY_CYPRESS[key] || ('{' + String(key || '').toLowerCase() + '}'); }
+  function isSingleChar(key) { return Array.from(String(key)).length === 1; }
+
+  function realPressKey(key) {
+    if (key === ' ' || key === 'Space') return 'Space';
+    if (REAL_PRESS_NAMED.indexOf(key) !== -1) return key;
+    return key.length === 1 && REAL_PRESS_CHARS.indexOf(key) !== -1 ? key : null;
+  }
+
+  // Cypress, plain keys: Tab has no cy.type() sequence at all ({tab} throws), so it
+  // goes through cy.press() (Cypress ≥ 14.3); everything else is typed into whatever
+  // has focus. Modifier combos: cy.type()'s {shift}/{ctrl}/… only set flags on
+  // synthetic, untrusted events, so the browser never performs the native action
+  // (Shift+Tab focus movement, Shift+Space on a button, Ctrl/Meta+Enter on a link,
+  // shortcuts) — and cy.press() takes no modifiers. Combos therefore use the
+  // cypress-real-events plugin's cy.realPress(), which dispatches real key events
+  // over CDP; wrapScript() adds its import. A key either path cannot express
+  // becomes a TODO — never a different key.
+  function cyPress(value, lang) {
+    var raw = value == null || value === '' ? 'Enter' : value;
+    var p = parseKeyCombo(raw);
+    var key = p.key;
+    if (p.mods.length) {
+      for (var i = 0; i < p.mods.length; i++) {
+        if (REAL_PRESS_MODS.indexOf(p.mods[i]) === -1) {
+          return todo(lang, 'press "' + commentSafe(raw) + '" — modifier not supported by cy.realPress()');
+        }
+      }
+      var real = realPressKey(key);
+      if (!real) return todo(lang, 'press "' + commentSafe(raw) + '" — key not supported by cy.realPress()');
+      return 'cy.realPress(' + listLiteral(p.mods.concat(real), lang) + ');';
+    }
+    if (key === 'Tab') return 'cy.press(Cypress.Keyboard.Keys.TAB);';
+    var seq = KEY_CYPRESS[key];
+    if (!seq && (key === ' ' || key === 'Space')) seq = ' ';
+    if (!seq && isSingleChar(key)) seq = key === '{' ? '{{}' : key;
+    if (!seq) return todo(lang, 'press "' + commentSafe(raw) + '" — key not supported by cy.type()');
+    return 'cy.focused().type(' + q(seq, lang) + ');';
+  }
+
+  // .check()/.uncheck() only work on native checkbox/radio inputs; an ARIA control
+  // (div[role=checkbox], role=switch, aria-checked) has to be clicked, and only when
+  // its state differs. The target alone cannot tell the two apart, so branch at
+  // run time.
+  function cyToggle(desired) {
+    var native = "$el.is('input[type=\"checkbox\"], input[type=\"radio\"]')";
+    return '.then(($el) => {\n' +
+      '  if (' + native + ') cy.wrap($el).' + (desired ? 'check' : 'uncheck') + '();\n' +
+      "  else if ($el.attr('aria-checked') " + (desired ? '!==' : '===') + " 'true') cy.wrap($el).click();\n" +
+      '});';
+  }
 
   function cyStatement(step, lang) {
     var a = step.action;
     if (a === 'goto') return 'cy.visit(' + q(step.value || step.url || '', lang) + ');';
-    if (a === 'press') return "cy.get('body').type(" + q(cyKey(step.value || step.key), lang) + ');';
+    if (a === 'press') return cyPress(step.value || step.key, lang);
     if (a === 'viewport') return 'cy.viewport(' + vpW(step) + ', ' + vpH(step) + ');';
+    return withNotes(statementNotes(step, 'cypress', lang), cyTargetStatement(step, lang));
+  }
+
+  function cyTargetStatement(step, lang) {
+    var a = step.action;
     if (a === 'assert') return cyAssert(step, lang);
     var loc = locatorExpr(step.target, 'cypress', lang);
     switch (a) {
       case 'click': return loc + '.click();';
       case 'hover': return loc + ".trigger('mouseover');";
       case 'dblclick': return loc + '.dblclick();';
-      case 'check': return loc + '.check();';
-      case 'uncheck': return loc + '.uncheck();';
-      case 'fill': return step.value ? loc + '.clear().type(' + q(step.value, lang) + ');' : loc + '.clear();';
+      case 'check': return loc + cyToggle(true);
+      case 'uncheck': return loc + cyToggle(false);
+      case 'fill':
+        if (step.sensitive) {
+          return loc + '.clear().type(' + secretExpr(step, 'cypress', lang) + ', { log: false, parseSpecialCharSequences: false });';
+        }
+        if (SET_VALUE_TYPES_CYPRESS.indexOf(step.inputType) !== -1) {
+          return loc + ".invoke('val', " + q(step.value, lang) + ").trigger('input').trigger('change');";
+        }
+        // A literal "{" in a recorded value is text, not a cy.type() key sequence.
+        return step.value ? loc + '.clear().type(' + q(step.value, lang) + ', { parseSpecialCharSequences: false });' : loc + '.clear();';
+      case 'upload': {
+        var files = uploadFiles(step.value);
+        if (!files.length) return todo(lang, 'upload step with no files (Cypress cannot clear a file input)');
+        return uploadNote(lang) + '\n' + loc + '.selectFile(' + listLiteral(files, lang) + ');';
+      }
       case 'selectOption': return loc + '.select(' + q(step.value, lang) + ');';
-      default: return loc + '.click();';
+      default: return todo(lang, 'unsupported step "' + commentSafe(a) + '"');
     }
+  }
+
+  // An <iframe> inside shadow DOM is reached host by host: WebDriver searches a
+  // shadow root with CSS only (no XPath), one tree at a time. JS/TS spell every hop
+  // out with awaits — at run time a shadow root's findElement returns a plain
+  // promise, so chaining off it the way off driver.findElement() fails.
+  function selShadowFrameSwitch(path, lang) {
+    if (lang === 'python') {
+      var expr = selFind('css', path[0], lang);
+      for (var i = 1; i < path.length; i++) {
+        expr += '.shadow_root.find_element(By.CSS_SELECTOR, ' + q(path[i], lang) + ')';
+      }
+      return 'driver.switch_to.frame(' + expr + ')';
+    }
+    var lines = ['  const shadowHost1 = await ' + selFind('css', path[0], lang) + ';'];
+    for (var k = 1; k < path.length; k++) {
+      var name = k === path.length - 1 ? 'shadowFrame' : 'shadowHost' + (k + 1);
+      lines.push('  const ' + name + ' = await (await shadowHost' + k + '.getShadowRoot()).findElement(By.css(' +
+        q(path[k], lang) + '));');
+    }
+    lines.push('  await driver.switchTo().frame(shadowFrame);');
+    return '{\n' + lines.join('\n') + '\n}';
   }
 
   // Selenium has no frame-scoped locator: the driver is switched into the frame,
@@ -360,6 +890,7 @@
   // pads every physical line, so it lands correctly inside the test scaffold.
   function selFrameSwitch(frame, lang) {
     var py = lang === 'python';
+    if (frame.shadowPath) return selShadowFrameSwitch(frame.shadowPath, lang);
     if (frame.selector) {
       var el = selFind('css', frame.selector, lang);
       return py ? 'driver.switch_to.frame(' + el + ')' : 'await driver.switchTo().frame(' + el + ');';
@@ -367,6 +898,41 @@
     var idx = frame.index || 0;
     return py ? 'driver.switch_to.frame(' + idx + ')' : 'await driver.switchTo().frame(' + idx + ');';
   }
+
+  function selPress(value, lang) {
+    var py = lang === 'python';
+    var raw = value == null || value === '' ? 'Enter' : value;
+    var p = parseKeyCombo(raw);
+    var K = py ? 'Keys.' : 'Key.';
+    var keyArg = KEY_SELENIUM[p.key] ? K + KEY_SELENIUM[p.key] : (isSingleChar(p.key) ? q(p.key, lang) : null);
+    // An unknown key used to become ENTER — a silently different test.
+    if (!keyArg) return todo(lang, 'press "' + commentSafe(raw) + '" — no Selenium key mapping');
+    var mods = [];
+    for (var i = 0; i < p.mods.length; i++) {
+      if (!MOD_SELENIUM[p.mods[i]]) return todo(lang, 'press "' + commentSafe(raw) + '" — modifier not supported');
+      mods.push(K + MOD_SELENIUM[p.mods[i]]);
+    }
+    var down = mods.map(function (m) { return py ? '.key_down(' + m + ')' : '.keyDown(' + m + ')'; }).join('');
+    var up = mods.slice().reverse().map(function (m) { return py ? '.key_up(' + m + ')' : '.keyUp(' + m + ')'; }).join('');
+    if (py) return 'webdriver.ActionChains(driver)' + down + '.send_keys(' + keyArg + ')' + up + '.perform()';
+    return 'await driver.actions()' + down + '.sendKeys(' + keyArg + ')' + up + '.perform();';
+  }
+
+  // is_selected() is always false for an ARIA checkbox (div[role=checkbox]), so its
+  // aria-checked state counts too.
+  function selCheckedExpr(el, lang) {
+    if (lang === 'python') return '(' + el + '.is_selected() or ' + el + '.get_attribute("aria-checked") == "true")';
+    return '((await ' + el + '.isSelected()) || (await ' + el + ".getAttribute('aria-checked')) === 'true')";
+  }
+
+  // Statements that touch the element more than once look it up once: `el = …` in
+  // Python, a block-scoped `const el` in JS/TS (a block, so repeated steps never
+  // redeclare it).
+  function selWithEl(loc, lang, lines) {
+    if (lang === 'python') return ['el = ' + loc].concat(lines).join('\n');
+    return '{\n  const el = ' + loc + ';\n' + lines.map(function (l) { return '  ' + l; }).join('\n') + '\n}';
+  }
+
 
   function selStatement(step, lang) {
     var py = lang === 'python';
@@ -386,15 +952,27 @@
       return lines.join('\n');
     }
     if (a === 'goto') return aw + 'driver.get(' + q(step.value || step.url || '', lang) + ')' + semi;
-    if (a === 'press') {
-      var k = KEY_SELENIUM[step.value || step.key] || 'ENTER';
-      if (py) return 'webdriver.ActionChains(driver).send_keys(Keys.' + k + ').perform()';
-      return 'await driver.actions().sendKeys(Key.' + k + ').perform();';
-    }
+    if (a === 'press') return selPress(step.value || step.key, lang);
     if (a === 'viewport') {
-      if (py) return 'driver.set_window_size(' + vpW(step) + ', ' + vpH(step) + ')';
-      return 'await driver.manage().window().setRect({ width: ' + vpW(step) + ', height: ' + vpH(step) + ' });';
+      // The recorded size is the viewport (innerWidth x innerHeight); Selenium sizes
+      // the whole window, so add the browser chrome measured at run time.
+      if (py) {
+        return 'driver.set_window_size(*driver.execute_script(' + q('return [' + vpW(step) + ' + window.outerWidth - window.innerWidth, ' +
+          vpH(step) + ' + window.outerHeight - window.innerHeight];', lang) + '))';
+      }
+      var rectJs = 'return { width: ' + vpW(step) + ' + window.outerWidth - window.innerWidth, height: ' +
+        vpH(step) + ' + window.outerHeight - window.innerHeight };';
+      var generic = lang === 'typescript' ? '<{ width: number; height: number }>' : '';
+      return 'await driver.manage().window().setRect(await driver.executeScript' + generic + '(' + q(rectJs, lang) + '));';
     }
+    return withNotes(statementNotes(step, 'selenium', lang), selTargetStatement(step, lang));
+  }
+
+  function selTargetStatement(step, lang) {
+    var py = lang === 'python';
+    var aw = py ? '' : 'await ';
+    var semi = py ? '' : ';';
+    var a = step.action;
     if (a === 'assert') return selAssert(step, lang);
     var loc = locatorExpr(step.target, 'selenium', lang);
     if (a === 'hover') {
@@ -403,19 +981,41 @@
     }
     switch (a) {
       case 'click': return aw + loc + '.click()' + semi;
-      case 'check': return aw + loc + '.click()' + semi;
-      case 'uncheck': return aw + loc + '.click()' + semi;
+      // Only click when the state differs — a plain click toggles, so re-running a
+      // check on an already-checked box used to uncheck it.
+      case 'check':
+        if (py) return selWithEl(loc, lang, ['if not ' + selCheckedExpr('el', lang) + ':', '    el.click()']);
+        return selWithEl(loc, lang, ['if (!' + selCheckedExpr('el', lang) + ') await el.click();']);
+      case 'uncheck':
+        if (py) return selWithEl(loc, lang, ['if ' + selCheckedExpr('el', lang) + ':', '    el.click()']);
+        return selWithEl(loc, lang, ['if (' + selCheckedExpr('el', lang) + ') await el.click();']);
       case 'dblclick':
         if (py) return 'webdriver.ActionChains(driver).double_click(' + loc + ').perform()';
         return 'await driver.actions().doubleClick(' + loc + ').perform();';
-      case 'fill':
+      case 'fill': {
+        var val = fillValueExpr(step, 'selenium', lang);
+        if (SET_VALUE_TYPES_SELENIUM.indexOf(step.inputType) !== -1) {
+          if (py) return 'driver.execute_script(' + q(SET_VALUE_JS, lang) + ', ' + loc + ', ' + val + ')';
+          return 'await driver.executeScript(' + q(SET_VALUE_JS, lang) + ', ' + loc + ', ' + val + ');';
+        }
         // clear first so a pre-filled field is replaced, not appended to
-        if (py) return loc + '.clear()\n' + loc + '.send_keys(' + q(step.value, lang) + ')';
-        return 'await ' + loc + '.clear();\nawait ' + loc + '.sendKeys(' + q(step.value, lang) + ');';
+        if (py) return selWithEl(loc, lang, ['el.clear()', 'el.send_keys(' + val + ')']);
+        return selWithEl(loc, lang, ['await el.clear();', 'await el.sendKeys(' + val + ');']);
+      }
+      case 'upload': {
+        var files = uploadFiles(step.value);
+        if (!files.length) return aw + loc + '.clear()' + semi;
+        // A file input takes absolute paths; several files are newline-separated.
+        if (py) {
+          return uploadNote(lang) + '\n' + loc + '.send_keys("\\n".join(os.path.abspath(p) for p in ' + listLiteral(files, lang) + '))';
+        }
+        return uploadNote(lang) + '\nawait ' + loc + '.sendKeys(' + listLiteral(files, lang) +
+          ".map((p) => require('path').resolve(p)).join('\\n'));";
+      }
       case 'selectOption':
         if (py) return 'Select(' + loc + ').select_by_visible_text(' + q(step.value, lang) + ')';
         return 'await new Select(' + loc + ').selectByVisibleText(' + q(step.value, lang) + ');';
-      default: return aw + loc + '.click()' + semi;
+      default: return todo(lang, 'unsupported step "' + commentSafe(a) + '"');
     }
   }
 
@@ -427,7 +1027,8 @@
   }
 
   // ── assertions ──────────────────────────────────────────────────────────────
-  // step.assertType ∈ toBeVisible | toHaveText | toHaveValue | toBeEnabled | toBeChecked
+  // step.assertType ∈ toBeVisible | toHaveText | toContainText | toHaveValue |
+  //                   toBeEnabled | toBeChecked
   // step.value carries the expected text/value, or 'false' for an unchecked assertion.
   function pwAssert(step, lang) {
     var py = lang === 'python';
@@ -439,6 +1040,7 @@
       var pmap = {
         toBeVisible: 'to_be_visible()',
         toHaveText: 'to_have_text(' + q(v, lang) + ')',
+        toContainText: 'to_contain_text(' + q(v, lang) + ')',
         toHaveValue: 'to_have_value(' + q(v, lang) + ')',
         toBeEnabled: 'to_be_enabled()',
         toBeChecked: unchecked ? 'not_to_be_checked()' : 'to_be_checked()'
@@ -448,6 +1050,7 @@
     var jmap = {
       toBeVisible: 'toBeVisible()',
       toHaveText: 'toHaveText(' + q(v, lang) + ')',
+      toContainText: 'toContainText(' + q(v, lang) + ')',
       toHaveValue: 'toHaveValue(' + q(v, lang) + ')',
       toBeEnabled: 'toBeEnabled()',
       toBeChecked: unchecked ? 'not.toBeChecked()' : 'toBeChecked()'
@@ -455,13 +1058,18 @@
     return 'await expect(' + loc + ').' + (jmap[t] || 'toBeVisible()') + ';';
   }
 
+  // Cypress's have.text compares raw textContent, so indentation and newlines in the
+  // markup failed a text the user can see is identical. Compare normalised text, as
+  // Playwright's toHaveText does.
   function cyAssert(step, lang) {
     var loc = locatorExpr(step.target, 'cypress', lang);
     var t = step.assertType || 'toBeVisible';
     var v = step.value;
+    var normText = "$el.text().replace(/\\s+/g, ' ').trim()";
     var map = {
       toBeVisible: ".should('be.visible')",
-      toHaveText: ".should('have.text', " + q(v, lang) + ')',
+      toHaveText: '.should(($el) => { expect(' + normText + ').to.equal(' + q(normWs(v), lang) + '); })',
+      toContainText: '.should(($el) => { expect(' + normText + ').to.contain(' + q(normWs(v), lang) + '); })',
       toHaveValue: ".should('have.value', " + q(v, lang) + ')',
       toBeEnabled: ".should('be.enabled')",
       toBeChecked: String(v) === 'false' ? ".should('not.be.checked')" : ".should('be.checked')"
@@ -474,26 +1082,38 @@
     var loc = locatorExpr(step.target, 'selenium', lang);
     var t = step.assertType || 'toBeVisible';
     var v = step.value;
+    var unchecked = String(v) === 'false';
     if (py) {
+      var pyText = '" ".join(' + loc + '.text.split())';
       switch (t) {
-        case 'toHaveText': return 'assert ' + loc + '.text == ' + q(v, lang);
+        case 'toHaveText': return 'assert ' + pyText + ' == ' + q(normWs(v), lang);
+        case 'toContainText': return 'assert ' + q(normWs(v), lang) + ' in ' + pyText;
         case 'toHaveValue': return 'assert ' + loc + '.get_attribute("value") == ' + q(v, lang);
         case 'toBeEnabled': return 'assert ' + loc + '.is_enabled()';
-        case 'toBeChecked': return 'assert ' + (String(v) === 'false' ? 'not ' : '') + loc + '.is_selected()';
+        case 'toBeChecked': return selWithEl(loc, lang, ['assert ' + (unchecked ? 'not ' : '') + selCheckedExpr('el', lang)]);
         case 'toBeVisible': default: return 'assert ' + loc + '.is_displayed()';
       }
     }
+    var jsText = '(await ' + loc + ".getText()).replace(/\\s+/g, ' ').trim()";
     switch (t) {
-      case 'toHaveText': return 'assert.strictEqual(await ' + loc + '.getText(), ' + q(v, lang) + ');';
+      case 'toHaveText': return 'assert.strictEqual(' + jsText + ', ' + q(normWs(v), lang) + ');';
+      case 'toContainText': return 'assert.ok(' + jsText + '.includes(' + q(normWs(v), lang) + '));';
       case 'toHaveValue': return 'assert.strictEqual(await ' + loc + ".getAttribute('value'), " + q(v, lang) + ');';
       case 'toBeEnabled': return 'assert.ok(await ' + loc + '.isEnabled());';
-      case 'toBeChecked': return 'assert.ok(' + (String(v) === 'false' ? '!' : '') + '(await ' + loc + '.isSelected()));';
+      case 'toBeChecked': return selWithEl(loc, lang, ['assert.ok(' + (unchecked ? '!' : '') + selCheckedExpr('el', lang) + ');']);
       case 'toBeVisible': default: return 'assert.ok(await ' + loc + '.isDisplayed());';
     }
   }
 
   function actionStatement(step, fw, lang) {
     if (!step) return '';
+    var a = step.action;
+    // A step from a newer recorder, or a corrupted one, becomes a visible TODO rather
+    // than a throw or a silently different action.
+    if (KNOWN_ACTIONS.indexOf(a) === -1) return todo(lang, 'unsupported step "' + commentSafe(a) + '"');
+    if (TARGETLESS_ACTIONS.indexOf(a) === -1 && !unwrapFrames(step.target).inner) {
+      return todo(lang, '"' + a + '" step has no element locator');
+    }
     if (fw === 'selenium') return selStatement(step, lang);
     if (fw === 'cypress') return cyStatement(step, lang);
     return pwStatement(step, lang);
@@ -512,18 +1132,90 @@
     }).join('\n');
   }
 
+  /** Python needs at least one real statement in a block; comments do not count. */
+  function pyBody(stmts, pad) {
+    var hasCode = stmts.some(function (s) {
+      return String(s || '').split('\n').some(function (l) { return l.trim() && l.trim().charAt(0) !== '#'; });
+    });
+    return (stmts.length ? indent(stmts, pad) + '\n' : '') + (hasCode ? '' : pad + 'pass\n');
+  }
+
+  // ── Cypress cross-origin navigation ────────────────────────────────────────
+  function urlOrigin(url) {
+    var m = /^(https?:\/\/[^/?#]+)/i.exec(String(url || ''));
+    return m ? m[1].toLowerCase() : null;
+  }
+
+  function stepOrigin(step) {
+    if (!step) return null;
+    if (step.action === 'goto') return urlOrigin(step.value || step.url);
+    // A step inside an iframe records the frame's own URL, not the page's.
+    if (unwrapFrames(step.target).frames.length) return null;
+    return urlOrigin(step.url);
+  }
+
+  function visitOrigin(stmt) {
+    var m = /^cy\.visit\('((?:[^'\\]|\\.)*)'\);$/.exec(String(stmt || ''));
+    return m ? urlOrigin(m[1].replace(/\\(.)/g, '$1')) : null;
+  }
+
+  // After the first page, commands for a different origin must run inside
+  // cy.origin(); the origin is taken from the steps' recorded URLs when the steps are
+  // given, else from the cy.visit() lines.
+  function cyOriginGroups(stmts, steps) {
+    var useSteps = Array.isArray(steps) && steps.length === stmts.length;
+    var groups = [];
+    var base = null;
+    var cur = null;
+    stmts.forEach(function (s, i) {
+      var o = useSteps ? stepOrigin(steps[i]) : visitOrigin(s);
+      if (o && !base) base = o;
+      if (o) cur = o;
+      var origin = cur && cur !== base ? cur : null;
+      if (!groups.length || groups[groups.length - 1].origin !== origin) groups.push({ origin: origin, stmts: [] });
+      groups[groups.length - 1].stmts.push(s);
+    });
+    return groups;
+  }
+
+  function usesCyHelper(stmts) {
+    return new RegExp('\\b' + CY_HELPER_NAME + '\\(').test(stmts.join('\n'));
+  }
+
+  // cy.realPress() (modifier combos) comes from the cypress-real-events plugin. Only
+  // a real call counts — a TODO comment that merely mentions it does not.
+  var REAL_EVENTS = 'cypress-real-events';
+  function usesRealEvents(stmts) {
+    return /^\s*cy\.realPress\(/m.test(stmts.join('\n'));
+  }
+
+  function realEventsHeader(lang) {
+    return comment(lang, 'cy.realPress() needs the ' + REAL_EVENTS + ' plugin: npm i -D ' + REAL_EVENTS) + '\n' +
+      comment(lang, 'It sends real key events over CDP, so this spec runs only in Chromium-based browsers (Chrome, Edge, Electron).') + '\n' +
+      'import ' + q(REAL_EVENTS, lang) + ';\n\n';
+  }
+
+  // A cy.origin() callback runs in a separate spec bridge where the top-level import
+  // never ran, so the plugin's commands are loaded again inside it.
+  function realEventsOriginRequire(lang) {
+    return comment(lang, 'cy.origin() has its own context: load the plugin there too (needs experimentalOriginDependencies: true).') + '\n' +
+      'Cypress.require(' + q(REAL_EVENTS, lang) + ');';
+  }
+
   // Wrap already-rendered statement lines in the right test scaffold. Kept separate
   // from testScript() so callers that produce statements themselves (e.g. to preserve
   // Playwright JS/TS native fidelity) still get correct imports + indentation.
-  function wrapScript(stmts, fw, lang) {
+  // `steps` (optional, parallel to stmts) lets Cypress place cy.origin() blocks.
+  function wrapScript(stmts, fw, lang, steps) {
     stmts = stmts || [];
     var joined = stmts.join('\n');
+    var pyOs = lang === 'python' && /\bos\.(environ|path)\b/.test(joined) ? 'import os\n' : '';
 
     if (fw === 'playwright') {
       if (lang === 'python') {
-        return 'from playwright.sync_api import Page, expect\n\n\n' +
+        return pyOs + 'from playwright.sync_api import Page, expect\n\n\n' +
           'def test_recorded(page: Page):\n' +
-          (stmts.length ? indent(stmts, '    ') : '    pass') + '\n';
+          pyBody(stmts, '    ');
       }
       return "import { test, expect } from '@playwright/test';\n\n" +
         "test('recorded test', async ({ page }) => {\n" +
@@ -531,9 +1223,18 @@
     }
 
     if (fw === 'cypress') {
-      return "describe('recorded test', () => {\n" +
+      var body = cyOriginGroups(stmts, steps).map(function (g) {
+        if (!g.origin) return indent(g.stmts, '    ');
+        // cy.origin() serialises its callback, so the helper must be declared inside.
+        var inner = usesCyHelper(g.stmts) ? [cyHelperSource(lang)].concat(g.stmts) : g.stmts;
+        if (usesRealEvents(g.stmts)) inner = [realEventsOriginRequire(lang)].concat(inner);
+        return '    cy.origin(' + q(g.origin, lang) + ', () => {\n' + indent(inner, '      ') + '\n    });';
+      }).join('\n');
+      var helper = usesCyHelper(stmts) ? cyHelperSource(lang) + '\n\n' : '';
+      var realEvents = usesRealEvents(stmts) ? realEventsHeader(lang) : '';
+      return realEvents + helper + "describe('recorded test', () => {\n" +
         "  it('replays the recorded flow', () => {\n" +
-        indent(stmts, '    ') + '\n  });\n});\n';
+        body + '\n  });\n});\n';
     }
 
     // selenium — derive imports from what the statements actually use.
@@ -541,11 +1242,11 @@
       var pyImports = ['from selenium import webdriver', 'from selenium.webdriver.common.by import By'];
       if (/Keys\./.test(joined)) pyImports.push('from selenium.webdriver.common.keys import Keys');
       if (/\bSelect\(/.test(joined)) pyImports.push('from selenium.webdriver.support.ui import Select');
-      return pyImports.join('\n') + '\n\n\n' +
+      return pyOs + pyImports.join('\n') + '\n\n\n' +
         'driver = webdriver.Chrome()\n' +
         'driver.implicitly_wait(10)  # Selenium has no auto-wait; give elements time to appear\n' +
         'try:\n' +
-        (stmts.length ? indent(stmts, '    ') : '    pass') + '\n' +
+        pyBody(stmts, '    ') +
         'finally:\n' +
         '    driver.quit()\n';
     }
@@ -566,7 +1267,8 @@
   }
 
   function testScript(actions, fw, lang) {
-    return wrapScript((actions || []).map(function (a) { return actionStatement(a, fw, lang); }), fw, lang);
+    var steps = actions || [];
+    return wrapScript(steps.map(function (a) { return actionStatement(a, fw, lang); }), fw, lang, steps);
   }
 
   var LLCodegen = {

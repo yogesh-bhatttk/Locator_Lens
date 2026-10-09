@@ -1,5 +1,10 @@
 // codegen.js is a UMD-style IIFE that publishes onto the global object. Importing
 // it for side effects is enough to get the real shipping module — no shim, no copy.
+import { execFileSync } from 'node:child_process';
+import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { JSDOM } from 'jsdom';
 import { beforeAll, describe, expect, it } from 'vitest';
 
 let C;
@@ -66,6 +71,18 @@ describe('locator expressions', () => {
     expect(C.locatorExpr({ kind: 'testid', attr: 'data-qa', value: 'x' }, 'playwright', 'typescript')).toBe(
       'page.locator(\'[data-qa="x"]\')'
     );
+  });
+
+  // A custom test attribute such as data:qa is legal HTML but ':' is CSS-special —
+  // unescaped, `[data:qa="v"]` is an invalid selector in every framework.
+  // (Asserted as text: jsdom's selector engine can't parse an escaped attribute name.
+  // The same selector was checked in Chromium, where it matches the element.)
+  it('escapes a custom test attribute name in every framework', () => {
+    const target = { kind: 'testid', attr: 'data:qa', value: 'v' };
+    const selector = String.raw`'[data\\:qa="v"]'`;
+    expect(C.locatorExpr(target, 'playwright', 'javascript')).toBe(`page.locator(${selector})`);
+    expect(C.locatorExpr(target, 'selenium', 'javascript')).toBe(`driver.findElement(By.css(${selector}))`);
+    expect(C.locatorExpr(target, 'cypress', 'javascript')).toBe(`cy.get(${selector})`);
   });
 });
 
@@ -348,9 +365,9 @@ describe('chained locators', () => {
     expect(C.locatorExpr(chain, 'playwright', 'python')).toBe(
       'page.get_by_test_id("row-7").get_by_role("button", name="Delete")'
     );
-    expect(C.locatorExpr(chain, 'cypress', 'javascript')).toBe(
-      "cy.get('[data-testid=\"row-7\"]').find('button, [role=\"button\"]').contains('Delete')"
-    );
+    const cy = C.locatorExpr(chain, 'cypress', 'javascript');
+    expect(cy.startsWith("cy.get('[data-testid=\"row-7\"]').find('button:not([role]), ")).toBe(true);
+    expect(cy.endsWith(".filter((_, el) => locatraMatch(el, 'name', 'Delete'))")).toBe(true);
   });
 
   it('scopes the Selenium child XPath to the parent with a leading dot', () => {
@@ -500,5 +517,944 @@ describe('frames', () => {
     expect(C.actionStatement({ action: 'click', target: plain }, 'selenium', 'python')).not.toContain(
       'switch_to'
     );
+  });
+});
+
+// An <iframe> inside shadow DOM: Playwright's CSS pierces open shadow roots, so its
+// frameLocator keeps the combined `selector`. Selenium's and Cypress's CSS do not, so
+// they walk `shadowPath` — one selector per tree — host by host.
+describe('frames inside shadow DOM', () => {
+  const SHADOW = {
+    kind: 'frame',
+    selector: '#shell > x-pay > iframe:nth-of-type(2)',
+    index: 1,
+    shadowPath: ['#shell', 'x-pay', 'iframe:nth-of-type(2)'],
+    child: { kind: 'id', value: 'card' },
+  };
+  const withoutPath = (t) => {
+    const copy = { ...t };
+    delete copy.shadowPath;
+    return copy;
+  };
+  const NESTED = { kind: 'frame', selector: '#outer', index: 0, child: SHADOW };
+  const fill = (target, fw, lang) => C.actionStatement({ action: 'fill', target, value: '4242' }, fw, lang);
+
+  it('leaves Playwright output byte-identical', () => {
+    for (const lang of LANGUAGES) {
+      for (const t of [SHADOW, NESTED]) {
+        const bare = t === SHADOW ? withoutPath(SHADOW) : { ...NESTED, child: withoutPath(SHADOW) };
+        expect(C.locatorExpr(t, 'playwright', lang)).toBe(C.locatorExpr(bare, 'playwright', lang));
+        expect(fill(t, 'playwright', lang)).toBe(fill(bare, 'playwright', lang));
+      }
+    }
+    expect(C.locatorExpr(SHADOW, 'playwright', 'typescript')).toBe(
+      "page.frameLocator('#shell > x-pay > iframe:nth-of-type(2)').locator('#card')"
+    );
+  });
+
+  it('walks each shadow root with getShadowRoot() in Selenium JS/TS, then switches in and out', () => {
+    const expected = [
+      '{',
+      "  const shadowHost1 = await driver.findElement(By.css('#shell'));",
+      "  const shadowHost2 = await (await shadowHost1.getShadowRoot()).findElement(By.css('x-pay'));",
+      "  const shadowFrame = await (await shadowHost2.getShadowRoot()).findElement(By.css('iframe:nth-of-type(2)'));",
+      '  await driver.switchTo().frame(shadowFrame);',
+      '}',
+    ].join('\n');
+    for (const lang of ['javascript', 'typescript']) {
+      const out = fill(SHADOW, 'selenium', lang);
+      expect(out.startsWith(expected + '\n'), out).toBe(true);
+      expect(out).toContain("driver.findElement(By.id('card'))");
+      expect(out.split('\n').pop()).toBe('await driver.switchTo().defaultContent();');
+    }
+  });
+
+  it('walks each shadow root with .shadow_root in Selenium Python', () => {
+    const lines = fill(SHADOW, 'selenium', 'python').split('\n');
+    expect(lines[0]).toBe(
+      'driver.switch_to.frame(driver.find_element(By.CSS_SELECTOR, "#shell")' +
+        '.shadow_root.find_element(By.CSS_SELECTOR, "x-pay")' +
+        '.shadow_root.find_element(By.CSS_SELECTOR, "iframe:nth-of-type(2)"))'
+    );
+    expect(lines[lines.length - 1]).toBe('driver.switch_to.default_content()');
+  });
+
+  it('steps through .shadow() in Cypress before entering the frame body', () => {
+    expect(C.locatorExpr(SHADOW, 'cypress', 'javascript')).toBe(
+      "cy.get('#shell').shadow().find('x-pay').shadow().find('iframe:nth-of-type(2)')" +
+        ".its('0.contentDocument.body').should('not.be.empty').then(cy.wrap).find('#card')"
+    );
+  });
+
+  it('nests under an outer frame in every framework', () => {
+    const py = fill(NESTED, 'selenium', 'python').split('\n');
+    expect(py[0]).toBe('driver.switch_to.frame(driver.find_element(By.CSS_SELECTOR, "#outer"))');
+    expect(py[1]).toContain('.shadow_root.find_element(By.CSS_SELECTOR, "x-pay")');
+    expect(py[py.length - 1]).toBe('driver.switch_to.default_content()');
+
+    const js = fill(NESTED, 'selenium', 'javascript').split('\n');
+    expect(js[0]).toBe("await driver.switchTo().frame(driver.findElement(By.css('#outer')));");
+    expect(js[1]).toBe('{');
+    expect(js.filter((l) => l.includes('switchTo().frame('))).toHaveLength(2);
+
+    expect(C.locatorExpr(NESTED, 'cypress', 'typescript')).toBe(
+      "cy.get('#outer').its('0.contentDocument.body').should('not.be.empty').then(cy.wrap)" +
+        ".find('#shell').shadow().find('x-pay').shadow().find('iframe:nth-of-type(2)')" +
+        ".its('0.contentDocument.body').should('not.be.empty').then(cy.wrap).find('#card')"
+    );
+  });
+
+  it('quotes every hop for the host language', () => {
+    const t = { ...SHADOW, shadowPath: ['pay-widget[title="it\'s"]', 'iframe'] };
+    expect(fill(t, 'selenium', 'javascript')).toContain(
+      "await driver.findElement(By.css('pay-widget[title=\"it\\'s\"]'))"
+    );
+    expect(fill(t, 'selenium', 'python')).toContain('By.CSS_SELECTOR, "pay-widget[title=\\"it\'s\\"]"');
+  });
+
+  it('renders exactly as before when shadowPath is missing or unusable', () => {
+    const bare = withoutPath(SHADOW);
+    for (const bad of [undefined, null, [], ['iframe'], ['#shell', ''], ['#shell', 3], 'x-pay iframe']) {
+      const t = { ...bare, shadowPath: bad };
+      for (const [fw, lang] of validCombos()) {
+        expect(fill(t, fw, lang), `${fw}/${lang} ${JSON.stringify(bad)}`).toBe(fill(bare, fw, lang));
+      }
+    }
+    // A cross-origin (positional) frame has no element to walk to.
+    const xo = {
+      kind: 'frame',
+      selector: null,
+      index: 2,
+      shadowPath: ['a-b', 'iframe'],
+      child: SHADOW.child,
+    };
+    expect(fill(xo, 'selenium', 'python')).toContain('driver.switch_to.frame(2)');
+  });
+
+  it('produces scripts that parse in every language', () => {
+    const steps = [
+      { action: 'goto', value: 'https://shop.example/' },
+      { action: 'fill', target: SHADOW, value: '4242' },
+      { action: 'click', target: NESTED },
+      { action: 'check', target: SHADOW },
+    ];
+    const dir = mkdtempSync(join(tmpdir(), 'locatra-shadow-'));
+    try {
+      for (const [fw, lang] of validCombos()) {
+        if (fw === 'playwright' || lang === 'python') continue;
+        const code = C.testScript(steps, fw, lang);
+        // Selenium scaffolds are CommonJS (require); Cypress specs are modules.
+        const file = join(dir, `${fw}-${lang}.${fw === 'selenium' ? 'cjs' : 'mjs'}`);
+        writeFileSync(file, code);
+        if (lang === 'typescript') {
+          const strip =
+            "const fs = require('fs'); const f = process.argv[1];" +
+            "fs.writeFileSync(f, require('node:module').stripTypeScriptTypes(fs.readFileSync(f, 'utf8')));";
+          execFileSync(process.execPath, ['--no-warnings', '-e', strip, file], { stdio: 'pipe' });
+        }
+        expect(
+          () => execFileSync(process.execPath, ['--check', file], { stdio: 'pipe' }),
+          `${fw}/${lang}`
+        ).not.toThrow();
+      }
+      let python = true;
+      try {
+        execFileSync('python3', ['--version'], { stdio: 'pipe' });
+      } catch {
+        python = false; // no interpreter on this machine: nothing to parse with
+      }
+      if (python) {
+        const file = join(dir, 'selenium.py');
+        writeFileSync(file, C.testScript(steps, 'selenium', 'python'));
+        expect(() =>
+          execFileSync(
+            'python3',
+            ['-I', '-c', 'import ast, sys; ast.parse(open(sys.argv[1]).read())', file],
+            {
+              stdio: 'pipe',
+            }
+          )
+        ).not.toThrow();
+      }
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+});
+
+// ── Selenium/Cypress accessible-name matching ─────────────────────────────────
+// Role-with-name and label locators used to match text content only
+// (contains(normalize-space(.), name) / .contains(name)), so they never found a form
+// control: its name comes from <label for>, a wrapping <label>, aria-labelledby,
+// aria-label, title, placeholder or (buttons) value. These tests evaluate the
+// generated XPath / Cypress helper against a real DOM.
+describe('Selenium/Cypress accessible-name matching (DOM)', () => {
+  const HTML = `
+    <label for="e">Email</label><input id="e" type="email" data-k="email">
+    <label><input type="checkbox" data-k="agree"> I Agree to terms</label>
+    <select aria-label="Country" data-k="country"><option>India</option></select>
+    <input type="search" aria-label="Search" data-k="search">
+    <button aria-label="Close" data-k="close"><svg></svg></button>
+    <span id="lbl">Billing   address</span><input aria-labelledby="lbl" data-k="billing">
+    <input type="submit" value="Send" data-k="send">
+    <input placeholder="Your name" data-k="yourname">
+    <button data-k="save">Save</button><button data-k="savedraft">Save draft</button>
+    <div role="button" data-k="custom">Custom</div>
+    <ul role="menu"><li role="menuitem" data-k="menuitem">Menu thing</li></ul>
+    <table><tr data-k="r1"><td>Row one</td><td><button data-k="d1">Delete</button></td></tr>
+      <tr data-k="r2"><td>Row two</td><td><button data-k="d2">Delete</button></td></tr></table>
+    <div data-k="wbdiv"><p><span data-k="wb">Welcome back</span></p></div>
+    <button data-k="hostile">Delete "row" it's</button>`;
+
+  let doc;
+  beforeAll(() => {
+    doc = new JSDOM(
+      `<!doctype html><html><head><title>Welcome back</title></head><body>${HTML}</body></html>`
+    ).window.document;
+  });
+
+  /** Extract the selector string from a Selenium JS expression and evaluate it. */
+  function selenium(target) {
+    const expr = C.locatorExpr(target, 'selenium', 'javascript');
+    const re = /\.findElement\(By\.(css|xpath)\('((?:[^'\\]|\\.)*)'\)\)/g;
+    let m;
+    let ctx = doc;
+    let all = [];
+    while ((m = re.exec(expr))) {
+      const sel = m[2].replace(/\\(.)/g, '$1');
+      if (m[1] === 'css') all = [...ctx.querySelectorAll(sel)];
+      else {
+        const it = doc.evaluate(sel, ctx, null, 7, null);
+        all = Array.from({ length: it.snapshotLength }, (_, i) => it.snapshotItem(i));
+      }
+      if (!all.length) return null;
+      ctx = all[0];
+    }
+    return all[0] ? all[0].getAttribute('data-k') : null;
+  }
+
+  /** Run a Cypress role/label expression with a minimal cy.get/find/filter stand-in. */
+  function cypress(target) {
+    const expr = C.locatorExpr(target, 'cypress', 'javascript');
+    const helper = C.wrapScript([expr], 'cypress', 'javascript').split('describe(')[0];
+    const wrap = (els) => ({
+      els,
+      find: (s) => wrap(els.flatMap((e) => [...e.querySelectorAll(s)])),
+      filter: (fn) => wrap(els.filter((e, i) => fn(i, e))),
+      first: () => wrap(els.slice(0, 1)),
+      eq: (n) => wrap(els.slice(n, n + 1)),
+    });
+    const cy = { get: (s) => wrap([...doc.querySelectorAll(s)]) };
+    const res = new Function('cy', `${helper}\nreturn ${expr};`)(cy);
+    return res.els.map((e) => e.getAttribute('data-k'));
+  }
+
+  it.each([
+    [{ kind: 'role', role: 'textbox', name: 'Email' }, 'email'],
+    [{ kind: 'role', role: 'checkbox', name: 'Agree' }, 'agree'],
+    [{ kind: 'role', role: 'combobox', name: 'Country' }, 'country'],
+    [{ kind: 'role', role: 'searchbox', name: 'Search' }, 'search'],
+    [{ kind: 'role', role: 'button', name: 'Close' }, 'close'],
+    [{ kind: 'role', role: 'textbox', name: 'Billing address' }, 'billing'],
+    [{ kind: 'role', role: 'button', name: 'Send' }, 'send'],
+    [{ kind: 'role', role: 'textbox', name: 'Your name' }, 'yourname'],
+    [{ kind: 'role', role: 'button', name: 'Custom' }, 'custom'],
+    [{ kind: 'role', role: 'menuitem', name: 'Menu thing' }, 'menuitem'],
+    [{ kind: 'role', role: 'button', name: 'Delete "row" it\'s' }, 'hostile'],
+  ])('finds role %j by its accessible name', (target, want) => {
+    expect(selenium(target)).toBe(want);
+    expect(cypress(target)).toEqual([want]);
+  });
+
+  it.each([
+    [{ kind: 'label', value: 'Email' }, 'email'],
+    [{ kind: 'label', value: 'I Agree to terms', exact: true }, 'agree'],
+    [{ kind: 'label', value: 'Country' }, 'country'],
+    [{ kind: 'label', value: 'Billing address' }, 'billing'],
+  ])('finds label %j via <label for>, wrapping label, aria-label and aria-labelledby', (target, want) => {
+    expect(selenium(target)).toBe(want);
+    expect(cypress(target)).toEqual([want]);
+  });
+
+  it('honours exact for a role name (Save vs Save draft)', () => {
+    const t = { kind: 'role', role: 'button', name: 'Save', exact: true };
+    expect(selenium(t)).toBe('save');
+    expect(cypress(t)).toEqual(['save']);
+    // Without exact, substring semantics match both — exactly why the engine sets it.
+    expect(cypress({ kind: 'role', role: 'button', name: 'Save' })).toEqual(['save', 'savedraft']);
+  });
+
+  it('does not let a native element keep its implicit role under an explicit role', () => {
+    // <li role="menuitem"> is not a listitem (Playwright semantics).
+    expect(selenium({ kind: 'role', role: 'listitem', name: 'Menu thing' })).toBe(null);
+  });
+
+  it('chains from a named parent so .find() continues from the row, not a text node', () => {
+    const chain = {
+      kind: 'chain',
+      parent: { kind: 'role', role: 'row', name: 'Row two' },
+      child: { kind: 'role', role: 'button', name: 'Delete' },
+    };
+    expect(selenium(chain)).toBe('d2');
+    expect(cypress(chain)).toEqual(['d2']);
+  });
+
+  it('matches the deepest element for a Selenium text locator, not <html> or <title>', () => {
+    expect(selenium({ kind: 'text', value: 'Welcome back' })).toBe('wb');
+    expect(selenium({ kind: 'text', value: 'Welcome back', exact: true })).toBe('wb');
+    const chained = {
+      kind: 'chain',
+      parent: { kind: 'testid', attr: 'data-k', value: 'r2' },
+      child: { kind: 'text', value: 'Delete' },
+    };
+    expect(selenium(chained)).toBe('d2');
+  });
+
+  it('honours target.nth positionally in every framework', () => {
+    const t = { kind: 'role', role: 'button', name: 'Delete', nth: 1 };
+    expect(selenium(t)).toBe('d2');
+    expect(cypress(t)).toEqual(['d2']);
+    expect(C.locatorExpr(t, 'playwright', 'typescript')).toBe(
+      "page.getByRole('button', { name: 'Delete' }).nth(1)"
+    );
+  });
+});
+
+describe('role selector tables', () => {
+  it('keeps the CSS and XPath forms consistent with Playwright implicit roles', () => {
+    const css = (role) => C.locatorExpr({ kind: 'role', role }, 'cypress', 'javascript');
+    const xp = (role) => C.locatorExpr({ kind: 'role', role, name: 'x' }, 'selenium', 'python');
+    for (const [role, tag] of [
+      ['textbox', 'textarea'],
+      ['searchbox', 'input[type="search"]'],
+      ['spinbutton', 'input[type="number"]'],
+      ['slider', 'input[type="range"]'],
+      ['list', 'ul'],
+      ['listitem', 'li'],
+      ['table', 'table'],
+      ['row', 'tr'],
+      ['cell', 'td'],
+      ['navigation', 'nav'],
+      ['main', 'main'],
+      ['dialog', 'dialog'],
+      ['banner', 'header'],
+      ['contentinfo', 'footer'],
+      ['complementary', 'aside'],
+      ['option', 'option'],
+    ]) {
+      expect(css(role), role).toContain(tag);
+      expect(xp(role), role).toContain('self::' + tag.split('[')[0]);
+    }
+    // number is a spinbutton and search a searchbox, never a textbox.
+    expect(css('textbox')).toContain(':not([type="number"])');
+    expect(css('textbox')).toContain(':not([type="search"])');
+  });
+
+  it('narrows a heading to its level', () => {
+    const h = { kind: 'role', role: 'heading', name: 'T', level: 2 };
+    expect(C.locatorExpr(h, 'cypress', 'javascript')).toContain(
+      'h2:not([role]), [role="heading"][aria-level="2"]'
+    );
+    expect(C.locatorExpr(h, 'cypress', 'javascript')).not.toContain('h1');
+  });
+});
+
+describe('exact matching (C5)', () => {
+  it('passes exact through to every Playwright getBy* kind', () => {
+    for (const kind of ['label', 'placeholder', 'altText', 'title', 'text']) {
+      const t = { kind, value: 'Save', exact: true };
+      expect(C.locatorExpr(t, 'playwright', 'typescript'), kind).toContain(', { exact: true })');
+      expect(C.locatorExpr(t, 'playwright', 'python'), kind).toContain(', exact=True)');
+    }
+    expect(
+      C.locatorExpr({ kind: 'role', role: 'button', name: 'Save', exact: true }, 'playwright', 'python')
+    ).toBe('page.get_by_role("button", name="Save", exact=True)');
+  });
+
+  it('uses equality when exact and substring otherwise for attribute kinds', () => {
+    expect(
+      C.locatorExpr({ kind: 'placeholder', value: 'Q', exact: true }, 'cypress', 'javascript')
+    ).toContain('[placeholder="Q"]');
+    expect(C.locatorExpr({ kind: 'placeholder', value: 'Q' }, 'selenium', 'javascript')).toContain(
+      '[placeholder*="Q"]'
+    );
+  });
+
+  it('anchors an exact Cypress text match with an escaped regex', () => {
+    expect(
+      C.locatorExpr({ kind: 'text', value: 'Price (USD) $5 / unit', exact: true }, 'cypress', 'javascript')
+    ).toBe('cy.contains(/^\\s*Price\\s+\\(USD\\)\\s+\\$5\\s+\\/\\s+unit\\s*$/)');
+    const re = new Function(
+      `return ${C.locatorExpr({ kind: 'text', value: 'a.b', exact: true }, 'cypress', 'javascript').slice(12, -1)};`
+    )();
+    expect(re.test(' a.b ')).toBe(true);
+    expect(re.test('axb')).toBe(false);
+  });
+});
+
+describe('Cypress key presses (C6)', () => {
+  const press = (value) => C.actionStatement({ action: 'press', value }, 'cypress', 'javascript');
+
+  it('uses cy.press for Tab, which cy.type() cannot express', () => {
+    expect(press('Tab')).toBe('cy.press(Cypress.Keyboard.Keys.TAB);');
+  });
+
+  it('types other plain keys into the focused element', () => {
+    expect(press('Enter')).toBe("cy.focused().type('{enter}');");
+    expect(press(' ')).toBe("cy.focused().type(' ');");
+    expect(press('{')).toBe("cy.focused().type('{{}');");
+  });
+
+  it('emits a TODO rather than a different key for what Cypress cannot press', () => {
+    expect(press('F13')).toMatch(/^\/\/ TODO: /);
+  });
+});
+
+describe('Cypress modifier combos via cypress-real-events', () => {
+  const press = (value, lang = 'javascript') =>
+    C.actionStatement({ action: 'press', value }, 'cypress', lang);
+  const IMPORT = /^import 'cypress-real-events';$/gm;
+  const page = (value, url = 'https://a.example.com/') => ({ action: 'press', value, url });
+  const GOTO = { action: 'goto', value: 'https://a.example.com/', url: 'https://a.example.com/' };
+
+  // Parse a generated spec: TS is type-stripped first, then node --check (as an ES module).
+  function checkSyntax(code, lang) {
+    const dir = mkdtempSync(join(tmpdir(), 'locatra-cy-'));
+    const file = join(dir, 'spec.mjs');
+    try {
+      writeFileSync(file, code);
+      if (lang === 'typescript') {
+        const strip =
+          "const fs = require('fs'); const f = process.argv[1];" +
+          "fs.writeFileSync(f, require('node:module').stripTypeScriptTypes(fs.readFileSync(f, 'utf8')));";
+        execFileSync(process.execPath, ['--no-warnings', '-e', strip, file], { stdio: 'pipe' });
+      }
+      execFileSync(process.execPath, ['--check', file], { stdio: 'pipe' });
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  }
+
+  it.each([
+    ['Shift+Tab', "['Shift', 'Tab']"],
+    ['Control+Enter', "['Control', 'Enter']"],
+    ['Shift+Space', "['Shift', 'Space']"],
+    ['Shift+ ', "['Shift', 'Space']"],
+    ['Meta+a', "['Meta', 'a']"],
+    ['Meta+K', "['Meta', 'K']"],
+    ['Control+Alt+Shift+Meta+Enter', "['Control', 'Alt', 'Shift', 'Meta', 'Enter']"],
+    ['Control+Alt+Meta+Shift+Tab', "['Control', 'Alt', 'Meta', 'Shift', 'Tab']"],
+    ['Alt+Escape', "['Alt', 'Escape']"],
+    ['Shift+ArrowDown', "['Shift', 'ArrowDown']"],
+    ['Control++', "['Control', '+']"],
+    ["Control+'", "['Control', '\\'']"],
+  ])('presses %s natively with cy.realPress (TS and JS)', (value, keys) => {
+    expect(press(value, 'javascript')).toBe(`cy.realPress(${keys});`);
+    expect(press(value, 'typescript')).toBe(`cy.realPress(${keys});`);
+  });
+
+  it('keeps cy.press for plain Tab and cy.type for other plain keys — no plugin needed', () => {
+    expect(press('Tab')).toBe('cy.press(Cypress.Keyboard.Keys.TAB);');
+    expect(press('Escape')).toBe("cy.focused().type('{esc}');");
+    for (const lang of ['typescript', 'javascript']) {
+      const spec = C.testScript([GOTO, page('Tab'), page('Enter'), page(' ')], 'cypress', lang);
+      expect(spec).not.toContain('cypress-real-events');
+      expect(spec).not.toContain('realPress');
+    }
+  });
+
+  it('never turns an unsupported key or modifier into a different key', () => {
+    for (const value of ['Hyper+Enter', 'Ctrl+Enter', 'Shift+F25', 'Shift+Unidentified', 'Shift+']) {
+      const out = press(value);
+      expect(out, value).toMatch(/^\/\/ TODO: press "/);
+      expect(out, value).toContain('cy.realPress()');
+      // A TODO that only mentions the command must not pull the plugin in.
+      expect(C.testScript([GOTO, page(value)], 'cypress', 'javascript'), value).not.toContain('import ');
+    }
+  });
+
+  it('imports the plugin exactly once, at the top, only when a combo is pressed', () => {
+    for (const lang of ['typescript', 'javascript']) {
+      const spec = C.testScript(
+        [GOTO, page('Shift+Tab'), page('Tab'), page('Control+Enter'), page('Shift+Tab')],
+        'cypress',
+        lang
+      );
+      expect(spec.match(IMPORT), lang).toHaveLength(1);
+      expect(spec.startsWith('// cy.realPress() needs the cypress-real-events plugin'), lang).toBe(true);
+      expect(spec).toContain('npm i -D cypress-real-events');
+      expect(spec).toContain('only in Chromium-based browsers');
+      expect(spec).toContain(
+        "    cy.realPress(['Shift', 'Tab']);\n    cy.press(Cypress.Keyboard.Keys.TAB);\n"
+      );
+      expect(spec).not.toContain('Cypress.require');
+      checkSyntax(spec, lang);
+    }
+  });
+
+  it('puts the import ahead of the name helper', () => {
+    const steps = [
+      GOTO,
+      { action: 'click', target: { kind: 'role', role: 'button', name: 'Go' }, url: GOTO.url },
+      page('Shift+Space'),
+    ];
+    const ts = C.testScript(steps, 'cypress', 'typescript');
+    expect(ts.indexOf("import 'cypress-real-events';")).toBeLessThan(ts.indexOf('function locatraMatch('));
+    checkSyntax(ts, 'typescript');
+  });
+
+  it('loads the plugin inside cy.origin() blocks that press combos', () => {
+    const steps = [
+      GOTO,
+      page('Shift+Tab'),
+      { action: 'click', target: { kind: 'id', value: 'sso' }, url: 'https://b.example.org/sso' },
+      page('Shift+Tab', 'https://b.example.org/sso'),
+      page('Meta+Enter', 'https://b.example.org/sso'),
+      { action: 'click', target: { kind: 'id', value: 'back' }, url: 'https://a.example.com/home' },
+      { action: 'click', target: { kind: 'id', value: 'x' }, url: 'https://c.example.net/' },
+    ];
+    for (const lang of ['typescript', 'javascript']) {
+      const spec = C.testScript(steps, 'cypress', lang);
+      expect(spec.match(IMPORT), lang).toHaveLength(1);
+      expect(spec).toContain(
+        "    cy.origin('https://b.example.org', () => {\n" +
+          '      // cy.origin() has its own context: load the plugin there too (needs experimentalOriginDependencies: true).\n' +
+          "      Cypress.require('cypress-real-events');\n" +
+          "      cy.get('#sso').click();\n" +
+          "      cy.realPress(['Shift', 'Tab']);\n" +
+          "      cy.realPress(['Meta', 'Enter']);\n" +
+          '    });\n'
+      );
+      // Only the block that presses a combo loads it.
+      expect(spec.match(/Cypress\.require\(/g), lang).toHaveLength(1);
+      expect(spec).toContain(
+        "cy.origin('https://c.example.net', () => {\n      cy.get('#x').click();\n    });"
+      );
+      checkSyntax(spec, lang);
+    }
+  });
+
+  it('loads the plugin in cy.origin() even when the primary origin needs no combo', () => {
+    const steps = [
+      GOTO,
+      { action: 'click', target: { kind: 'id', value: 'sso' }, url: 'https://b.example.org/sso' },
+      page('Alt+Escape', 'https://b.example.org/sso'),
+    ];
+    const js = C.testScript(steps, 'cypress', 'javascript');
+    expect(js.match(IMPORT)).toHaveLength(1);
+    expect(js).toContain("      Cypress.require('cypress-real-events');\n      cy.get('#sso').click();");
+  });
+
+  it('leaves Playwright and Selenium output untouched by the plugin', () => {
+    const steps = [GOTO, page('Shift+Tab'), page('Control+Alt+Shift+Meta+Enter')];
+    for (const [fw, lang] of validCombos().filter(([f]) => f !== 'cypress')) {
+      expect(C.testScript(steps, fw, lang), `${fw}/${lang}`).not.toMatch(/realPress|real-events/);
+    }
+  });
+});
+
+describe('Selenium key presses (C6)', () => {
+  it('maps combos with key_down/key_up', () => {
+    expect(C.actionStatement({ action: 'press', value: 'Shift+Tab' }, 'selenium', 'python')).toBe(
+      'webdriver.ActionChains(driver).key_down(Keys.SHIFT).send_keys(Keys.TAB).key_up(Keys.SHIFT).perform()'
+    );
+    expect(C.actionStatement({ action: 'press', value: ' ' }, 'selenium', 'javascript')).toBe(
+      'await driver.actions().sendKeys(Key.SPACE).perform();'
+    );
+  });
+
+  it('never turns an unknown key into ENTER', () => {
+    const out = C.actionStatement({ action: 'press', value: 'Unidentified' }, 'selenium', 'python');
+    expect(out).not.toContain('ENTER');
+    expect(out).toMatch(/^# TODO: /);
+  });
+});
+
+describe('fill', () => {
+  it('stops Cypress parsing {…} in a recorded value', () => {
+    expect(
+      C.actionStatement(
+        { action: 'fill', target: { kind: 'id', value: 'q' }, value: 'a{enter}' },
+        'cypress',
+        'javascript'
+      )
+    ).toBe("cy.get('#q').clear().type('a{enter}', { parseSpecialCharSequences: false });");
+  });
+
+  it('reads a sensitive value from the environment in every framework (C4)', () => {
+    const step = {
+      action: 'fill',
+      target: { kind: 'id', value: 'pw' },
+      value: 'leak',
+      sensitive: true,
+      secretName: 'LOCATRA_PASSWORD',
+    };
+    expect(C.actionStatement(step, 'playwright', 'typescript')).toBe(
+      "await page.locator('#pw').fill(process.env.LOCATRA_PASSWORD ?? '');"
+    );
+    expect(C.actionStatement(step, 'selenium', 'python')).toContain(
+      'send_keys(os.environ.get("LOCATRA_PASSWORD", ""))'
+    );
+    expect(C.actionStatement(step, 'cypress', 'javascript')).toBe(
+      "cy.get('#pw').clear().type(Cypress.env('LOCATRA_PASSWORD'), { log: false, parseSpecialCharSequences: false });"
+    );
+    for (const [fw, lang] of validCombos()) {
+      expect(C.actionStatement(step, fw, lang), `${fw}/${lang}`).not.toContain('leak');
+    }
+  });
+
+  it('defaults and sanitises the secret name', () => {
+    const base = { action: 'fill', target: { kind: 'id', value: 'pw' }, sensitive: true };
+    expect(C.actionStatement(base, 'playwright', 'javascript')).toContain('process.env.LOCATRA_PASSWORD');
+    expect(C.actionStatement({ ...base, secretName: 'LOCATRA_SECRET' }, 'playwright', 'python')).toContain(
+      'os.environ.get("LOCATRA_SECRET", "")'
+    );
+    expect(C.actionStatement({ ...base, secretName: "x'); evil(" }, 'playwright', 'javascript')).toContain(
+      'process.env.LOCATRA_PASSWORD'
+    );
+  });
+
+  it('imports os exactly once in Python scripts that need it', () => {
+    const steps = [
+      { action: 'fill', target: { kind: 'id', value: 'a' }, sensitive: true },
+      { action: 'fill', target: { kind: 'id', value: 'b' }, sensitive: true, secretName: 'LOCATRA_SECRET' },
+    ];
+    for (const fw of ['playwright', 'selenium']) {
+      const py = C.testScript(steps, fw, 'python');
+      expect(py.match(/^import os$/gm), fw).toHaveLength(1);
+    }
+    expect(C.testScript([{ action: 'goto', value: '/' }], 'playwright', 'python')).not.toContain('import os');
+  });
+
+  it('sets range/colour values directly where typing cannot (C6)', () => {
+    const step = { action: 'fill', target: { kind: 'id', value: 'vol' }, value: '42', inputType: 'range' };
+    expect(C.actionStatement(step, 'cypress', 'javascript')).toBe(
+      "cy.get('#vol').invoke('val', '42').trigger('input').trigger('change');"
+    );
+    const sel = C.actionStatement(step, 'selenium', 'python');
+    expect(sel).toMatch(/^driver\.execute_script\(/);
+    expect(sel).toContain("dispatchEvent(new Event('input'");
+    expect(sel).toContain("dispatchEvent(new Event('change'");
+    expect(C.actionStatement(step, 'playwright', 'typescript')).toBe(
+      "await page.locator('#vol').fill('42');"
+    );
+  });
+});
+
+describe('upload (C6)', () => {
+  const step = { action: 'upload', target: { kind: 'id', value: 'f' }, value: '["a.pdf","b c.png"]' };
+
+  it('renders setInputFiles / send_keys / selectFile with a path note', () => {
+    expect(C.actionStatement(step, 'playwright', 'typescript')).toBe(
+      "// NOTE: these file paths must exist relative to where the test runs\nawait page.locator('#f').setInputFiles(['a.pdf', 'b c.png']);"
+    );
+    expect(C.actionStatement(step, 'playwright', 'python')).toContain(
+      '.set_input_files(["a.pdf", "b c.png"])'
+    );
+    expect(C.actionStatement(step, 'selenium', 'python')).toContain(
+      '.send_keys("\\n".join(os.path.abspath(p) for p in ["a.pdf", "b c.png"]))'
+    );
+    expect(C.actionStatement(step, 'cypress', 'javascript')).toContain(".selectFile(['a.pdf', 'b c.png']);");
+  });
+
+  it('tolerates a bare file name instead of JSON', () => {
+    expect(C.actionStatement({ ...step, value: 'x.txt' }, 'playwright', 'javascript')).toContain(
+      "setInputFiles(['x.txt'])"
+    );
+  });
+});
+
+describe('Selenium check/uncheck and viewport', () => {
+  const t = { kind: 'id', value: 'agree' };
+
+  it('only clicks when the checked state differs', () => {
+    expect(C.actionStatement({ action: 'check', target: t }, 'selenium', 'python')).toBe(
+      'el = driver.find_element(By.ID, "agree")\n' +
+        'if not (el.is_selected() or el.get_attribute("aria-checked") == "true"):\n' +
+        '    el.click()'
+    );
+    const js = C.actionStatement({ action: 'uncheck', target: t }, 'selenium', 'javascript');
+    expect(js).toContain(
+      "if (((await el.isSelected()) || (await el.getAttribute('aria-checked')) === 'true')) await el.click();"
+    );
+  });
+
+  it('can repeat element-scoped statements without redeclaring in JS', () => {
+    const steps = [
+      { action: 'check', target: t },
+      { action: 'fill', target: t, value: 'x' },
+    ];
+    const js = C.testScript(steps, 'selenium', 'javascript');
+    expect(js.match(/const el = /g)).toHaveLength(2);
+    expect(js.match(/^ {4}\{$/gm)).toHaveLength(2); // each in its own block
+  });
+
+  it('sizes the window to the recorded viewport plus browser chrome', () => {
+    const py = C.actionStatement({ action: 'viewport', width: 390, height: 844 }, 'selenium', 'python');
+    expect(py).toBe(
+      'driver.set_window_size(*driver.execute_script("return [390 + window.outerWidth - window.innerWidth, 844 + window.outerHeight - window.innerHeight];"))'
+    );
+    expect(
+      C.actionStatement({ action: 'viewport', width: 390, height: 844 }, 'selenium', 'typescript')
+    ).toContain('executeScript<{ width: number; height: number }>(');
+  });
+});
+
+describe('text assertions (C6)', () => {
+  const t = { kind: 'id', value: 'total' };
+
+  it('supports toContainText everywhere', () => {
+    const step = { action: 'assert', assertType: 'toContainText', target: t, value: 'lorem' };
+    expect(C.actionStatement(step, 'playwright', 'typescript')).toBe(
+      "await expect(page.locator('#total')).toContainText('lorem');"
+    );
+    expect(C.actionStatement(step, 'playwright', 'python')).toBe(
+      'expect(page.locator("#total")).to_contain_text("lorem")'
+    );
+    expect(C.actionStatement(step, 'selenium', 'python')).toBe(
+      'assert "lorem" in " ".join(driver.find_element(By.ID, "total").text.split())'
+    );
+    expect(C.actionStatement(step, 'cypress', 'javascript')).toContain('.to.contain(');
+  });
+
+  it('compares whitespace-normalised text for toHaveText in Cypress and Selenium', () => {
+    const step = { action: 'assert', assertType: 'toHaveText', target: t, value: '  Total\n 42 ' };
+    expect(C.actionStatement(step, 'cypress', 'javascript')).toBe(
+      "cy.get('#total').should(($el) => { expect($el.text().replace(/\\s+/g, ' ').trim()).to.equal('Total 42'); });"
+    );
+    expect(C.actionStatement(step, 'selenium', 'javascript')).toBe(
+      "assert.strictEqual((await driver.findElement(By.id('total')).getText()).replace(/\\s+/g, ' ').trim(), 'Total 42');"
+    );
+  });
+});
+
+describe('control characters in literals', () => {
+  it('escapes NUL, other C0 controls, DEL and line separators', () => {
+    const v = 'a\x00b\x0bc\x7fd e';
+    expect(C.q(v, 'python')).toBe('"a\\x00b\\x0bc\\x7fd\\u2028e"');
+    expect(C.q(v, 'javascript')).toBe("'a\\x00b\\x0bc\\x7fd\\u2028e'");
+    // Round-trips through a real JS parser.
+    expect(new Function(`return ${C.q(v, 'javascript')};`)()).toBe(v);
+  });
+
+  it('CSS-escapes a newline inside an attribute selector', () => {
+    expect(C.locatorExpr({ kind: 'name', value: 'a\nb' }, 'playwright', 'typescript')).toBe(
+      'page.locator(\'[name="a\\\\a b"]\')'
+    );
+  });
+});
+
+describe('ambiguous and unsupported steps', () => {
+  it('picks .first() in Cypress and notes it for an unnamed role locator', () => {
+    const out = C.actionStatement(
+      { action: 'click', target: { kind: 'role', role: 'button' } },
+      'cypress',
+      'javascript'
+    );
+    expect(out.split('\n')[0]).toMatch(/^\/\/ NOTE: .*several elements/);
+    expect(out).toMatch(/\.first\(\)\.click\(\);$/);
+    expect(
+      C.actionStatement({ action: 'click', target: { kind: 'role', role: 'button' } }, 'selenium', 'python')
+    ).toMatch(/^# NOTE: /);
+  });
+
+  it('trusts a known-unique unnamed role', () => {
+    const out = C.actionStatement(
+      { action: 'click', target: { kind: 'role', role: 'main', matchCount: 1 } },
+      'cypress',
+      'javascript'
+    );
+    expect(out).not.toContain('NOTE');
+    expect(out).not.toContain('.first()');
+  });
+
+  it('emits a TODO comment for an unknown action instead of clicking or throwing', () => {
+    for (const [fw, lang] of validCombos()) {
+      const out = C.actionStatement({ action: 'scroll', target: { kind: 'id', value: 'x' } }, fw, lang);
+      expect(out, `${fw}/${lang}`).toMatch(/^(\/\/|#) TODO: unsupported step "scroll"/);
+    }
+  });
+
+  it('keeps a Python script valid when every step is a comment', () => {
+    const py = C.testScript([{ action: 'scroll' }], 'selenium', 'python');
+    expect(py).toContain('    # TODO');
+    expect(py).toContain('    pass\nfinally:');
+  });
+});
+
+describe('Cypress cross-origin', () => {
+  it('explains that a positional (cross-origin) iframe is unreachable', () => {
+    const t = { kind: 'frame', selector: null, index: 1, child: { kind: 'text', value: 'Pay' } };
+    const out = C.actionStatement({ action: 'click', target: t }, 'cypress', 'javascript');
+    expect(out).toMatch(/^\/\/ NOTE: this iframe is cross-origin/);
+    expect(
+      C.actionStatement({ action: 'click', target: { ...t, selector: '#pay' } }, 'cypress', 'javascript')
+    ).not.toContain('NOTE');
+  });
+
+  it('wraps steps on a different origin in cy.origin()', () => {
+    const steps = [
+      { action: 'goto', value: 'https://a.example.com/', url: 'https://a.example.com/' },
+      { action: 'click', target: { kind: 'role', role: 'link', name: 'SSO' }, url: 'https://a.example.com/' },
+      { action: 'fill', target: { kind: 'id', value: 'code' }, value: '1', url: 'https://b.example.org/sso' },
+      { action: 'click', target: { kind: 'id', value: 'back' }, url: 'https://a.example.com/home' },
+    ];
+    const js = C.testScript(steps, 'cypress', 'javascript');
+    expect(js).toContain(
+      "    cy.origin('https://b.example.org', () => {\n" +
+        "      cy.get('#code').clear().type('1', { parseSpecialCharSequences: false });\n" +
+        '    });\n' +
+        "    cy.get('#back').click();"
+    );
+  });
+
+  it('falls back to cy.visit() lines when only statements are given', () => {
+    const js = C.wrapScript(
+      ["cy.visit('https://a.com/');", "cy.visit('https://b.com/x');", "cy.get('#x').click();"],
+      'cypress',
+      'javascript'
+    );
+    expect(js).toContain(
+      "cy.origin('https://b.com', () => {\n      cy.visit('https://b.com/x');\n      cy.get('#x').click();\n    });"
+    );
+  });
+
+  it('declares the name helper once at the top, and again inside cy.origin', () => {
+    const steps = [
+      { action: 'goto', value: 'https://a.example.com/' },
+      {
+        action: 'click',
+        target: { kind: 'role', role: 'button', name: 'Go' },
+        url: 'https://a.example.com/',
+      },
+      {
+        action: 'click',
+        target: { kind: 'role', role: 'button', name: 'Go' },
+        url: 'https://b.example.org/',
+      },
+    ];
+    const ts = C.testScript(steps, 'cypress', 'typescript');
+    expect(ts.match(/function locatraMatch\(/g)).toHaveLength(2);
+    expect(ts.startsWith('// Locatra: match an element')).toBe(true);
+    expect(ts).toContain(
+      'function locatraMatch(el: HTMLElement, kind: string, text: string, exact?: boolean): boolean {'
+    );
+    expect(C.testScript(steps, 'cypress', 'javascript')).toContain(
+      'function locatraMatch(el, kind, text, exact) {'
+    );
+    expect(C.testScript([{ action: 'goto', value: '/' }], 'cypress', 'javascript')).not.toContain(
+      'locatraMatch'
+    );
+  });
+});
+
+describe('press combos recorded by the content script', () => {
+  it.each([
+    [
+      'Shift+Space',
+      'Shift+Space',
+      "cy.realPress(['Shift', 'Space']);",
+      'key_down(Keys.SHIFT).send_keys(Keys.SPACE).key_up(Keys.SHIFT)',
+    ],
+    ['Escape', 'Escape', "cy.focused().type('{esc}');", 'send_keys(Keys.ESCAPE)'],
+    [
+      'Control+Alt+Shift+Meta+Enter',
+      'Control+Alt+Shift+Meta+Enter',
+      "cy.realPress(['Control', 'Alt', 'Shift', 'Meta', 'Enter']);",
+      'key_down(Keys.CONTROL).key_down(Keys.ALT).key_down(Keys.SHIFT).key_down(Keys.META).send_keys(Keys.ENTER).key_up(Keys.META).key_up(Keys.SHIFT).key_up(Keys.ALT).key_up(Keys.CONTROL)',
+    ],
+  ])('maps %s in every framework', (value, pw, cy, sel) => {
+    expect(C.actionStatement({ action: 'press', value }, 'playwright', 'typescript')).toBe(
+      `await page.keyboard.press('${pw}');`
+    );
+    expect(C.actionStatement({ action: 'press', value }, 'cypress', 'javascript')).toBe(cy);
+    expect(C.actionStatement({ action: 'press', value }, 'selenium', 'python')).toContain(sel);
+  });
+});
+
+describe('Cypress check/uncheck on native and ARIA controls', () => {
+  // Executes the generated statement against jsdom with a minimal cy/jQuery stand-in.
+  function run(stmt, doc) {
+    const $ = (el) => ({
+      el,
+      is: (sel) => el.matches(sel),
+      attr: (n) => el.getAttribute(n) ?? undefined,
+    });
+    const chain = (els) => ({
+      filter: (fn) => chain(els.filter((e, i) => fn(i, e))),
+      then: (fn) => fn($(els[0])),
+    });
+    const cy = {
+      get: (s) => chain([...doc.querySelectorAll(s)]),
+      wrap: ($el) => ({
+        check: () => {
+          $el.el.checked = true;
+        },
+        uncheck: () => {
+          $el.el.checked = false;
+        },
+        click: () => $el.el.click(),
+      }),
+    };
+    const helper = C.wrapScript([stmt], 'cypress', 'javascript').split('describe(')[0];
+    new Function('cy', `${helper}\n${stmt}`)(cy);
+  }
+
+  function page() {
+    const doc = new JSDOM(`<label><input type="checkbox" id="n"> Native</label>
+      <div role="checkbox" id="a" aria-checked="false">Aria</div>
+      <div role="switch" id="s" aria-checked="true">Wifi</div>`).window.document;
+    for (const id of ['a', 's']) {
+      const el = doc.getElementById(id);
+      el.addEventListener('click', () =>
+        el.setAttribute('aria-checked', el.getAttribute('aria-checked') === 'true' ? 'false' : 'true')
+      );
+    }
+    return doc;
+  }
+
+  const stmt = (action, role, name) =>
+    C.actionStatement({ action, target: { kind: 'role', role, name } }, 'cypress', 'javascript');
+
+  it('checks a native checkbox with .check() and is idempotent', () => {
+    const doc = page();
+    run(stmt('check', 'checkbox', 'Native'), doc);
+    run(stmt('check', 'checkbox', 'Native'), doc);
+    expect(doc.getElementById('n').checked).toBe(true);
+    run(stmt('uncheck', 'checkbox', 'Native'), doc);
+    expect(doc.getElementById('n').checked).toBe(false);
+  });
+
+  it('clicks an ARIA checkbox/switch only when its state differs', () => {
+    const doc = page();
+    run(stmt('check', 'checkbox', 'Aria'), doc);
+    run(stmt('check', 'checkbox', 'Aria'), doc);
+    expect(doc.getElementById('a').getAttribute('aria-checked')).toBe('true');
+    run(stmt('uncheck', 'switch', 'Wifi'), doc);
+    run(stmt('uncheck', 'switch', 'Wifi'), doc);
+    expect(doc.getElementById('s').getAttribute('aria-checked')).toBe('false');
+  });
+});
+
+describe('Selenium accessible-name precedence', () => {
+  const doc = () =>
+    new JSDOM(`<button aria-label="Dismiss" id="b">Cancel</button>
+    <label for="z">Zip</label><input id="z" placeholder="Postal" title="Code">
+    <button title="Settings" id="g">Gear</button>`).window.document;
+
+  function count(target) {
+    const m = /By\.xpath\('((?:[^'\\]|\\.)*)'\)/.exec(C.locatorExpr(target, 'selenium', 'javascript'));
+    const d = doc();
+    return d.evaluate(m[1].replace(/\\(.)/g, '$1'), d, null, 7, null).snapshotLength;
+  }
+
+  it('lets the first present name source decide, like Playwright', () => {
+    expect(count({ kind: 'role', role: 'button', name: 'Dismiss' })).toBe(1);
+    expect(count({ kind: 'role', role: 'button', name: 'Cancel' })).toBe(0); // aria-label wins
+    expect(count({ kind: 'role', role: 'textbox', name: 'Zip' })).toBe(1);
+    expect(count({ kind: 'role', role: 'textbox', name: 'Postal' })).toBe(0); // label wins
+    expect(count({ kind: 'role', role: 'textbox', name: 'Code' })).toBe(0);
+    expect(count({ kind: 'role', role: 'button', name: 'Gear' })).toBe(1);
+    expect(count({ kind: 'role', role: 'button', name: 'Settings' })).toBe(0); // content wins over title
   });
 });
