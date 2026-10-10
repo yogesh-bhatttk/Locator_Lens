@@ -87,9 +87,24 @@
   function isOwnArtifactAttr(attr) {
     return /^data-(ll|locatra)-/.test(String(attr || ''));
   }
-  const OWN_UI_SELECTOR = '[id^="ll-"], [id^="locatra-"]';
-  function isOwnArtifactId(id) {
-    return /^(ll-|locatra-)/.test(String(id || ''));
+  // The overlay, tooltip, toolbar, toast… are known by identity: content.js hands
+  // each one to markOwnUi() when it creates it. An id prefix ("ll-*") used to
+  // decide this, and a page with its own <div id="ll-root"> had its whole subtree
+  // vanish from every count. A page script cannot reach this registry (content
+  // scripts run in an isolated world), so it cannot hide its elements here either.
+  // Our UI is plain light DOM appended to <body>, so Node.contains() is enough.
+  const ownUiRoots = new Set();
+  function markOwnUi(el) {
+    if (el && el.nodeType === 1) ownUiRoots.add(el);
+  }
+  function unmarkOwnUi(el) {
+    ownUiRoots.delete(el);
+  }
+  function isOwnUi(n) {
+    for (const r of ownUiRoots) {
+      if (r.contains(n)) return true; // contains() includes r itself
+    }
+    return false;
   }
 
   // ── Per-analysis caches ──────────────────────────────────────────────────────
@@ -1048,8 +1063,10 @@
     // A hex-ish hash segment (section-a3f9b2c1), not a word.
     return s.split(/[-_:.]+/).some(seg => /^[0-9a-f]{8,}$/i.test(seg) && /\d/.test(seg) && /[a-f]/i.test(seg));
   }
+  // An "ll-…" id on a page element is the page's own: our UI is never the subject
+  // of a locator or an ancestor of one, so no prefix needs excluding here.
   function usableId(id) {
-    return !!id && !isUnstableId(id) && !isOwnArtifactId(id);
+    return !!id && !isUnstableId(id);
   }
 
   // ── Build a reliable CSS selector fallback ─────────────────────────────────
@@ -1202,7 +1219,7 @@
   // The extension's own overlay/tooltip (which displays locator text!) is not
   // part of the page a test will run against.
   function withoutOwnUi(nodes) {
-    return nodes && nodes.length ? nodes.filter(n => !closestCrossShadow(n, OWN_UI_SELECTOR)) : nodes;
+    return nodes && nodes.length && ownUiRoots.size ? nodes.filter(n => !isOwnUi(n)) : nodes;
   }
 
   function resolveTargetNodes(t) {
@@ -1230,7 +1247,9 @@
   }
 
   // `nth` (a role target's position, rendered by codegen as .nth(i)) picks one
-  // element out of the full, ordered result — Playwright's `nth=` part.
+  // element out of the full, ordered result — Playwright's `nth=` part. Nothing in
+  // this engine produces it any more; it is still honoured because imported or
+  // older saved targets can carry it.
   function hasNth(t) {
     return !!t && typeof t.nth === 'number' && t.nth >= 0 && Math.floor(t.nth) === t.nth;
   }
@@ -1276,7 +1295,11 @@
   // A frame target: find the <iframe> in this document (by `selector`, which —
   // like Playwright's frameLocator — pierces open shadow roots, or positionally as
   // `iframe >> nth=index` for a cross-origin frame), then resolve `child` inside
-  // its document. null when the frame cannot be evaluated: several elements match
+  // its document. `index` is the position among the document's <iframe> elements
+  // in this pierce order — exactly what content.js's frameIndexOf() records — not
+  // the position in window.frames (that one is `framesIndex`, for Selenium only,
+  // and counts <frame>/<object> browsing contexts too). null when the frame
+  // cannot be evaluated: several elements match
   // the selector (Playwright's strict mode throws), or its document is not
   // reachable from here (cross-origin) — the content script running inside that
   // frame has to resolve the inner target itself (see unwrapFrameTarget).
@@ -1795,14 +1818,30 @@
   // `countTargetMatches(t)` whenever the count is not null.
   //   root  optional scope: a Document (e.g. a same-origin frame's) to resolve in,
   //         or an Element / ShadowRoot whose descendants the target is evaluated
-  //         within, like `scope.locator(...)` (getByText also tests the scope itself).
+  //         within, like `scope.locator(...)` (getByText also tests the scope itself),
+  //         or an array of such scopes from one document — what a chained locator
+  //         does with every match of its previous step, each result once, in
+  //         scope order (the Selector Lab resolves pasted chains with this).
   // Frame targets ({kind:'frame', selector, index, child}) are entered when the
   // frame's document is reachable (same-origin); otherwise the content script that
   // runs *inside* that frame must resolve the inner target itself — see
   // unwrapFrameTarget().
+  function isScope(n) {
+    return !!n && (n.nodeType === 1 || n.nodeType === 9 || n.nodeType === 11);
+  }
   function resolveTarget(target, root) {
     if (!target) return [];
-    const r = root && (root.nodeType === 1 || root.nodeType === 9 || root.nodeType === 11) ? root : document;
+    if (Array.isArray(root)) {
+      const scopes = root.filter(n => isScope(n) && n.nodeType !== 9);
+      if (!scopes.length) return [];
+      try {
+        const nodes = inDocument(scopes[0].ownerDocument, () => nodesWithin(scopes, target));
+        return nodes ? nodes.slice() : [];
+      } catch (e) {
+        return [];
+      }
+    }
+    const r = isScope(root) ? root : document;
     const doc = r.nodeType === 9 ? r : (r.ownerDocument || document);
     try {
       const nodes = inDocument(doc, () => (r.nodeType === 9 ? targetNodes(target) : nodesWithin([r], target)));
@@ -1813,7 +1852,7 @@
   }
 
   // Splits a recorded target into the frames it lives in (outermost first, exactly
-  // the {selector, index, shadowPath?} segments content.js's frameChain() builds —
+  // the {selector, index, framesIndex?, shadowPath?} segments content.js's frameChain() builds —
   // selector is null for a cross-origin frame) and the target inside the innermost
   // frame. A frame's content script owns a step when `framePath` equals its own
   // frame chain; the top document owns targets with an empty framePath. The inner
@@ -1823,6 +1862,7 @@
     let t = target || null;
     while (t && t.kind === 'frame') {
       const seg = { selector: t.selector || null, index: typeof t.index === 'number' ? t.index : 0 };
+      if (typeof t.framesIndex === 'number') seg.framesIndex = t.framesIndex;
       if (Array.isArray(t.shadowPath)) seg.shadowPath = t.shadowPath.slice();
       framePath.push(seg);
       t = t.child || null;
@@ -1944,6 +1984,8 @@
     deepQueryAll,
     countTargetMatches: (t) => withCaches(() => countTargetMatches(t)),
     resolveTarget,
+    markOwnUi,
+    unmarkOwnUi,
     unwrapFrameTarget,
     suggestName,
     elementKind,

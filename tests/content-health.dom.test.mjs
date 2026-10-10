@@ -398,10 +398,21 @@ describe('__LocatraHealthCheck — counts and statuses', () => {
   });
 
   it('does not count Locatra’s own overlay', () => {
-    document.body.innerHTML = '<button>Inspect</button><div id="ll-tooltip"><button>Inspect</button></div>';
+    document.body.innerHTML = '<button>Inspect</button>';
+    send({ type: 'START_INSPECT' }); // the traversal bar brings two buttons of its own
+    expect(document.querySelectorAll('button')).toHaveLength(3);
     expect(health([{ id: 1, target: { kind: 'css', value: 'button' } }])[0]).toMatchObject({
       count: 1,
       status: 'ok',
+    });
+    send({ type: 'STOP_INSPECT' });
+  });
+
+  it('counts a page element whose id merely starts with ll- (M4)', () => {
+    document.body.innerHTML = '<button>Inspect</button><div id="ll-tooltip"><button>Inspect</button></div>';
+    expect(health([{ id: 1, target: { kind: 'css', value: 'button' } }])[0]).toMatchObject({
+      count: 2,
+      status: 'ambiguous',
     });
   });
 

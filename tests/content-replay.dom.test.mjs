@@ -17,6 +17,9 @@ const CONTENT_SCRIPTS = ['src/codegen.js', 'src/content-locator-engine.js', 'src
 let handlers = [];
 let sent = [];
 const allHandlers = [];
+// C5: how BACKGROUND answers a REPLAY_SECRET_REQUEST — (msg, reply) => void; the
+// default refuses, a test that leaves `reply` uncalled models no answer at all.
+let secretResponder = (msg, reply) => reply({ ok: false });
 
 function load() {
   for (const h of allHandlers) {
@@ -35,7 +38,10 @@ function load() {
     runtime: {
       id: 'test-extension-id',
       lastError: null,
-      sendMessage: (msg) => sent.push(msg),
+      sendMessage: (msg, reply) => {
+        sent.push(msg);
+        if (msg.type === 'REPLAY_SECRET_REQUEST' && reply) secretResponder(msg, reply);
+      },
       onMessage: {
         addListener: (fn) => {
           handlers.push(fn);
@@ -48,6 +54,7 @@ function load() {
       onChanged: { addListener: () => {} },
     },
   };
+  secretResponder = (msg, reply) => reply({ ok: false });
   delete globalThis.__LocatorLensEngine;
   delete globalThis.LLCodegen;
   for (const file of CONTENT_SCRIPTS) {
@@ -399,7 +406,7 @@ describe('actions', () => {
     expect(document.getElementById('d').value).toBe('2024-05-06');
   });
 
-  it('a sensitive fill takes its value from secrets and is skipped without one', async () => {
+  it('a sensitive fill asks BACKGROUND for its secret and is skipped without one (C5)', async () => {
     document.body.innerHTML = '<label>Password <input type="password" id="pw"></label>';
     const step = {
       action: 'fill',
@@ -408,35 +415,98 @@ describe('actions', () => {
       secretName: 'LOCATRA_PASSWORD',
       target: { kind: 'label', value: 'Password' },
     };
-    const skipped = await replay(step, { secrets: {} });
-    expect(skipped).toEqual({ ok: false, skipped: true, error: 'no value provided', matchCount: 0 });
-    expect(await replay(step, { secrets: { LOCATRA_PASSWORD: '' } })).toMatchObject({ skipped: true });
-    expect(await replay(step)).toMatchObject({ skipped: true });
+    const skippedAs = { ok: false, skipped: true, error: 'no value provided', matchCount: 0 };
+    // Refused, an empty value, a malformed answer, or an error from the channel.
+    for (const answer of [{ ok: false }, { ok: true, value: '' }, { ok: true, value: 42 }, undefined]) {
+      secretResponder = (msg, reply) => reply(answer);
+      expect(await replay(step, { runId: 'run-7', index: 3 })).toEqual(skippedAs);
+    }
+    expect(sent.filter((m) => m.type === 'REPLAY_SECRET_REQUEST')).toEqual(
+      Array(4).fill({ type: 'REPLAY_SECRET_REQUEST', runId: 'run-7', index: 3 })
+    );
+    // Secrets riding on the REPLAY_STEP itself are no longer read.
+    expect(await replay(step, { secrets: { LOCATRA_PASSWORD: 'from-the-message' } })).toEqual(skippedAs);
+    expect(document.getElementById('pw').value).toBe('');
 
-    const ok = await replay(step, { secrets: { LOCATRA_PASSWORD: 's3cret!' } });
+    secretResponder = (msg, reply) => reply({ ok: true, value: 's3cret!' });
+    const ok = await replay(step);
     expect(ok).toEqual({ ok: true, matchCount: 1 });
     expect(document.getElementById('pw').value).toBe('s3cret!');
   });
 
-  it('a sensitive step without a valid secretName reads LOCATRA_PASSWORD (as the panel keys it)', async () => {
+  it('a secret request nobody answers times out as a missing secret', async () => {
+    vi.useFakeTimers();
     document.body.innerHTML = '<label>Password <input type="password" id="pw"></label>';
-    const target = { kind: 'label', value: 'Password' };
-    for (const secretName of [undefined, '', 'not valid!', 42]) {
-      document.getElementById('pw').value = '';
-      const res = await replay(
-        { action: 'fill', value: '', sensitive: true, secretName, target },
-        { secrets: { LOCATRA_PASSWORD: 'legacy-pw' } }
-      );
-      expect(res).toEqual({ ok: true, matchCount: 1 });
-      expect(document.getElementById('pw').value).toBe('legacy-pw');
-    }
-    // A valid name is used as is, with no fallback.
-    expect(
-      await replay(
-        { action: 'fill', value: '', sensitive: true, secretName: 'LOCATRA_SECRET', target },
-        { secrets: { LOCATRA_PASSWORD: 'legacy-pw' } }
-      )
-    ).toMatchObject({ skipped: true, error: 'no value provided' });
+    let late = null;
+    secretResponder = (msg, reply) => (late = reply); // answers only after the deadline
+    const pending = replay({
+      action: 'fill',
+      value: '',
+      sensitive: true,
+      target: { kind: 'label', value: 'Password' },
+    });
+    await vi.advanceTimersByTimeAsync(5000);
+    expect(await pending).toMatchObject({ skipped: true, error: 'no value provided' });
+    late({ ok: true, value: 'too-late' });
+    expect(document.getElementById('pw').value).toBe('');
+  });
+
+  it('a secret request that cannot be sent (extension gone) is a missing secret', async () => {
+    document.body.innerHTML = '<label>Password <input type="password" id="pw"></label>';
+    globalThis.chrome.runtime.sendMessage = () => {
+      throw new Error('Extension context invalidated.');
+    };
+    const res = await replay({
+      action: 'fill',
+      value: '',
+      sensitive: true,
+      target: { kind: 'label', value: 'Password' },
+    });
+    expect(res).toMatchObject({ skipped: true, error: 'no value provided' });
+  });
+
+  it('only the frame that owns a sensitive step asks for its secret', async () => {
+    document.body.innerHTML = '<iframe id="pay"></iframe>';
+    const res = await replay({
+      action: 'fill',
+      value: '',
+      sensitive: true,
+      target: { kind: 'frame', selector: '#pay', index: 0, child: { kind: 'label', value: 'Card' } },
+    });
+    expect(res.unanswered).toBe(true);
+    expect(sent.some((m) => m.type === 'REPLAY_SECRET_REQUEST')).toBe(false);
+  });
+
+  it('a sensitive toHaveValue compares against the secret and never prints a value (C2)', async () => {
+    document.body.innerHTML = '<label>Code <input id="otp" autocomplete="one-time-code"></label>';
+    const otp = document.getElementById('otp');
+    otp.value = '123456';
+    const step = {
+      action: 'assert',
+      assertType: 'toHaveValue',
+      value: '',
+      sensitive: true,
+      secretName: 'LOCATRA_SECRET',
+      target: { kind: 'label', value: 'Code' },
+    };
+    secretResponder = (msg, reply) => reply({ ok: true, value: '123456' });
+    expect(await replay(step)).toEqual({ ok: true, matchCount: 1 });
+    secretResponder = (msg, reply) => reply({ ok: true, value: '999999' });
+    const failed = await replay(step);
+    expect(failed).toMatchObject({
+      ok: false,
+      error: "toHaveValue: the field's value does not match LOCATRA_SECRET",
+    });
+    expect(JSON.stringify(failed)).not.toMatch(/123456|999999/);
+    // Without a valid name the panel's key for legacy steps is named instead.
+    const legacy = await replay({ ...step, secretName: 'not valid!' });
+    expect(legacy.error).toBe("toHaveValue: the field's value does not match LOCATRA_PASSWORD");
+    secretResponder = (msg, reply) => reply({ ok: false });
+    expect(await replay(step)).toMatchObject({ skipped: true, error: 'no value provided' });
+    // A non-sensitive toHaveValue asks for nothing.
+    sent.length = 0;
+    expect(await replay({ ...step, sensitive: false, value: '123456' })).toEqual({ ok: true, matchCount: 1 });
+    expect(sent.some((m) => m.type === 'REPLAY_SECRET_REQUEST')).toBe(false);
   });
 
   it('selectOption matches the option label first, then its value', async () => {
@@ -462,6 +532,37 @@ describe('actions', () => {
       target: { kind: 'label', value: 'Country' },
     });
     expect(missing).toEqual({ ok: false, error: 'no option "Mars" in the <select>', matchCount: 1 });
+  });
+
+  it('selectOption with `values` selects every one of them in a multi-select (C1)', async () => {
+    document.body.innerHTML =
+      '<select id="m" multiple><option selected>A</option><option>B</option><option label="Sea">C</option></select><select id="one"><option>A</option><option>B</option></select>';
+    const m = document.getElementById('m');
+    const seen = spy(m, ['input', 'change']);
+    const target = { kind: 'id', value: 'm' };
+    expect(await replay({ action: 'selectOption', value: 'B', values: ['B', 'Sea'], target })).toEqual({
+      ok: true,
+      matchCount: 1,
+    });
+    expect(Array.from(m.selectedOptions).map((o) => o.textContent)).toEqual(['B', 'C']);
+    expect(seen).toEqual(['input', 'change']);
+    expect((await replay({ action: 'selectOption', value: 'B', values: ['B', 'Mars'], target })).error).toBe(
+      'no option "Mars" in the <select>'
+    );
+    expect(Array.from(m.selectedOptions).map((o) => o.textContent)).toEqual(['B', 'C']); // untouched
+    // A single value in `values` is just `value`; several on a plain select are refused.
+    expect((await replay({ action: 'selectOption', value: 'A', values: ['A'], target })).ok).toBe(true);
+    expect(Array.from(m.selectedOptions).map((o) => o.textContent)).toEqual(['A']);
+    expect(
+      (
+        await replay({
+          action: 'selectOption',
+          value: 'A',
+          values: ['A', 'B'],
+          target: { kind: 'id', value: 'one' },
+        })
+      ).error
+    ).toBe('element is not a <select multiple>, it cannot select several options');
   });
 
   it('selectOption refuses disabled options and non-selects; a multi-select keeps one option', async () => {

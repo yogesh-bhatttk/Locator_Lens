@@ -625,9 +625,14 @@ describe('#2 counts use Playwright default matching (substring, case-insensitive
   });
 
   it('does not count the extension’s own overlay/tooltip text', () => {
-    document.body.innerHTML =
-      '<button id="subject">Save</button><div id="ll-tooltip"><span>Save</span></div>';
-    expect(card(analyse(document.getElementById('subject')), 'text').matchCount).toBe(1);
+    document.body.innerHTML = '<button id="subject">Save</button><div id="tip"><span>Save</span></div>';
+    const tip = document.getElementById('tip');
+    E.markOwnUi(tip); // what content.js does for its overlay and tooltip
+    try {
+      expect(card(analyse(document.getElementById('subject')), 'text').matchCount).toBe(1);
+    } finally {
+      E.unmarkOwnUi(tip);
+    }
   });
 });
 

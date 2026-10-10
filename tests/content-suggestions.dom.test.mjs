@@ -111,9 +111,9 @@ describe('F3 · URL-change suggestions', () => {
       assertType: 'toHaveURL',
       target: null,
       suggested: true,
-      reason: 'Page navigated to /orders/42?token=x&access_token=REDACTED',
+      reason: 'Page navigated to /orders/42?token=REDACTED&access_token=REDACTED',
     });
-    expect(s.value).toMatch(/\/orders\/42\?token=x&access_token=REDACTED$/);
+    expect(s.value).toMatch(/\/orders\/42\?token=REDACTED&access_token=REDACTED$/);
     expect(s.fullCode).toBe(`await expect(page).toHaveURL(${JSON.stringify(s.value)});`);
     expect(s.rect).toBeUndefined();
 
@@ -446,12 +446,19 @@ describe('F3 · feedback after a submit', () => {
   it('ignores Locatra’s own toast', async () => {
     const form = startWithForm();
     submit(form);
-    document.body.insertAdjacentHTML(
-      'beforeend',
-      '<div id="ll-toast"><span class="ll-toast-code">Copied</span></div>'
-    );
+    // No element to copy from: Locatra shows its own toast.
+    send({ type: 'CONTEXT_MENU_COPY' });
+    expect(document.getElementById('ll-toast')).not.toBeNull();
     await advance(200);
     expect(suggestions()).toEqual([]);
+  });
+
+  it('a page toast whose id merely starts with ll- is the page’s own (M4)', async () => {
+    const form = startWithForm();
+    submit(form);
+    document.body.insertAdjacentHTML('beforeend', '<div id="ll-toast" role="status">Saved</div>');
+    await advance(200);
+    expect(suggestions().map((s) => s.value)).toEqual(['Saved']);
   });
 
   it('pausing, stopping or turning the setting off ends the watch', async () => {
@@ -489,12 +496,12 @@ describe('F3 · feedback after a submit', () => {
     expect(suggestions()).toEqual([]);
   });
 
-  it('a submit coming from Locatra’s own UI is ignored', async () => {
+  it('a submit from a page form with an ll- id is watched like any other (M4)', async () => {
     startWithForm('<form id="ll-own"><button>Save</button></form>');
     submit(document.getElementById('ll-own'));
-    document.body.insertAdjacentHTML('beforeend', '<div role="alert">Nope</div>');
+    document.body.insertAdjacentHTML('beforeend', '<div role="alert">Yes</div>');
     await advance(200);
-    expect(suggestions()).toEqual([]);
+    expect(suggestions().map((s) => s.value)).toEqual(['Yes']);
   });
 });
 

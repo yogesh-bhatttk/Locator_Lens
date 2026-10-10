@@ -76,6 +76,37 @@
   let settingsTestAttributes = [];
   let legacyTestAttributes = [];
 
+  // ── Our own DOM (M4) ──────────────────────────────────────────────────────
+  // Everything Locatra adds to the page (overlay, tooltip, toolbar, toast, replay
+  // highlight, its stylesheet) is known by identity, never by an "ll-*" id: a page
+  // with its own <div id="ll-root"> used to vanish from the engine, and
+  // getElementById('ll-toast') could find — and remove — a page element. The ids
+  // stay for readability; the stylesheet is scoped to a per-instance random
+  // attribute value a page cannot predict.
+  const UI_ATTR = 'data-locatra-ui';
+  const UI_NONCE = Math.random().toString(36).slice(2, 10) + Date.now().toString(36);
+  const UI_SCOPE = `[${UI_ATTR}="${UI_NONCE}"]`;
+  const _ownUi = new Set();
+  function adoptOwnUi(el) {
+    el.setAttribute(UI_ATTR, UI_NONCE);
+    _ownUi.add(el);
+    const E = globalThis.__LocatorLensEngine;
+    if (E && typeof E.markOwnUi === 'function') E.markOwnUi(el);
+    return el;
+  }
+  function releaseOwnUi(el) {
+    if (!el) return;
+    _ownUi.delete(el);
+    el.remove();
+    const E = globalThis.__LocatorLensEngine;
+    if (E && typeof E.unmarkOwnUi === 'function') E.unmarkOwnUi(el);
+  }
+  function isOwnArtifact(n) {
+    if (!n || typeof n.nodeType !== 'number') return false;
+    for (const r of _ownUi) if (r.contains(n)) return true;
+    return false;
+  }
+
   // Recorder modes (driven by the side panel via messages)
   let isPaused = false;       // pause/resume while recording
   let assertMode = false;     // when on, a click records an assertion instead of an interaction
@@ -146,9 +177,56 @@
     return null;
   }
 
-  // Credentials and tokens that travel in a URL (OAuth implicit-flow hashes, magic
-  // links) must not end up in a recorded test or a stored pick.
-  const SENSITIVE_URL_PARAM_RE = /([?&#;])(password|passwd|pwd|secret|client_secret|access_token|id_token|refresh_token|api_key|apikey)=([^&#;]*)/gi;
+  // C6: is a secret readable on screen right now? A password field is masked, but a
+  // one-time code or card number typed into a plain-looking field shows in clear in
+  // every step screenshot taken while it is in view. Only an autocomplete token can
+  // make a non-password field sensitive, so candidates are one `input[autocomplete]`
+  // query per document / known open shadow root — re-collected at most once per
+  // SENSITIVE_SCAN_MS, never on keystrokes. Values and positions are read fresh for
+  // every step, and the step's own field and the focused one are always looked at.
+  const SENSITIVE_SCAN_MS = 1000;
+  let _sensitiveScan = { at: -Infinity, list: [] };
+  function isMaskedOrPlain(el) {
+    return !sensitiveSecretName(el) || (el.getAttribute('type') || '').toLowerCase() === 'password';
+  }
+  function sensitiveCandidates() {
+    const now = Date.now();
+    if (now - _sensitiveScan.at < SENSITIVE_SCAN_MS) return _sensitiveScan.list;
+    const list = [];
+    const roots = [document].concat(Array.from(_frameShadowRoots), Array.from(_shadowChangeRoots));
+    roots.forEach((root) => {
+      let found = [];
+      try { found = root.querySelectorAll('input[autocomplete]'); } catch (err) { /* detached */ }
+      for (let i = 0; i < found.length; i++) if (!isMaskedOrPlain(found[i])) list.push(found[i]);
+    });
+    _sensitiveScan = { at: now, list };
+    return list;
+  }
+  function onScreen(el, layout) {
+    if (!el || !el.isConnected || !el.value || isMaskedOrPlain(el)) return false;
+    // No layout to measure (a headless DOM): visible counts as on screen — a
+    // skipped screenshot costs nothing, a leaked code does.
+    if (!layout) return isElementVisible(el);
+    const r = el.getBoundingClientRect();
+    return r.width > 0 && r.height > 0 && r.bottom > 0 && r.right > 0 &&
+      r.top < window.innerHeight && r.left < window.innerWidth;
+  }
+  function sensitiveValueOnScreen(stepEl) {
+    const layout = documentHasLayout();
+    return [stepEl, deepActiveElement(document)].concat(sensitiveCandidates()).some((el) => onScreen(el, layout));
+  }
+
+  // Credentials and tokens that travel in a URL (OAuth implicit-flow hashes and
+  // authorization codes, magic links, pre-signed S3 URLs, session ids, API keys)
+  // must not end up in a recorded test or a stored pick. Whole parameter names only
+  // (case-insensitive): `author=` or `keyword=` are left alone, and so are ordinary
+  // ones like q, page or id.
+  const SENSITIVE_URL_PARAM_RE = new RegExp('([?&#;])(' + [
+    'password', 'passwd', 'pwd', 'secret', 'client_secret',
+    'code', 'token', 'access_token', 'id_token', 'refresh_token', 'auth',
+    'sig', 'signature', 'x-amz-signature', 'x-amz-credential', 'x-amz-security-token',
+    'key', 'apikey', 'api_key', 'session', 'sessionid'
+  ].join('|') + ')=([^&#;]*)', 'gi');
   function redactUrl(href) {
     if (href == null) return href;
     return String(href).replace(SENSITIVE_URL_PARAM_RE, (m, sep, key) => `${sep}${key}=REDACTED`);
@@ -177,7 +255,9 @@
       target: data.target != null ? data.target : null,
       assertType: data.assertType != null ? data.assertType : null
     };
-    ['sensitive', 'secretName', 'inputType', 'supersedes', 'suggested', 'reason'].forEach((k) => {
+    // C6: background skips the step screenshot while a secret is readable on screen.
+    if (sensitiveValueOnScreen(data.el)) data = Object.assign({}, data, { sensitiveOnScreen: true });
+    ['sensitive', 'secretName', 'inputType', 'supersedes', 'suggested', 'reason', 'values', 'sensitiveOnScreen'].forEach((k) => {
       if (data[k] != null) payload[k] = data[k];
     });
     // F4: where the step's element sat on screen, for the step thumbnail.
@@ -223,22 +303,30 @@
     }
   }
 
+  /**
+   * Only used when the engine failed. The code, the statement and the target say
+   * the same thing (the statement used to add a .first() the target never had, so
+   * the replay and every exported framework disagreed with the card), the id is
+   * CSS-escaped (an id like "a.b" is otherwise a class selector), and a selector
+   * that is not known to match this element alone says so (unique: false).
+   */
   function recordFallbackLocator(el, methodChain) {
     const chain = (methodChain || 'click()').replace(/;\s*$/, '');
+    let target;
     if (el.id && typeof el.id === 'string' && el.id.trim()) {
-      const id = String(el.id).replace(/\\/g, '\\\\').replace(/'/g, "\\'");
-      return {
-        code: `page.locator('#${id}')`,
-        fullCode: `await page.locator('#${id}').${chain};`,
-        target: { kind: 'id', value: el.id }
-      };
+      target = { kind: 'id', value: el.id };
+    } else {
+      let sel = null;
+      try { sel = globalThis.__LocatorLensEngine.buildCSSSelector(el); } catch (err) { sel = null; }
+      target = { kind: 'css', value: sel || el.tagName.toLowerCase() };
     }
-    const tag = (el.tagName && el.tagName.toLowerCase()) || 'body';
-    return {
-      code: `page.locator('${tag}')`,
-      fullCode: `await page.locator('${tag}').first().${chain};`,
-      target: { kind: 'css', value: tag }
-    };
+    const sel = target.kind === 'id' ? '#' + cssEscape(target.value) : target.value;
+    let count = null;
+    try { count = globalThis.__LocatorLensEngine.countTargetMatches(target); } catch (err) { count = null; }
+    target.unique = count === 1;
+    if (typeof count === 'number') target.matchCount = count;
+    const code = `page.locator('${escSingle(sel)}')`;
+    return withShadowPath({ code, fullCode: `await ${code}.${chain};`, target, unique: target.unique }, el);
   }
 
   function bestLocatorFor(el, fallbackChain) {
@@ -315,13 +403,16 @@
     let type = assertType || 'toBeVisible';
     const el = type === 'toBeChecked' ? checkedTargetFor(clicked) : clicked;
     const best = bestLocatorFor(el, 'click()');
-    let value = computeAssertValue(el, type);
+    // C2: asserting a password / OTP / card field's value must not copy the value
+    // into the step — like a sensitive fill, the test reads it from the env var.
+    const secretName = type === 'toHaveValue' ? sensitiveSecretName(el) : null;
+    let value = secretName ? '' : computeAssertValue(el, type);
     if (type === 'toHaveText' && value.length > ASSERT_FULL_TEXT_MAX) type = 'toContainText';
     if (type === 'toContainText') value = containPrefix(value);
     let call = 'toBeVisible()';
     if (type === 'toHaveText') call = `toHaveText(${JSON.stringify(value)})`;
     else if (type === 'toContainText') call = `toContainText(${JSON.stringify(value)})`;
-    else if (type === 'toHaveValue') call = `toHaveValue(${JSON.stringify(value)})`;
+    else if (type === 'toHaveValue') call = `toHaveValue(${secretName ? `process.env.${secretName} ?? ''` : JSON.stringify(value)})`;
     else if (type === 'toBeEnabled') call = 'toBeEnabled()';
     else if (type === 'toBeChecked') call = value === 'false' ? 'not.toBeChecked()' : 'toBeChecked()';
     sendRecordedAction({
@@ -331,6 +422,8 @@
       code: best.code,
       fullCode: `await expect(${best.code}).${call};`,
       target: best.target,
+      sensitive: secretName ? true : null,
+      secretName: secretName,
       el: el
     });
   }
@@ -350,11 +443,69 @@
     return n && n.nodeType === Node.ELEMENT_NODE ? n : null;
   }
 
-  /** Locatra's own overlay / tooltip / toolbar — never recorded or picked. */
+  // ── Clicks on icons (M3) ──────────────────────────────────────────────────
+  // The element under the pointer is often not the control: the <path> or <use>
+  // of an icon inside a button, a <span> wrapping a link's text. Recording that
+  // leaf produced locators like page.locator('header > button > svg > path') that
+  // break with the next icon set, so the click goes to the nearest interactive
+  // ancestor (across shadow boundaries), as Playwright's own recorder does.
+  const SVG_NS = 'http://www.w3.org/2000/svg';
+  const INTERACTIVE_TAGS = ['button', 'select', 'textarea', 'summary'];
+  const INTERACTIVE_ROLES = ['button', 'link', 'checkbox', 'radio', 'switch', 'tab', 'menuitem', 'menuitemcheckbox',
+    'menuitemradio', 'option', 'treeitem', 'combobox', 'textbox', 'searchbox', 'slider', 'spinbutton'];
+
+  function explicitRoleOf(el) {
+    return (el.getAttribute('role') || '').trim().toLowerCase().split(/\s+/)[0];
+  }
+
+  function isInteractiveEl(n) {
+    const tag = n.tagName.toLowerCase();
+    if (INTERACTIVE_TAGS.indexOf(tag) !== -1) return true;
+    if (tag === 'input') return (n.getAttribute('type') || '').toLowerCase() !== 'hidden';
+    if ((tag === 'a' || tag === 'area') && n.hasAttribute('href')) return true;
+    return INTERACTIVE_ROLES.indexOf(explicitRoleOf(n)) !== -1;
+  }
+
+  /** A part of an SVG drawing (<path>, <use>, <g>…), not an <svg> root in HTML. */
+  function isSvgInternal(el) {
+    return el.namespaceURI === SVG_NS && !(el.tagName.toLowerCase() === 'svg' && !el.ownerSVGElement);
+  }
+
+  /** Nothing to name it by: no explicit role and an empty accessible name. */
+  function isAnonymous(el) {
+    if (explicitRoleOf(el)) return false;
+    let name = '';
+    try {
+      const E = globalThis.__LocatorLensEngine;
+      name = (E && E.getAccessibleName(el)) || '';
+    } catch (err) { name = ''; }
+    return !normText(name);
+  }
+
+  /**
+   * The element a click on `el` really acts on. `iconsOnly` (picking, context
+   * menu, assertions) promotes only SVG internals — there the user may want the
+   * <span> they pointed at. An element with a role of its own (<svg role="button">,
+   * a role=img icon with a name outside any control) is kept; an SVG internal with
+   * no control around it still becomes its outermost <svg>.
+   */
+  function actionTargetFor(el, iconsOnly) {
+    if (!el || el.nodeType !== Node.ELEMENT_NODE || isInteractiveEl(el)) return el;
+    const svgPart = isSvgInternal(el) && !explicitRoleOf(el);
+    if (!svgPart && (iconsOnly || !isAnonymous(el))) return el;
+    let n = composedParent(el);
+    for (let g = 0; n && g < 64 && n !== document.body && n !== document.documentElement; g++, n = composedParent(n)) {
+      if (isInteractiveEl(n)) return n;
+    }
+    if (!svgPart) return el;
+    let svg = el;
+    while (svg.ownerSVGElement) svg = svg.ownerSVGElement;
+    return svg;
+  }
+
+  /** Locatra's own overlay / tooltip / toolbar / toast — never recorded or picked. */
   function isOwnUi(el) {
-    if (!el) return false;
-    if (el === overlay || el === tooltip) return true;
-    return !!(traversalBar && traversalBar.contains(el));
+    return isOwnArtifact(el);
   }
 
   // ── Shadow-root change capture ────────────────────────────────────────────
@@ -365,8 +516,22 @@
   // precedes a change) gets its own capture listener. A non-composed change only
   // propagates inside the tree it was fired in, so exactly one listener sees it; the
   // WeakSet guards the composed case (and any listener registered twice).
+  // A long SPA recording renders and discards thousands of components: roots
+  // whose host has left the page are dropped (listener and all) whenever the set
+  // has doubled since the last sweep, so it tracks the live roots instead of every
+  // root ever seen. A host that comes back is re-adopted by its next event.
   const _shadowChangeRoots = new Set();
   const _handledChangeEvents = new WeakSet();
+  const SHADOW_CHANGE_PRUNE_MIN = 64;
+  let _shadowChangePruneAt = SHADOW_CHANGE_PRUNE_MIN;
+  function pruneShadowChangeRoots() {
+    _shadowChangeRoots.forEach((root) => {
+      if (root.host && root.host.isConnected) return;
+      root.removeEventListener('change', onRecordChange, true);
+      _shadowChangeRoots.delete(root);
+    });
+    _shadowChangePruneAt = Math.max(SHADOW_CHANGE_PRUNE_MIN, _shadowChangeRoots.size * 2);
+  }
   function adoptShadowRoots(e) {
     if (!isRecording || typeof ShadowRoot === 'undefined' || typeof e.composedPath !== 'function') return;
     const path = e.composedPath();
@@ -377,6 +542,7 @@
         n.addEventListener('change', onRecordChange, true);
       }
     }
+    if (_shadowChangeRoots.size > _shadowChangePruneAt) pruneShadowChangeRoots();
   }
 
   function bestWithChain(el, chain) {
@@ -425,7 +591,11 @@
   // pointerdown (preferred) + capture fires before target handlers; also covers
   // more pointer types than mousedown alone. Falls back to mousedown if needed.
   // Registered on window (capture) so it runs before the page's own listeners and
-  // can still swallow the gesture in assert mode.
+  // can still swallow the gesture in assert mode. The locator is generated right
+  // here, synchronously, on purpose: the click that follows lets the page re-render,
+  // re-label or remove the element, and a deferred generation would describe that
+  // DOM instead of what the user clicked. (One call is memoised throughout; picks
+  // pay the same cost.)
   function onRecordPrimaryPointer(e) {
     adoptShadowRoots(e);
     if (!isRecording || isPaused) return;
@@ -436,21 +606,33 @@
     if (typeof e.button === 'number' && e.button !== 0) return;
     if (typeof e.isPrimary === 'boolean' && e.isPrimary === false) return;
 
-    const el = resolvePrimaryTarget(e);
-    if (!el || isOwnUi(el)) return;
-
-    const tag = el.tagName.toLowerCase();
-    const type = (el.getAttribute('type') || '').toLowerCase();
+    const hit = resolvePrimaryTarget(e);
+    if (!hit || isOwnUi(hit)) return;
 
     // Alt+Click records a hover; assert mode records an assertion. Both short-circuit
-    // the normal click/fill capture below, and the page never sees the gesture.
+    // the normal click/fill capture below, and the page never sees the gesture. An
+    // assertion keeps the element pointed at (its text may be the point) unless it
+    // is part of an icon.
     if (e.altKey || assertMode) {
       swallow(e);
       _swallowGestureUntil = Date.now() + 1500;
-      if (e.altKey) recordHover(el);
-      else recordAssertion(el);
+      if (e.altKey) recordHover(actionTargetFor(hit, false));
+      else recordAssertion(actionTargetFor(hit, true));
       return;
     }
+
+    const el = actionTargetFor(hit, false);
+    const tag = el.tagName.toLowerCase();
+    const type = (el.getAttribute('type') || '').toLowerCase();
+
+    // A click on a checkbox's / radio's <label> (wrapping it, or for=) makes the
+    // browser toggle the control, and that change records the check below. Recording
+    // the label click as well replayed as two toggles — a box that ended unchecked.
+    // (A link inside the label is its own control: clicking it toggles nothing.)
+    const label = isInteractiveEl(el) ? null : el.closest('label');
+    const control = label && label.control;
+    if (control && control.tagName.toLowerCase() === 'input' &&
+      ['checkbox', 'radio'].indexOf((control.getAttribute('type') || '').toLowerCase()) !== -1) return;
 
     // File, colour and range inputs are recorded from their change (upload / fill
     // with the settled value). A click on them opens a native chooser in a replay.
@@ -631,34 +813,34 @@
         debugWarn('generateLocators failed during recording:', err);
       }
 
-      let actionType = 'fill';
-      let value = el.value || '';
+      let actionType;
+      let value = '';
+      let values = null;
+      let chain;
       if (tag === 'select') {
+        // C1: the label Playwright's selectOption matches (option.label — the label
+        // attribute, else the text), whitespace-normalised: raw textContent kept the
+        // source's line breaks and indentation. Every selected option of a multiple
+        // select, not just the first.
         actionType = 'selectOption';
-        const opt = el.options[el.selectedIndex];
-        value = opt ? opt.textContent.trim() : el.value;
+        const labels = Array.from(el.options).filter((o) => o.selected).map((o) => normText(o.label || o.text));
+        value = labels.length ? labels[0] : el.value;
+        if (el.multiple && labels.length > 1) values = labels;
+        chain = `selectOption(${values ? '[' + values.map((v) => `'${escSingle(v)}'`).join(', ') + ']' : `'${escSingle(value)}'`})`;
       } else {
         actionType = el.checked ? 'check' : 'uncheck';
-        value = '';
+        chain = el.checked ? 'check()' : 'uncheck()';
       }
-
-      if (!best) {
-        let chain = `fill('${String(el.value || '').replace(/\\/g, '\\\\').replace(/'/g, "\\'")}')`;
-        if (tag === 'select') {
-          chain = `selectOption('${String(value).replace(/\\/g, '\\\\').replace(/'/g, "\\'")}')`;
-        } else {
-          chain = el.checked ? 'check()' : 'uncheck()';
-        }
-        const fb = recordFallbackLocator(el, chain);
-        best = { code: fb.code, fullCode: fb.fullCode, target: fb.target };
-      }
+      if (best) best = Object.assign({}, best, { fullCode: `await ${best.code}.${chain};` });
+      else best = recordFallbackLocator(el, chain);
 
       sendRecordedAction({
         action: actionType,
         value: value,
+        values: values,
         code: best.code,
         fullCode: best.fullCode,
-        target: best && best.target,
+        target: best.target,
         el: el
       });
       return;
@@ -676,8 +858,9 @@
   function onRecordDblClick(e) {
     if (!isRecording || isPaused || assertMode || isInspecting) return;
     if (!isUserEvent(e)) return;
-    const el = resolvePrimaryTarget(e);
-    if (!el || isOwnUi(el)) return;
+    const hit = resolvePrimaryTarget(e);
+    if (!hit || isOwnUi(hit)) return;
+    const el = actionTargetFor(hit, false); // the element the pointerdowns recorded
     const best = bestWithChain(el, 'dblclick()');
     // The two pointerdowns of this double-click were already recorded as clicks.
     // Name them so the panel can replace them with this single dblclick step (C6).
@@ -898,10 +1081,6 @@
   const SUBMIT_NAME_RE = /submit|save|send|sign ?in|log ?in|continue|place order|confirm|apply|update|create|register|pay/i;
   const FEEDBACK_SCAN_CAP = 2000;
   let feedbackWatch = null; // { observer, timer, checkTimer, baseline: Map, emitted: [], count }
-
-  function isOwnArtifact(n) {
-    return !!(n && n.closest && n.closest('[id^="ll-"],[id^="locatra-"]'));
-  }
 
   function isFeedbackEl(n) {
     if (!n || n.nodeType !== Node.ELEMENT_NODE) return false;
@@ -1188,6 +1367,7 @@
     stopFeedbackWatch();
     _shadowChangeRoots.forEach((root) => root.removeEventListener('change', onRecordChange, true));
     _shadowChangeRoots.clear();
+    _shadowChangePruneAt = SHADOW_CHANGE_PRUNE_MIN;
     updateFrameWatcher();
     debugLog('Recording stopped.');
   }
@@ -1419,7 +1599,7 @@
   // menu (Shift+F10, clientX/Y = 0), where hit-testing would find the top-left one.
   function onContextMenuTrack(e) {
     if (tornDown) return;
-    lastRightClickedEl = resolvePrimaryTarget(e) || getDeepElementAt(e.clientX, e.clientY);
+    lastRightClickedEl = actionTargetFor(resolvePrimaryTarget(e) || getDeepElementAt(e.clientX, e.clientY), true);
   }
   document.addEventListener('contextmenu', onContextMenuTrack, true);
 
@@ -1427,13 +1607,16 @@
   // Called by startInspect() and by the toasts. Selector Lab highlights are inline
   // styles (see addLabHighlight), so they need no stylesheet — and so they also
   // show inside shadow roots, which a document-level sheet cannot style.
+  let stylesEl = null;
   function injectStyles() {
-    if (document.getElementById('ll-styles')) return;
+    if (stylesEl && stylesEl.isConnected) return;
     const mount = document.head || document.documentElement;
     if (!mount) return;
     const style = document.createElement('style');
     style.id = 'll-styles';
-    style.textContent = `
+    // Every rule is scoped to this instance's UI_SCOPE attribute, so a page element
+    // that happens to be called #ll-toast is not restyled.
+    style.textContent = scopeOwnCss(`
       #ll-overlay {
         position: fixed !important;
         pointer-events: none !important;
@@ -1567,8 +1750,14 @@
         from { opacity: 1; transform: translateX(-50%) translateY(0); }
         to   { opacity: 0; transform: translateX(-50%) translateY(12px); }
       }
-    `;
+    `);
+    if (stylesEl) releaseOwnUi(stylesEl);
+    stylesEl = adoptOwnUi(style);
     mount.appendChild(style);
+  }
+
+  function scopeOwnCss(css) {
+    return css.replace(/#ll-(overlay|tooltip|traversal-bar|toast)\b/g, (m) => m + UI_SCOPE);
   }
 
   // ── Selector Lab highlight bookkeeping ────────────────────────────────────
@@ -1608,16 +1797,16 @@
 
   // ── Overlay management ─────────────────────────────────────────────────────
   function createOverlay() {
-    overlay = document.createElement('div');
+    overlay = adoptOwnUi(document.createElement('div'));
     overlay.id = 'll-overlay';
     document.body.appendChild(overlay);
 
-    tooltip = document.createElement('div');
+    tooltip = adoptOwnUi(document.createElement('div'));
     tooltip.id = 'll-tooltip';
     document.body.appendChild(tooltip);
 
     // ── Traversal Bar ──
-    traversalBar = document.createElement('div');
+    traversalBar = adoptOwnUi(document.createElement('div'));
     traversalBar.id = 'll-traversal-bar';
     const lbl = document.createElement('span');
     lbl.className = 'll-trav-lbl';
@@ -1641,25 +1830,25 @@
     traversalBar.appendChild(hint);
     document.body.appendChild(traversalBar);
 
-    // Bind traversal button events
-    document.getElementById('ll-trav-parent').addEventListener('click', (e) => {
+    // Bind traversal button events. The buttons sit in the page's DOM, so a page
+    // script could click them: only the user's own clicks navigate.
+    btnParent.addEventListener('click', (e) => {
       e.preventDefault(); e.stopPropagation();
-      navigateParent();
+      if (isUserEvent(e)) navigateParent();
     });
-    document.getElementById('ll-trav-child').addEventListener('click', (e) => {
+    btnChild.addEventListener('click', (e) => {
       e.preventDefault(); e.stopPropagation();
-      navigateChild();
+      if (isUserEvent(e)) navigateChild();
     });
   }
 
   function removeOverlay() {
-    if (overlay) { overlay.remove(); overlay = null; }
-    if (tooltip) { tooltip.remove(); tooltip = null; }
-    if (traversalBar) { traversalBar.remove(); traversalBar = null; }
-    
+    releaseOwnUi(overlay); overlay = null;
+    releaseOwnUi(tooltip); tooltip = null;
+    releaseOwnUi(traversalBar); traversalBar = null;
+
     // Final Flawless Audit: ensure toast is removed on exit
-    const existing = document.getElementById('ll-toast');
-    if (existing) existing.remove();
+    releaseOwnUi(toastEl); toastEl = null;
     if (toastTimer) { clearTimeout(toastTimer); toastTimer = null; }
   }
 
@@ -1876,11 +2065,25 @@
   // calling it threw straight out of the message listener, taking the context-menu
   // copy (and its sendResponse) with it. The textarea fallback is what actually
   // carries the copy on those pages.
+  // execCommand('copy') fires a `copy` event the page can listen to — and a page
+  // that rewrites copies ("Read more at…", or anything at all) replaced the locator.
+  // A one-shot window capture listener writes our text into the event's own
+  // clipboardData and stops the event there. (A page listener registered on window
+  // capture before this script ran still sees the event first, but whatever it
+  // writes is overwritten here unless it stops the event itself.)
   function copyTextFallback(text) {
+    const onCopy = (e) => {
+      try {
+        e.clipboardData.setData('text/plain', text);
+        e.preventDefault();
+      } catch (err) { /* the textarea selection still carries it */ }
+      e.stopImmediatePropagation();
+    };
+    let ta = null;
     try {
       const host = document.body || document.documentElement;
       if (!host) return false;
-      const ta = document.createElement('textarea');
+      ta = adoptOwnUi(document.createElement('textarea'));
       ta.value = text;
       ta.setAttribute('readonly', '');
       ta.style.cssText = 'position:fixed;top:0;left:-9999px;opacity:0;';
@@ -1888,12 +2091,15 @@
       const selection = document.getSelection();
       const previous = selection && selection.rangeCount > 0 ? selection.getRangeAt(0) : null;
       ta.select();
+      window.addEventListener('copy', onCopy, true);
       const ok = document.execCommand('copy');
-      ta.remove();
       if (previous && selection) { selection.removeAllRanges(); selection.addRange(previous); }
       return ok;
     } catch (err) {
       return false;
+    } finally {
+      window.removeEventListener('copy', onCopy, true);
+      releaseOwnUi(ta);
     }
   }
 
@@ -1910,11 +2116,11 @@
 
   // ── Toast notification ─────────────────────────────────────────────────────
   let toastTimer = null;
+  let toastEl = null;
   /** `label` overrides the "Copied:" / "Copy blocked —" prefix (used for notices). */
   function showToast(locatorCode, ok, label) {
     // Remove any existing toast immediately
-    const existing = document.getElementById('ll-toast');
-    if (existing) existing.remove();
+    releaseOwnUi(toastEl); toastEl = null;
     if (toastTimer) { clearTimeout(toastTimer); toastTimer = null; }
 
     const copied = ok !== false;
@@ -1938,12 +2144,16 @@
     toast.appendChild(toastWrap);
     const host = document.body || document.documentElement;
     if (!host) return;
+    toastEl = adoptOwnUi(toast);
     host.appendChild(toast);
 
     // Auto-dismiss after 3s with fade-out
     toastTimer = setTimeout(() => {
       toast.classList.add('ll-toast-out');
-      setTimeout(() => toast.remove(), 320);
+      setTimeout(() => {
+        releaseOwnUi(toast);
+        if (toastEl === toast) toastEl = null;
+      }, 320);
     }, 3000);
   }
 
@@ -2059,7 +2269,11 @@
     const tag = el.tagName.toLowerCase();
     const candidates = [];
     if (el.id) candidates.push('#' + cssEscape(el.id));
-    ['name', 'title', 'src'].forEach((attr) => {
+    customTestAttributes.forEach((attr) => {
+      const v = el.getAttribute(attr);
+      if (v) candidates.push(`[${cssEscape(attr)}="${attrQuote(v)}"]`);
+    });
+    ['name', 'aria-label', 'placeholder', 'title', 'src'].forEach((attr) => {
       const v = el.getAttribute(attr);
       if (v) candidates.push(`${tag}[${attr}="${attrQuote(v)}"]`);
     });
@@ -2106,6 +2320,35 @@
   }
 
   /**
+   * C3: a target for an element inside open shadow DOM carries `shadowHosts` — one
+   * selector per host, outermost first, each unique in the tree holding that host —
+   * and `shadowCss`, a selector unique inside the innermost shadow root. Selenium's
+   * ShadowRoot.findElement only takes CSS, so the engine's role/text/label locator
+   * cannot be used there as-is. Playwright pierces and needs neither. Nothing is
+   * added when a host has no verifiable selector (or sits in a closed root), and
+   * shadowCss is left out when only the element itself defeats every candidate.
+   */
+  function shadowInfoFor(el) {
+    const root = el.getRootNode();
+    if (!isShadowRoot(root) || root.host.shadowRoot !== root) return null;
+    const host = root.host;
+    const hostTree = host.getRootNode();
+    // shadowPathFor() spells out a host that is itself in shadow DOM; a host in the
+    // document is a single selector.
+    const hosts = isShadowRoot(hostTree) ? shadowPathFor(host) : [treeSelectorFor(host, hostTree)];
+    if (!hosts || !hosts[hosts.length - 1]) return null;
+    const css = treeSelectorFor(el, root);
+    return css ? { shadowHosts: hosts, shadowCss: css } : { shadowHosts: hosts };
+  }
+
+  /** Puts shadowInfoFor(el) on `loc.target` (the innermost, frame-less target). */
+  function withShadowPath(loc, el, info) {
+    const s = info === undefined ? shadowInfoFor(el) : info;
+    if (s) Object.assign(loc.target, s);
+    return loc;
+  }
+
+  /**
    * A selector addressing this frame's <iframe> element *in its parent document*.
    * Every candidate is verified to match exactly this frame there: two widgets'
    * iframes sharing a name or title (common for ad/embed frames) used to produce a
@@ -2149,8 +2392,8 @@
     }
   }
 
-  /** Position among the parent's frames — the only handle a cross-origin frame has. */
-  function frameIndexOf(win) {
+  /** Position in the parent's window.frames — what Selenium's switchTo().frame(i) takes. */
+  function framesIndexOf(win) {
     try {
       const siblings = win.parent.frames;
       for (let i = 0; i < siblings.length; i++) {
@@ -2159,7 +2402,32 @@
     } catch (err) {
       /* even identity comparison can be blocked */
     }
-    return 0;
+    return -1;
+  }
+
+  /**
+   * C4: { index, framesIndex } of this frame in its parent. `index` is its position
+   * among the parent document's <iframe> elements in Playwright's pierce order —
+   * what `iframe >> nth=i`, cy.get('iframe').eq(i) and $$('iframe')[i] count, and
+   * what the engine's nodesInFrame() resolves. `framesIndex` is the window.frames
+   * position, which also counts <frame>/<object> contexts and so can differ.
+   * Residual limit: a cross-origin parent hides its document, so there `index`
+   * falls back to framesIndex — right whenever the parent has only <iframe>s in
+   * its light DOM, and possibly off by the <frame>/<object>/shadow-hosted frames
+   * before this one otherwise.
+   */
+  function frameIndexOf(win) {
+    const framesIndex = framesIndexOf(win);
+    let index = -1;
+    try {
+      const fe = win.frameElement; // null, or a throw, across an origin boundary
+      index = globalThis.__LocatorLensEngine.deepQueryAll('iframe', fe.ownerDocument).indexOf(fe);
+    } catch (err) {
+      index = -1;
+    }
+    const out = { index: index >= 0 ? index : Math.max(framesIndex, 0) };
+    if (framesIndex >= 0) out.framesIndex = framesIndex;
+    return out;
   }
 
   /** Outermost frame first. Empty in the top document. */
@@ -2182,7 +2450,8 @@
         selector = null;
         shadowPath = null;
       }
-      chain.unshift({ selector, index: frameIndexOf(win), shadow, shadowPath });
+      const pos = frameIndexOf(win);
+      chain.unshift({ selector, index: pos.index, framesIndex: pos.framesIndex, shadow, shadowPath });
       win = win.parent;
     }
     return chain;
@@ -2192,6 +2461,7 @@
     let wrapped = target;
     for (let i = chain.length - 1; i >= 0; i--) {
       wrapped = { kind: 'frame', selector: chain[i].selector, index: chain[i].index, child: wrapped };
+      if (typeof chain[i].framesIndex === 'number') wrapped.framesIndex = chain[i].framesIndex;
       if (chain[i].shadowPath) wrapped.shadowPath = chain[i].shadowPath;
     }
     return wrapped;
@@ -2240,8 +2510,14 @@
       return { elementData: {}, locators: [], avoidList: [], proTip: '', a11y: [] };
     }
     // Everything — picks, recording, quick-copy — routes through here, so frame
-    // wrapping applies once, in one place.
-    return carryMatchCounts(applyFramePath(E.generateLocators(el, customTestAttributes)));
+    // wrapping (and the C3 shadow path, which lives inside it) applies once, in one place.
+    return carryMatchCounts(applyFramePath(withShadowPaths(E.generateLocators(el, customTestAttributes), el)));
+  }
+
+  function withShadowPaths(result, el) {
+    const info = shadowInfoFor(el);
+    if (info) result.locators.forEach((l) => withShadowPath(l, el, Object.assign({}, info, { shadowHosts: info.shadowHosts.slice() })));
+    return result;
   }
 
   // The engine reports uniqueness on the locator, but recorded steps keep only its
@@ -2343,7 +2619,7 @@
     const out = [];
     let guard = 0;
     while (t && t.kind === 'frame' && guard++ < 16) {
-      out.push({ selector: t.selector || null, index: t.index });
+      out.push({ selector: t.selector || null, index: t.index, framesIndex: t.framesIndex });
       t = t.child;
     }
     return out;
@@ -2367,20 +2643,24 @@
       if (own && own.selector && own.selector === step.selector) return true;
       let fe = null;
       try { fe = win.frameElement; } catch (err) { fe = null; }
-      if (fe) {
-        // The selector may have been built against a slightly different DOM: what
-        // matters is that it still addresses this <iframe> in its parent document.
-        try {
-          const roots = openRootsOf(fe.ownerDocument);
-          if (composedMatches(roots, step.selector).indexOf(fe) !== -1) return true;
-          if (step.selector.indexOf('>') !== -1 &&
-            composedPathResolvesTo(step.selector.split(/\s*>\s*/), roots, fe)) return true;
-        } catch (err) { /* invalid selector */ }
-        return false;
-      }
+      // A selector this frame cannot check (its <iframe> sits in a cross-origin
+      // parent) is not evidence: claiming by position here let a sibling frame at
+      // the same index take a step recorded for another, verifiable one.
+      if (!fe) return false;
+      // The selector may have been built against a slightly different DOM: what
+      // matters is that it still addresses this <iframe> in its parent document.
+      try {
+        const roots = openRootsOf(fe.ownerDocument);
+        if (composedMatches(roots, step.selector).indexOf(fe) !== -1) return true;
+        if (step.selector.indexOf('>') !== -1 &&
+          composedPathResolvesTo(step.selector.split(/\s*>\s*/), roots, fe)) return true;
+      } catch (err) { /* invalid selector */ }
+      return false;
     }
-    // Cross-origin (or recorded without a selector): position is all there is.
-    return typeof step.index === 'number' && !!own && step.index === own.index;
+    // Recorded without a selector (cross-origin): position is all there is — the
+    // exact window.frames position when both sides have it, else `index`.
+    if (typeof step.framesIndex === 'number' && typeof own.framesIndex === 'number') return step.framesIndex === own.framesIndex;
+    return typeof step.index === 'number' && step.index === own.index;
   }
 
   function deepActiveElement(doc) {
@@ -2508,6 +2788,7 @@
       }
       default: return null;
     }
+    // Nothing records `nth` any more; imported and older saved targets still carry it.
     if (typeof t.nth === 'number' && t.nth >= 0) out = out[t.nth] ? [out[t.nth]] : [];
     return out;
   }
@@ -2549,7 +2830,8 @@
 
   function clearReplayHighlight() {
     if (replayHighlightTimer) { clearTimeout(replayHighlightTimer); replayHighlightTimer = null; }
-    if (replayHighlight) { replayHighlight.remove(); replayHighlight = null; }
+    releaseOwnUi(replayHighlight);
+    replayHighlight = null;
   }
 
   /** The picker overlay's look, on the element being replayed, for ~400 ms. */
@@ -2557,7 +2839,8 @@
     const host = document.body || document.documentElement;
     if (!host || typeof el.getBoundingClientRect !== 'function') return;
     if (!replayHighlight || !replayHighlight.isConnected) {
-      replayHighlight = document.createElement('div');
+      releaseOwnUi(replayHighlight);
+      replayHighlight = adoptOwnUi(document.createElement('div'));
       replayHighlight.id = 'll-replay-highlight';
       host.appendChild(replayHighlight);
     }
@@ -2682,17 +2965,24 @@
     return null;
   }
 
-  function replaySelectOption(el, value) {
+  /** `values` (C1): every option of a multi-select step; otherwise just `value`. */
+  function replaySelectOption(el, value, values) {
     if (el.tagName.toLowerCase() !== 'select') return 'element is not a <select> element';
     const options = Array.from(el.options);
-    const want = normText(value);
-    const opt = options.find((o) => normText(o.label || o.textContent) === want) ||
-      options.find((o) => o.value === String(value));
-    if (!opt) return `no option "${want}" in the <select>`;
-    if (opt.disabled) return `option "${want}" is disabled`;
+    const wanted = Array.isArray(values) && values.length > 1 ? values : [value];
+    if (wanted.length > 1 && !el.multiple) return 'element is not a <select multiple>, it cannot select several options';
+    const picked = [];
+    for (const v of wanted) {
+      const want = normText(v);
+      const opt = options.find((o) => normText(o.label || o.textContent) === want) ||
+        options.find((o) => o.value === String(v));
+      if (!opt) return `no option "${want}" in the <select>`;
+      if (opt.disabled) return `option "${want}" is disabled`;
+      picked.push(opt);
+    }
     try { el.focus({ preventScroll: true }); } catch (err) { /* ignore */ }
-    if (el.multiple) options.forEach((o) => { o.selected = o === opt; });
-    else el.selectedIndex = options.indexOf(opt);
+    if (el.multiple) options.forEach((o) => { o.selected = picked.indexOf(o) !== -1; });
+    else el.selectedIndex = options.indexOf(picked[0]);
     fireEvent(el, 'input', Event, { bubbles: true, composed: true });
     fireEvent(el, 'change', Event, { bubbles: true });
     return null;
@@ -2888,8 +3178,8 @@
 
   const ASSERTION_TYPES = ['toBeVisible', 'toHaveText', 'toContainText', 'toBeChecked', 'toHaveValue', 'toBeEnabled'];
 
-  /** null when the assertion holds, otherwise expected-vs-actual. */
-  function assertionError(type, el, value) {
+  /** null when the assertion holds, otherwise expected-vs-actual (`secretName`: never show values). */
+  function assertionError(type, el, value, secretName) {
     switch (type) {
       case 'toBeVisible':
         return isElementVisible(el) ? null : 'toBeVisible: expected the element to be visible, but it is hidden';
@@ -2911,7 +3201,10 @@
       case 'toHaveValue': {
         const got = el.value != null ? String(el.value) : '';
         const want = value == null ? '' : String(value);
-        return got === want ? null : `toHaveValue: expected "${clip(want)}", got "${clip(got)}"`;
+        if (got === want) return null;
+        // C2: neither the secret nor what the field holds goes into a report.
+        if (secretName) return `toHaveValue: the field's value does not match ${secretName}`;
+        return `toHaveValue: expected "${clip(want)}", got "${clip(got)}"`;
       }
       case 'toBeEnabled':
         return isElementEnabled(el) ? null : 'toBeEnabled: expected the element to be enabled, but it is disabled';
@@ -2933,6 +3226,25 @@
   }
 
   const TARGETED_ACTIONS = ['click', 'dblclick', 'fill', 'selectOption', 'check', 'uncheck', 'hover'];
+  const REPLAY_SECRET_TIMEOUT_MS = 5000;
+
+  /** The secret for this step from BACKGROUND (C5), or null: refused, no answer, or gone. */
+  function requestReplaySecret(msg) {
+    return new Promise((resolve) => {
+      let done = false;
+      const finish = (v) => {
+        if (done) return;
+        done = true;
+        clearTimeout(timer);
+        resolve(v);
+      };
+      const timer = setTimeout(() => finish(null), REPLAY_SECRET_TIMEOUT_MS);
+      const sentOk = safeSend({ type: 'REPLAY_SECRET_REQUEST', runId: msg.runId, index: msg.index }, (res) => {
+        finish(res && res.ok === true && typeof res.value === 'string' ? res.value : null);
+      });
+      if (!sentOk) finish(null);
+    });
+  }
 
   async function runReplayStep(msg) {
     const step = msg.step || {};
@@ -2943,15 +3255,20 @@
     if (action === 'viewport') return { ok: false, skipped: true, error: 'viewport is not changed during replay', matchCount: 0 };
 
     let value = step.value;
-    if (action === 'fill' && step.sensitive) {
-      const secrets = msg.secrets && typeof msg.secrets === 'object' ? msg.secrets : {};
+    // C5: a sensitive fill / value assertion asks BACKGROUND for its secret — only
+    // the frame that owns the step does, and only for this step. Secrets used to
+    // ride along on every REPLAY_STEP, i.e. into every frame of the tab, ads and
+    // third-party widgets included.
+    const sensitive = !!step.sensitive && (action === 'fill' || (action === 'assert' && step.assertType === 'toHaveValue'));
+    let secretName = null;
+    if (sensitive) {
       // Same key the panel's secrets form uses: legacy steps without a valid
       // secretName are password fields.
-      const name = typeof step.secretName === 'string' && /^[A-Za-z_][A-Za-z0-9_]*$/.test(step.secretName)
+      secretName = typeof step.secretName === 'string' && SECRET_NAME_RE.test(step.secretName)
         ? step.secretName : 'LOCATRA_PASSWORD';
-      const secret = secrets[name];
+      const secret = await requestReplaySecret(msg);
       if (secret == null || secret === '') return { ok: false, skipped: true, error: 'no value provided', matchCount: 0 };
-      value = String(secret);
+      value = secret;
     }
 
     if (action === 'press') {
@@ -2974,7 +3291,7 @@
 
     let ready;
     if (isAssert) {
-      ready = (el) => assertionError(step.assertType, el, value);
+      ready = (el) => assertionError(step.assertType, el, value, secretName);
     } else if (action === 'check' || action === 'uncheck') {
       ready = (el) => (!isElementVisible(el) && !visibleLabelFor(el) ? 'element is not visible'
         : (!isElementEnabled(el) ? 'element is disabled' : null));
@@ -3001,7 +3318,7 @@
           fireEvent(el, 'dblclick', MouseEvent, pointerInit(el, { detail: 2 }));
           return null;
         case 'fill': return replayFill(el, value == null ? '' : String(value));
-        case 'selectOption': return replaySelectOption(el, value);
+        case 'selectOption': return replaySelectOption(el, value, step.values);
         case 'check': return replayCheck(el, true);
         case 'uncheck': return replayCheck(el, false);
         case 'hover': replayHover(el); return null;
@@ -3052,7 +3369,7 @@
     while (stack.length) {
       const n = stack.pop();
       if (n.nodeType !== Node.ELEMENT_NODE) continue;
-      if (/^(ll-|locatra-)/.test(typeof n.id === 'string' ? n.id : '')) continue;
+      if (_ownUi.has(n)) continue; // our overlay / toast, and everything under it
       const tag = n.tagName.toLowerCase();
       if (tag === 'script' || tag === 'style' || tag === 'template' || tag === 'noscript') continue;
       if (isPomInteractive(n) && isElementVisible(n)) {
@@ -3419,6 +3736,7 @@
     let wrapped = inner;
     for (let i = levels.length - 1; i >= 0; i--) {
       const f = { kind: 'frame', selector: levels[i].selector || null, index: typeof levels[i].index === 'number' ? levels[i].index : 0, child: wrapped };
+      if (typeof levels[i].framesIndex === 'number') f.framesIndex = levels[i].framesIndex;
       if (Array.isArray(levels[i].shadowPath)) f.shadowPath = levels[i].shadowPath.slice();
       wrapped = f;
     }
@@ -3435,7 +3753,7 @@
       if (!l || !l.target || l.unique !== true) continue;
       const nodes = resolveReplayTarget(l.target);
       if (!nodes || nodes.length !== 1 || nodes[0] !== el) continue;
-      const inner = Object.assign({}, l.target, { matchCount: 1, unique: true });
+      const inner = withShadowPath({ target: Object.assign({}, l.target, { matchCount: 1, unique: true }) }, el).target;
       const target = rewrapInFrames(original, inner);
       let code = '';
       try { code = window.LLCodegen ? window.LLCodegen.locatorExpr(target, 'playwright', 'typescript') : ''; } catch (err) { code = ''; }
@@ -3498,10 +3816,164 @@
   }
   globalThis.__LocatraHealthCheck = healthCheck;
 
+  // ── Selector Lab (L1) ──────────────────────────────────────────────────────
+  // A pasted Playwright chain — e.g.
+  //   await page.getByRole('textbox', { name: 'Username or Email' }).fill('x');
+  // — is parsed into the same structured targets the cards carry and resolved by
+  // the engine's resolveTarget: the matching behind every "unique" badge and every
+  // replayed step. The Lab used to match on its own and disagreed with both
+  // (getByLabel only looked at form fields, getByRole ignored `level`,
+  // frameLocator() was skipped). Plain CSS and XPath are still taken as they are.
+  // Upper bound on the scopes a chained step is evaluated in: `locator('div')
+  // .getByText('a')` checks every candidate against every scope, and on a big page
+  // that froze the tab.
+  const LAB_MAX_SCOPES = 1000;
+
+  /** `.method(args)` segments of a pasted chain (quote/paren aware), or null. */
+  function labSegments(raw) {
+    let s = String(raw || '').trim();
+    if (!/\b(getBy[A-Z]\w*|locator|frameLocator)\s*\(/.test(s)) return null;
+    // Strip the boilerplate around the locator chain.
+    s = s.replace(/;\s*$/, '').trim();
+    s = s.replace(/^await\s+/, '');
+    s = s.replace(/^(?:const|let|var)\s+[\w$]+\s*=\s*/, '');
+    s = s.replace(/^await\s+/, '');
+    s = s.replace(/^(?:this\s*\.\s*)?(?:page|component)\b\s*/, '');
+    s = s.replace(/^\.\s*/, '');
+    s = '.' + s; // so the scanner picks up the first call too
+    const segs = [];
+    let i = 0;
+    while (i < s.length) {
+      const m = /\.([A-Za-z_$][\w$]*)\s*\(/.exec(s.slice(i));
+      if (!m) break;
+      const open = i + m.index + m[0].length - 1;
+      let depth = 0, j = open, str = null;
+      for (; j < s.length; j++) {
+        const c = s[j];
+        if (str) { if (c === '\\') { j++; } else if (c === str) str = null; continue; }
+        if (c === '"' || c === "'" || c === '`') str = c;
+        else if (c === '(') depth++;
+        else if (c === ')') { if (--depth === 0) { j++; break; } }
+      }
+      segs.push({ method: m[1], args: s.slice(open + 1, j - 1) });
+      i = j;
+    }
+    return segs;
+  }
+
+  function labFirstStr(args) {
+    const m = /(['"`])((?:\\.|(?!\1)[\s\S])*?)\1/.exec(args);
+    return m ? m[2].replace(/\\(['"`])/g, '$1') : null;
+  }
+
+  function labOpt(args, key) {
+    const m = new RegExp(key + "\\s*:\\s*(?:(['\"`])((?:\\\\.|(?!\\1)[\\s\\S])*?)\\1|(true|false)|(\\d+))").exec(args);
+    if (!m) return undefined;
+    if (m[2] !== undefined) return m[2].replace(/\\(['"`])/g, '$1');
+    if (m[3] !== undefined) return m[3] === 'true';
+    return parseInt(m[4], 10);
+  }
+
+  const LAB_TEXT_KINDS = {
+    getByText: 'text', getByLabel: 'label', getByPlaceholder: 'placeholder', getByAltText: 'altText', getByTitle: 'title'
+  };
+
+  /** The target a locator call stands for: { target } or { xpath }, null when it has no argument. */
+  function labTarget(method, args) {
+    const str = labFirstStr(args);
+    if (str == null) return null;
+    const exact = labOpt(args, 'exact') === true;
+    if (method === 'getByRole') {
+      const t = { kind: 'role', role: str };
+      const name = labOpt(args, 'name');
+      if (name != null) t.name = String(name);
+      if (exact) t.exact = true;
+      const level = labOpt(args, 'level');
+      if (typeof level === 'number') t.level = level;
+      return { target: t };
+    }
+    if (method === 'getByTestId') return { target: { kind: 'testid', attr: 'data-testid', value: str } };
+    if (LAB_TEXT_KINDS[method]) {
+      const t = { kind: LAB_TEXT_KINDS[method], value: str };
+      if (exact) t.exact = true;
+      return { target: t };
+    }
+    if (method !== 'locator' && method !== 'frameLocator') return null; // a getBy… Playwright lacks
+    // locator() / frameLocator(): CSS (css= optional), or XPath.
+    const sel = str.replace(/^css=/, '');
+    if (/^xpath=/.test(sel) || sel.startsWith('//') || sel.startsWith('(')) return { xpath: sel.replace(/^xpath=/, '') };
+    return { target: { kind: 'css', value: sel } };
+  }
+
+  function labXPath(xp, doc, scopes) {
+    const out = [];
+    (scopes || [doc]).forEach((scope) => {
+      const r = doc.evaluate(xp, scope, null, XPathResult.ORDERED_NODE_SNAPSHOT_TYPE, null);
+      for (let k = 0; k < r.snapshotLength; k++) if (out.indexOf(r.snapshotItem(k)) === -1) out.push(r.snapshotItem(k));
+    });
+    return out;
+  }
+
+  /** null for plain CSS / XPath; otherwise { matches, via, truncated }. */
+  function labResolveChain(raw) {
+    const segs = labSegments(raw);
+    if (!segs) return null;
+    const E = globalThis.__LocatorLensEngine;
+    let doc = document;
+    let scopes = null; // null: all of `doc`; else what the chain matched so far
+    let frameEl = null;
+    let via = null;
+    let truncated = false;
+    const resolve = (spec) => {
+      if (scopes && scopes.length > LAB_MAX_SCOPES) {
+        scopes = scopes.slice(0, LAB_MAX_SCOPES);
+        truncated = true;
+      }
+      if (spec.xpath) {
+        try { return labXPath(spec.xpath, doc, scopes); } catch (err) { return []; }
+      }
+      return E.resolveTarget(spec.target, scopes || doc);
+    };
+    for (const seg of segs) {
+      if (seg.method === 'frameLocator') {
+        const spec = labTarget(seg.method, seg.args);
+        const frames = spec ? resolve(spec).filter(isFrameEl) : [];
+        // Strict, like Playwright: entering a frame needs exactly one <iframe>.
+        let inner = null;
+        try { inner = frames.length === 1 ? frames[0].contentDocument : null; } catch (err) { inner = null; }
+        via = seg.method;
+        if (!inner) return { matches: [], via, truncated };
+        frameEl = frames[0];
+        doc = inner;
+        scopes = null;
+      } else if (seg.method === 'locator' || seg.method.indexOf('getBy') === 0) {
+        const spec = labTarget(seg.method, seg.args);
+        scopes = spec ? resolve(spec) : [];
+        frameEl = null;
+        via = seg.method;
+      } else if (scopes) {
+        if (seg.method === 'first') scopes = scopes.slice(0, 1);
+        else if (seg.method === 'last') scopes = scopes.slice(-1);
+        else if (seg.method === 'nth') {
+          const n = parseInt(seg.args, 10) || 0;
+          const el = scopes[n < 0 ? scopes.length + n : n];
+          scopes = el ? [el] : [];
+        } else if (seg.method === 'filter') {
+          const ht = labOpt(seg.args, 'hasText');
+          if (ht != null) scopes = scopes.filter((el) => normText(el.textContent).toLowerCase().includes(normText(ht).toLowerCase()));
+        }
+        // action methods (fill/click/check/press/...) are ignored
+      }
+    }
+    if (!via) return null;
+    return { matches: scopes || [frameEl], via, truncated };
+  }
+
   // ── Event handlers ─────────────────────────────────────────────────────────
   function onMouseOver(e) {
-    if (!isInspecting) return;
-    const el = getDeepElementAt(e.clientX, e.clientY) || resolvePrimaryTarget(e);
+    // A page dispatching mouseover must not move the selection under the user.
+    if (!isInspecting || !isUserEvent(e)) return;
+    const el = actionTargetFor(getDeepElementAt(e.clientX, e.clientY) || resolvePrimaryTarget(e), true);
     if (!el) return;
 
     // Ignore our own UI elements
@@ -3595,7 +4067,7 @@
     if (traversalLock && hoveredEl && hoveredEl.isConnected && inTraversalLockZone(e.clientX, e.clientY)) {
       el = hoveredEl;
     } else {
-      el = getDeepElementAt(e.clientX, e.clientY) || resolvePrimaryTarget(e);
+      el = actionTargetFor(getDeepElementAt(e.clientX, e.clientY) || resolvePrimaryTarget(e), true);
       if (el && regionPick && !isOwnUi(el)) el = regionContainerFor(el);
     }
     if (!el || isOwnUi(el)) return;
@@ -3604,7 +4076,9 @@
   }
 
   function onKeyDown(e) {
-    if (!isInspecting) return;
+    // Keys a page script dispatches (Escape, arrows, Enter) must not stop, steer or
+    // complete a pick.
+    if (!isInspecting || !isUserEvent(e)) return;
 
     if (e.key === 'Escape') {
       // Esc in region mode cancels only the region pick (F2).
@@ -3620,7 +4094,7 @@
     }
 
     // Enter picks the current selection — the keyboard way to take a traversed element.
-    if (e.key === 'Enter' && hoveredEl && hoveredEl.isConnected && isUserEvent(e)) {
+    if (e.key === 'Enter' && hoveredEl && hoveredEl.isConnected) {
       swallow(e);
       if (regionPick) pickRegion(hoveredEl);
       else pickElement(hoveredEl);
@@ -3723,8 +4197,9 @@
     _pendingFills.forEach((t) => clearTimeout(t));
     _pendingFills.clear();
     document.removeEventListener('contextmenu', onContextMenuTrack, true);
-    const styles = document.getElementById('ll-styles');
-    if (styles) styles.remove();
+    releaseOwnUi(stylesEl);
+    stylesEl = null;
+    _ownUi.forEach(releaseOwnUi); // anything still on the page
     try { ownChrome.runtime.onMessage.removeListener(onMessage); } catch (err) { /* dead context */ }
     try { ownChrome.storage.onChanged.removeListener(onStorageChanged); } catch (err) { /* dead context */ }
     if (globalThis.__LocatraHealthCheck === healthCheck) delete globalThis.__LocatraHealthCheck;
@@ -3787,7 +4262,16 @@
         sendResponse({ noTarget: true });
         return;
       }
-      const result = generateLocators(target);
+      // The menu click always gets its answer, even when the engine throws on an
+      // odd element — background otherwise waits on a channel that never closes.
+      let result;
+      try {
+        result = generateLocators(target);
+      } catch (err) {
+        debugWarn('generateLocators failed for the context menu:', err);
+        sendResponse({ ok: false, error: (err && err.message) || String(err) });
+        return;
+      }
 
       const bestCode = result.locators[0] ? copyLocatorCode(result.locators[0]) : '';
       if (bestCode) {
@@ -3824,202 +4308,14 @@
       // having injected anything, and inside shadow roots too.
       clearLabHighlights();
 
-      // Resolve a pasted Playwright locator chain — e.g.
-      //   await page.getByRole('textbox', { name: 'Username or Email' }).fill('x');
-      // — down to the DOM element(s) it targets. Returns null for plain CSS/XPath.
-      const resolvePlaywrightLocator = (raw) => {
-        const E = globalThis.__LocatorLensEngine;
-        let s = String(raw || '').trim();
-        if (!/\b(getBy[A-Z]\w*|locator|frameLocator)\s*\(/.test(s)) return null;
-
-        // Strip the boilerplate around the locator chain.
-        s = s.replace(/;\s*$/, '').trim();
-        s = s.replace(/^await\s+/, '');
-        s = s.replace(/^(?:const|let|var)\s+[\w$]+\s*=\s*/, '');
-        s = s.replace(/^await\s+/, '');
-        s = s.replace(/^(?:this\s*\.\s*)?(?:page|component)\b\s*/, '');
-        s = s.replace(/^\.\s*/, '');
-        s = '.' + s; // so the scanner picks up the first call too
-
-        // Split the chain into .method(args) segments (quote/paren aware).
-        const segs = [];
-        let i = 0;
-        while (i < s.length) {
-          const m = /\.([A-Za-z_$][\w$]*)\s*\(/.exec(s.slice(i));
-          if (!m) break;
-          const open = i + m.index + m[0].length - 1;
-          let depth = 0, j = open, str = null;
-          for (; j < s.length; j++) {
-            const c = s[j];
-            if (str) { if (c === '\\') { j++; } else if (c === str) str = null; continue; }
-            if (c === '"' || c === "'" || c === '`') str = c;
-            else if (c === '(') depth++;
-            else if (c === ')') { if (--depth === 0) { j++; break; } }
-          }
-          segs.push({ method: m[1], args: s.slice(open + 1, j - 1) });
-          i = j;
-        }
-        if (!segs.length) return null;
-
-        const firstStr = (args) => {
-          const m = /(['"`])((?:\\.|(?!\1)[\s\S])*?)\1/.exec(args);
-          return m ? m[2].replace(/\\(['"`])/g, '$1') : null;
-        };
-        const opt = (args, key) => {
-          const m = new RegExp(key + "\\s*:\\s*(?:(['\"`])((?:\\\\.|(?!\\1)[\\s\\S])*?)\\1|(true|false)|(\\d+))").exec(args);
-          if (!m) return undefined;
-          if (m[2] !== undefined) return m[2].replace(/\\(['"`])/g, '$1');
-          if (m[3] !== undefined) return m[3] === 'true';
-          if (m[4] !== undefined) return parseInt(m[4], 10);
-          return undefined;
-        };
-        const norm = (t) => String(t == null ? '' : t).replace(/\s+/g, ' ').trim();
-        const matchText = (actual, expected, exact) => {
-          const a = norm(actual), e = norm(expected);
-          return exact ? a === e : a.toLowerCase().includes(e.toLowerCase());
-        };
-        const isHidden = (el) => {
-          if (!el || el.nodeType !== 1) return true;
-          if (el.closest('[aria-hidden="true"]') || el.hasAttribute('hidden')) return true;
-          const cs = getComputedStyle(el);
-          return cs.display === 'none' || cs.visibility === 'hidden';
-        };
-        // Upper bound on the elements a whole chain may scan. A chain such as
-        // locator('div').getByText('a') resolves the second step once per match of
-        // the first — on a big page that is millions of nodes and froze the tab.
-        let labBudget = 200000;
-        // Every scope a step searches. A chained step scoped to a shadow HOST
-        // must also search host.shadowRoot — querySelectorAll(host) only sees the
-        // light DOM, so chaining into a web component found nothing.
-        const scopesOf = (root) => {
-          if (root === document) return [document];
-          return root.shadowRoot ? [root.shadowRoot, root] : [root];
-        };
-        const deepAll = (sel, root) => {
-          const seen = new Set();
-          const out = [];
-          for (const scope of scopesOf(root)) {
-            if (labBudget <= 0) { truncated = true; break; }
-            let found = null;
-            if (E && E.deepQueryAll) found = E.deepQueryAll(sel, scope, labBudget);
-            if (!found) {
-              if (sel !== '*') scope.querySelectorAll(sel); // throws on an invalid selector, as before
-              found = Array.from(scope.querySelectorAll(sel));
-            }
-            labBudget -= found.length;
-            for (const el of found) if (!seen.has(el)) { seen.add(el); out.push(el); }
-          }
-          return out;
-        };
-        const within = (root) => deepAll('*', root);
-
-        // Upper bound on how many text/role matches we resolve. The innermost-match
-        // filter below is O(n²) in `hit`, and a loose substring like "a" can match
-        // most of a page — without a cap that pins the tab.
-        const LAB_MAX_MATCHES = 300;
-
-        const find = (method, args, root) => {
-          const all = within(root);
-          switch (method) {
-            case 'getByRole': {
-              const role = firstStr(args), name = opt(args, 'name'), exact = opt(args, 'exact') === true;
-              if (!role || !E) return [];
-              // Role first: isHidden() forces a style recalc per element, so it must
-              // run on the few survivors rather than on every node in the document.
-              return all.filter(el => E.getRole(el) === role &&
-                (name == null || matchText(E.getAccessibleName(el), name, exact)) &&
-                !isHidden(el));
-            }
-            case 'getByLabel': {
-              const t = firstStr(args), exact = opt(args, 'exact') === true;
-              if (t == null || !E) return [];
-              return all.filter(el => /^(input|select|textarea)$/i.test(el.tagName) &&
-                matchText(E.getAccessibleName(el), t, exact));
-            }
-            case 'getByPlaceholder': {
-              const t = firstStr(args), exact = opt(args, 'exact') === true;
-              if (t == null) return [];
-              return all.filter(el => el.hasAttribute('placeholder') && matchText(el.getAttribute('placeholder'), t, exact));
-            }
-            case 'getByTestId': {
-              const t = firstStr(args);
-              return t == null ? [] : all.filter(el => el.getAttribute('data-testid') === t);
-            }
-            case 'getByTitle': {
-              const t = firstStr(args), exact = opt(args, 'exact') === true;
-              if (t == null) return [];
-              return all.filter(el => el.hasAttribute('title') && matchText(el.getAttribute('title'), t, exact));
-            }
-            case 'getByAltText': {
-              const t = firstStr(args), exact = opt(args, 'exact') === true;
-              if (t == null) return [];
-              return all.filter(el => el.hasAttribute('alt') && matchText(el.getAttribute('alt'), t, exact));
-            }
-            case 'getByText': {
-              const t = firstStr(args), exact = opt(args, 'exact') === true;
-              if (t == null) return [];
-              const hit = [];
-              for (let k = 0; k < all.length && hit.length < LAB_MAX_MATCHES; k++) {
-                const el = all[k];
-                if (!matchText(el.innerText || el.textContent, t, exact)) continue;
-                if (isHidden(el)) continue;
-                hit.push(el);
-              }
-              // keep the innermost matches (Playwright targets the smallest element)
-              return hit.filter(el => !hit.some(o => o !== el && el.contains(o)));
-            }
-            case 'locator': {
-              let sel = firstStr(args);
-              if (sel == null) return [];
-              sel = sel.replace(/^css=/, '');
-              if (/^xpath=/.test(sel) || sel.startsWith('//') || sel.startsWith('(')) {
-                const xp = sel.replace(/^xpath=/, ''), out = [];
-                const r = document.evaluate(xp, root === document ? document : root, null, XPathResult.ORDERED_NODE_SNAPSHOT_TYPE, null);
-                for (let k = 0; k < r.snapshotLength; k++) out.push(r.snapshotItem(k));
-                return out;
-              }
-              try {
-                return deepAll(sel, root);
-              }
-              catch (e) { return []; }
-            }
-            default: return [];
-          }
-        };
-
-        const LOC = new Set(['getByRole', 'getByText', 'getByLabel', 'getByPlaceholder', 'getByTestId', 'getByTitle', 'getByAltText', 'locator']);
-        let result = [], started = false, lastLoc = null;
-        for (const seg of segs) {
-          if (LOC.has(seg.method)) {
-            const roots = started ? result : [document];
-            // Set membership, not next.includes(el): the old O(n²) dedupe alone
-            // could pin the tab on a chain with a few thousand matches.
-            const seen = new Set();
-            const next = [];
-            for (const r of roots) {
-              if (labBudget <= 0) { truncated = true; break; }
-              for (const el of find(seg.method, seg.args, r)) if (!seen.has(el)) { seen.add(el); next.push(el); }
-            }
-            result = next; started = true; lastLoc = seg.method;
-          } else if (seg.method === 'first') result = result.slice(0, 1);
-          else if (seg.method === 'last') result = result.slice(-1);
-          else if (seg.method === 'nth') { const n = parseInt(firstStr(seg.args) != null ? firstStr(seg.args) : seg.args, 10) || 0; result = result[n] ? [result[n]] : []; }
-          else if (seg.method === 'filter') { const ht = opt(seg.args, 'hasText'); if (ht != null) result = result.filter(el => matchText(el.innerText || el.textContent, ht, false)); }
-          // action methods (fill/click/check/press/...) are ignored
-        }
-        return started ? { matches: result, via: lastLoc } : null;
-      };
-
       try {
-        const pw = resolvePlaywrightLocator(selector);
+        const pw = labResolveChain(selector);
         if (pw) {
           matches = pw.matches;
           via = pw.via;
+          truncated = pw.truncated;
         } else if (selector.startsWith('//') || selector.startsWith('(')) {
-          const result = document.evaluate(selector, document, null, XPathResult.ORDERED_NODE_SNAPSHOT_TYPE, null);
-          for (let i = 0; i < result.snapshotLength; i++) {
-            matches.push(result.snapshotItem(i));
-          }
+          matches = labXPath(selector, document, null);
         } else {
           const engine = globalThis.__LocatorLensEngine;
           const deep = engine && engine.deepQueryAll ? engine.deepQueryAll(selector, document, Infinity) : null;

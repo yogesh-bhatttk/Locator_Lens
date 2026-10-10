@@ -154,10 +154,28 @@ describe('resolveTarget: order and position (pw-verified element by element)', (
     expect(keys(E.resolveTarget(byText('Hi')))).toEqual(['light', 'shadow']);
   });
 
-  it('excludes the extension’s own UI', () => {
-    render('<button k="page">Save</button><div id="ll-tooltip"><button k="ours">Save</button></div>');
-    expect(keys(E.resolveTarget(role('button', 'Save')))).toEqual(['page']);
-    expect(keys(E.resolveTarget(role('button', 'Save', { nth: 0 })))).toEqual(['page']);
+  it('excludes the extension’s own UI — the nodes registered with markOwnUi', () => {
+    render('<button k="page">Save</button><div id="ours"><button k="ours">Save</button></div>');
+    const ours = document.getElementById('ours');
+    E.markOwnUi(ours);
+    E.markOwnUi(document.createTextNode('ignored')); // only elements are registered
+    try {
+      expect(keys(E.resolveTarget(role('button', 'Save')))).toEqual(['page']);
+      expect(keys(E.resolveTarget(role('button', 'Save', { nth: 0 })))).toEqual(['page']);
+      expect(keys(E.resolveTarget(css('[k]')))).toEqual(['page']);
+    } finally {
+      E.unmarkOwnUi(ours);
+    }
+    expect(keys(E.resolveTarget(role('button', 'Save')))).toEqual(['page', 'ours']);
+  });
+
+  it('never hides a page subtree because of an ll-/locatra- id (M4)', () => {
+    render('<div id="ll-root"><button k="a">Save</button></div><div id="locatra-x"><p k="b">Hi</p></div>');
+    expect(keys(E.resolveTarget(role('button', 'Save')))).toEqual(['a']);
+    expect(keys(E.resolveTarget(byText('Hi')))).toEqual(['b']);
+    // …and such an id is a usable locator of its own.
+    const r = E.generateLocators(document.getElementById('ll-root'), []);
+    expect(r.locators.some((l) => l.target.kind === 'id' && l.target.value === 'll-root')).toBe(true);
   });
 
   it('returns an empty array for anything it cannot evaluate', () => {
@@ -271,6 +289,30 @@ describe('resolveTarget: frames', () => {
     expect(E.countTargetMatches(frame('[[', byText('a')))).toBeNull();
   });
 
+  it('resolves within every scope of an array root, each match once, in scope order', () => {
+    render('<ul k="a"><li k="a1">x</li></ul><ul k="b"><li k="b1">x</li><li k="b2">y</li></ul><p k="p">x</p>');
+    const [a, b] = document.querySelectorAll('ul');
+    expect(keys(E.resolveTarget(css('li'), [b, a]))).toEqual(['b1', 'b2', 'a1']);
+    expect(keys(E.resolveTarget(css('li'), [a, a.firstChild, b]))).toEqual(['a1', 'b1', 'b2']);
+    expect(keys(E.resolveTarget(byText('x'), [a, b]))).toEqual(['a1', 'b1']);
+    expect(keys(E.resolveTarget(role('listitem', null, { nth: 1 }), [a, b]))).toEqual(['b1']);
+    // Documents and non-nodes are not scopes; nothing left means nothing found.
+    expect(E.resolveTarget(css('li'), [document, null, 'x'])).toEqual([]);
+    expect(E.resolveTarget(css('li'), [])).toEqual([]);
+    expect(E.resolveTarget({ kind: 'nope' }, [a])).toEqual([]);
+    const throwing = {
+      kind: 'chain',
+      get parent() {
+        throw new Error('boom');
+      },
+      child: css('li'),
+    };
+    expect(E.resolveTarget(css('li'), [a, throwing])).toEqual(
+      ['a1'].map((k) => document.querySelector(`[k="${k}"]`))
+    );
+    expect(E.resolveTarget(throwing, [a])).toEqual([]);
+  });
+
   it('resolves against a frame document passed as the root', () => {
     render('<p k="top">x</p>');
     const f = addFrame('f', '<p k="in">x</p>');
@@ -286,12 +328,19 @@ describe('unwrapFrameTarget', () => {
       kind: 'frame',
       selector: '#outer',
       index: 0,
-      child: { kind: 'frame', selector: null, index: 2, shadowPath: ['#h', 'iframe'], child: inner },
+      child: {
+        kind: 'frame',
+        selector: null,
+        index: 2,
+        framesIndex: 3,
+        shadowPath: ['#h', 'iframe'],
+        child: inner,
+      },
     };
     expect(E.unwrapFrameTarget(t)).toEqual({
       framePath: [
         { selector: '#outer', index: 0 },
-        { selector: null, index: 2, shadowPath: ['#h', 'iframe'] },
+        { selector: null, index: 2, framesIndex: 3, shadowPath: ['#h', 'iframe'] },
       ],
       inner,
     });

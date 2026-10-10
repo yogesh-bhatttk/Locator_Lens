@@ -260,10 +260,11 @@ describe('POM_SCAN (whole page)', () => {
     send({ type: 'POM_SCAN' });
     const { elements } = await pomResult();
     expect(elements[0]).toMatchObject({ target: { kind: 'id', value: 'solo' }, matchCount: 1, unique: true });
+    // A structural selector built to be unique, not a bare tag that matched all three.
     expect(elements[1]).toMatchObject({
-      target: { kind: 'css', value: 'button' },
-      matchCount: 3,
-      unique: false,
+      target: { kind: 'css', value: 'button:nth-of-type(2)' },
+      matchCount: 1,
+      unique: true,
     });
   });
 

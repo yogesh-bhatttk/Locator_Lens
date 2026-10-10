@@ -1132,13 +1132,23 @@ describe('card details beyond code and count', () => {
   });
 
   it('never counts the extension’s own overlay (a deliberate difference from Playwright)', () => {
-    // Playwright would count 2 here: the #ll-tooltip copy exists only while the
+    // Playwright would count 2 here: the tooltip copy exists only while the
     // extension is inspecting, never in the page a test runs against.
-    const r = analyse(
+    const subject = render('<div id="tip"><button>Hover</button></div><button id="subject">Hover</button>');
+    const tip = document.getElementById('tip');
+    E.markOwnUi(tip);
+    try {
+      const r = analyse(subject);
+      expect(r.locators.find((l) => l.target.kind === 'role').matchCount).toBe(1);
+      expect(r.locators.find((l) => l.target.kind === 'text').matchCount).toBe(1);
+    } finally {
+      E.unmarkOwnUi(tip);
+    }
+    // An id that only looks like ours is the page's: both copies count.
+    const r2 = analyse(
       render('<div id="ll-tooltip"><button>Hover</button></div><button id="subject">Hover</button>')
     );
-    expect(r.locators.find((l) => l.target.kind === 'role').matchCount).toBe(1);
-    expect(r.locators.find((l) => l.target.kind === 'text').matchCount).toBe(1);
+    expect(r2.locators.find((l) => l.target.kind === 'text').matchCount).toBe(2);
   });
 });
 

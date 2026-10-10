@@ -135,10 +135,10 @@ describe('Selector Lab locator kinds', () => {
     expect(count("page.getByAltText('Company logo', { exact: true })")).toBe(1);
   });
 
-  it('getByText keeps the innermost visible match', () => {
+  it('getByText keeps the innermost match, hidden ones included — as Playwright counts them', () => {
     expect(count("page.getByText('world')")).toBe(1);
     const res = send({ type: 'LAB_VALIDATE', selector: "page.getByText('Hello')" });
-    expect(res.count).toBe(1);
+    expect(res.count).toBe(2);
     expect(document.querySelector('p').hasAttribute('data-locatra-lab')).toBe(true);
   });
 
@@ -158,22 +158,68 @@ describe('Selector Lab locator kinds', () => {
     expect(count("page.locator('[[bad')")).toBe(0);
   });
 
-  it('unknown chain methods are ignored; a chain with no locator falls back to CSS', () => {
+  it('unknown chain methods are ignored; a call with no argument matches nothing', () => {
     expect(count("page.getByRole('listitem').click()")).toBe(3);
-    expect(count("page.frameLocator('#f').getByRole('button')")).toBe(1);
     expect(send({ type: 'LAB_VALIDATE', selector: 'page.getByRole()' }).count).toBe(0);
+    expect(count("page.first().getByRole('listitem')")).toBe(3); // a reducer before any locator
+    expect(count("page.locator('li').filter({ has: x })")).toBe(3);
   });
 
-  it('reports truncated when a chain exceeds the scan budget', () => {
-    document.body.innerHTML = Array.from({ length: 300 }, () => '<div><span>a</span></div>').join('');
+  it('agrees with the engine: getByLabel finds any labelled element, getByRole honours level (L1)', () => {
+    document.body.innerHTML = `
+      <div role="switch" aria-checked="false" aria-label="Dark mode" tabindex="0"></div>
+      <button aria-label="Close dialog">x</button>
+      <h2>Billing</h2><h3>Billing</h3>`;
     const E = globalThis.__LocatorLensEngine;
-    const deep = E.deepQueryAll;
-    E.deepQueryAll = (sel, root) => {
-      const r = deep(sel, root, Infinity) || [];
-      return r.concat(new Array(200000).fill(r[0]));
-    };
+    expect(count("page.getByLabel('Dark mode')")).toBe(1);
+    expect(count("page.getByLabel('Close dialog')")).toBe(1);
+    expect(count("page.getByRole('heading', { name: 'Billing' })")).toBe(2);
+    expect(count("page.getByRole('heading', { name: 'Billing', level: 3 })")).toBe(1);
+    expect(count("page.getByRole('heading', { name: 'Bill', exact: true })")).toBe(0);
+    expect(count("page.getByRole('heading', { name: 'Billing', level: 3 })")).toBe(
+      E.resolveTarget({ kind: 'role', role: 'heading', name: 'Billing', level: 3 }).length
+    );
+    expect(count("page.getByRole('heading').nth(-1)")).toBe(1);
+    expect(document.querySelector('h3').hasAttribute('data-locatra-lab')).toBe(true);
+  });
+
+  it('frameLocator() enters the frame; a missing or ambiguous frame matches nothing (L1)', () => {
+    document.body.innerHTML =
+      '<iframe id="f"></iframe><iframe class="x"></iframe><iframe class="x"></iframe>';
+    const doc = document.getElementById('f').contentDocument;
+    doc.body.innerHTML = '<button>Pay</button><button>Back</button>';
+    expect(count("page.frameLocator('#f').getByRole('button')")).toBe(2);
+    expect(count("page.frameLocator('#f').getByRole('button', { name: 'Pay' })")).toBe(1);
+    expect(doc.querySelector('button').hasAttribute('data-locatra-lab')).toBe(true);
+    expect(count("page.frameLocator('#f').locator('//button[2]')")).toBe(1);
+    expect(count("page.frameLocator('#nope').getByRole('button')")).toBe(0);
+    expect(count("page.frameLocator('.x').getByRole('button')")).toBe(0); // strict: two frames
+    expect(count("page.frameLocator('#f')")).toBe(1); // the frame itself is highlighted
+    expect(count("page.frameLocator().getByRole('button')")).toBe(0);
+  });
+
+  it('chains scope each step to the previous matches; an invalid XPath step matches nothing', () => {
+    document.body.innerHTML = '<ul id="a"><li>One</li></ul><ul id="b"><li>Two</li><li>Three</li></ul>';
+    expect(count("page.locator('#b').getByRole('listitem')")).toBe(2);
+    expect(count("page.locator('#b').locator('xpath=./li')")).toBe(2);
+    expect(count("page.locator('ul').getByText('Two')")).toBe(1);
+    expect(count("page.locator('ul').locator('xpath=[[')")).toBe(0);
+    // An absolute XPath from every scope finds the same nodes: each is counted once.
+    expect(count("page.locator('ul').locator('//li')")).toBe(3);
+    expect(count("page.locator('li').nth()")).toBe(1);
+    expect(count("page.getByFoo('One')")).toBe(0); // not a Playwright locator
+  });
+
+  it('a pasted call with no locator in it is taken as CSS (and fails as one)', () => {
+    const res = send({ type: 'LAB_VALIDATE', selector: "x.first() + 'locator('" });
+    expect(res.ok).toBe(false);
+    expect(sent.some((m) => m.type === 'LAB_ERROR')).toBe(true);
+  });
+
+  it('reports truncated when a chain has more scopes than it evaluates', () => {
+    document.body.innerHTML = Array.from({ length: 1001 }, () => '<div><span>a</span></div>').join('');
     const res = send({ type: 'LAB_VALIDATE', selector: "page.locator('div').locator('span')" });
-    expect(res.truncated).toBe(true);
+    expect(res).toEqual({ ok: true, count: 1000, truncated: true });
     expect(sent.find((m) => m.type === 'LAB_STATUS_UPDATE').truncated).toBe(true);
   });
 
@@ -348,7 +394,7 @@ describe('recorder fallbacks and details', () => {
     const steps = recorded();
     expect(steps.map((s) => [s.action, s.fullCode])).toEqual([
       ['click', "await page.locator('#go').click();"],
-      ['click', "await page.locator('span').first().click();"],
+      ['click', "await page.locator('span').click();"],
       ['click', "await page.locator('#q').click();"],
       ['fill', "await page.locator('#q').fill('it\\'s');"],
       ['selectOption', "await page.locator('#s').selectOption('One');"],
@@ -762,7 +808,12 @@ describe('frames that cannot be read', () => {
     frameSend({ type: 'START_INSPECT' });
     w.document.querySelector('button').dispatchEvent(new w.MouseEvent('click', { bubbles: true }));
     const pick = frameSent.find((m) => m.type === 'ELEMENT_PICKED').data;
-    expect(pick.locators[0].target).toMatchObject({ kind: 'frame', selector: null, index: 1 });
+    expect(pick.locators[0].target).toMatchObject({
+      kind: 'frame',
+      selector: null,
+      index: 1,
+      framesIndex: 1,
+    });
     expect(pick.proTip).toContain('cross-origin');
     expect(pick.elementData.framePath).toEqual(['iframe (index 1)']);
     frameSend({ type: 'STOP_INSPECT' });
@@ -798,14 +849,19 @@ describe('frames that cannot be read', () => {
       ok: true,
       matchCount: 0,
     });
-    // A recorded selector cannot be checked against an unreadable frame element: the index decides.
-    const inFrame = (index) => ({
+    // Recorded without a selector (cross-origin): the position decides.
+    const inFrame = (index, selector = null, extra = {}) => ({
       action: 'assert',
       assertType: 'toBeVisible',
-      target: { kind: 'frame', selector: '#f', index, child: { kind: 'id', value: 'i' } },
+      target: { kind: 'frame', selector, index, ...extra, child: { kind: 'id', value: 'i' } },
     });
     expect(await replayIn(inFrame(0))).toEqual({ ok: true, matchCount: 1 });
     expect(await replayIn(inFrame(3))).toBe('unanswered');
+    // window.frames position wins when the step carries it (C4).
+    expect(await replayIn(inFrame(3, null, { framesIndex: 0 }))).toEqual({ ok: true, matchCount: 1 });
+    expect(await replayIn(inFrame(0, null, { framesIndex: 2 }))).toBe('unanswered');
+    // A recorded selector this frame cannot check is not claimed by position (L2).
+    expect(await replayIn(inFrame(0, '#f'))).toBe('unanswered');
     // An unfocused cross-origin frame does not claim a press.
     w.document.activeElement.blur();
     expect(await replayIn({ action: 'press', value: 'Escape', target: null })).toBe('unanswered');
