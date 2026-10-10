@@ -19,7 +19,7 @@ import { join } from 'node:path';
 import { JSDOM } from 'jsdom';
 import { beforeAll, describe, expect, it } from 'vitest';
 
-import { helperCallOf, runHelper } from './codegen-helper-calls.mjs';
+import { declaredString, helperCallOf, runHelper } from './codegen-helper-calls.mjs';
 
 let C;
 beforeAll(async () => {
@@ -212,10 +212,12 @@ describe('H2: text assertions compare the rendered text', () => {
       'expect(page.get_by_test_id("total")).to_contain_text("Total", use_inner_text=True)'
     );
     expect(stmt(has, 'playwright', 'java')).toBe(
-      'assertThat(page.getByTestId("total")).hasText("Total 42", new LocatorAssertions.HasTextOptions().setUseInnerText(true));'
+      'assertThat(page.getByTestId("total"))\n' +
+        '    .hasText("Total 42", new LocatorAssertions.HasTextOptions().setUseInnerText(true));'
     );
     expect(stmt(contains, 'playwright', 'java')).toBe(
-      'assertThat(page.getByTestId("total")).containsText("Total", new LocatorAssertions.ContainsTextOptions().setUseInnerText(true));'
+      'assertThat(page.getByTestId("total"))\n' +
+        '    .containsText("Total", new LocatorAssertions.ContainsTextOptions().setUseInnerText(true));'
     );
     expect(C.testScript([has], 'playwright', 'java')).toContain(
       'import com.microsoft.playwright.assertions.LocatorAssertions;'
@@ -239,19 +241,25 @@ describe('H2: text assertions compare the rendered text', () => {
   // zero-width space and markup indentation.
   const RENDERED = ' Total\u00a0\n 4\u00ad2\u200b ';
 
+  // The declarations a statement needs (here: the locatraText / locatra_text helper).
+  const helpers = (fw, lang) => C._internals.allHelpers(fw, lang).join('\n\n');
+
   it('Cypress compares innerText inside a retried should() callback', async () => {
     const code = stmt(has, 'cypress', 'typescript');
-    expect(code).toContain('$el[0].innerText');
+    expect(code).toBe(
+      "cy.get('[data-testid=\"total\"]').should(($el) => { expect(locatraText($el)).to.equal('Total 42'); });"
+    );
+    expect(helpers('cypress', 'typescript')).toContain('$el[0].innerText');
     expect(code).not.toContain('.text()');
     const run = (innerText) => {
       const cy = { get: () => ({ should: (fn) => fn([{ innerText, textContent: 'hidden junk' }]) }) };
-      new Function('cy', 'expect', code)(cy, expect);
+      new Function('cy', 'expect', `${helpers('cypress', 'javascript')}\n${code}`)(cy, expect);
     };
     expect(() => run(RENDERED)).not.toThrow();
     expect(() => run('Total 43')).toThrow();
     const part = stmt(contains, 'cypress', 'javascript');
     expect(() =>
-      new Function('cy', 'expect', part)(
+      new Function('cy', 'expect', `${helpers('cypress', 'javascript')}\n${part}`)(
         { get: () => ({ should: (fn) => fn([{ innerText: RENDERED }]) }) },
         expect
       )
@@ -261,12 +269,15 @@ describe('H2: text assertions compare the rendered text', () => {
   it('Selenium JS normalises getText() like the recording', async () => {
     const driver = { findElement: () => ({ getText: async () => RENDERED }) };
     const By = { css: (s) => s };
+    expect(stmt(has, 'selenium', 'javascript')).toBe(
+      "assert.strictEqual(await locatraText(driver.findElement(By.css('[data-testid=\"total\"]'))), 'Total 42');"
+    );
     const run = (step) =>
       new Function(
         'driver',
         'By',
         'assert',
-        `return (async () => { ${stmt(step, 'selenium', 'javascript')} })();`
+        `${helpers('selenium', 'javascript')}\nreturn (async () => { ${stmt(step, 'selenium', 'javascript')} })();`
       )(driver, By, assert);
     await expect(run(has)).resolves.toBeUndefined();
     await expect(run(contains)).resolves.toBeUndefined();
@@ -282,6 +293,7 @@ describe('H2: text assertions compare the rendered text', () => {
         '    def find_element(self, *a): return E()',
         'class By: CSS_SELECTOR = "css"',
         'driver = D()',
+        helpers('selenium', 'python'),
         stmt(step, 'selenium', 'python'),
       ].join('\n');
     const runs = (step) => {
@@ -299,16 +311,22 @@ describe('H2: text assertions compare the rendered text', () => {
 
   it('Java, C# and WebdriverIO strip the same characters before comparing', () => {
     expect(stmt(has, 'selenium', 'java')).toBe(
-      'assertEquals("Total 42", driver.findElement(By.cssSelector("[data-testid=\\"total\\"]")).getText()' +
-        '.replaceAll("[\\\\u00ad\\\\u200b]", "").replaceAll("(?U)\\\\s+", " ").trim());'
+      'assertEquals("Total 42", Locatra.text(driver.findElement(By.cssSelector("[data-testid=\\"total\\"]"))));'
+    );
+    expect(helpers('selenium', 'java')).toContain(
+      'return el.getText().replaceAll("[\\\\u00ad\\\\u200b]", "").replaceAll("(?U)\\\\s+", " ").trim();'
     );
     expect(stmt(has, 'selenium', 'csharp')).toBe(
-      'Assert.That(Regex.Replace(Regex.Replace(driver.FindElement(By.CssSelector("[data-testid=\\"total\\"]")).Text, ' +
-        '@"[\\u00AD\\u200B]", ""), @"\\s+", " ").Trim(), Is.EqualTo("Total 42"));'
+      'Assert.That(Locatra.Text(driver.FindElement(By.CssSelector("[data-testid=\\"total\\"]"))), Is.EqualTo("Total 42"));'
+    );
+    expect(helpers('selenium', 'csharp')).toContain(
+      'Regex.Replace(Regex.Replace(el.Text, @"[\\u00AD\\u200B]", ""), @"\\s+", " ").Trim();'
     );
     expect(stmt({ ...has, value: ' Total\u00ad 42 ' }, 'webdriverio', 'typescript')).toBe(
-      "await expect($('[data-testid=\"total\"]')).toHaveText('Total 42', " +
-        "{ replace: [[/[\\u00ad\\u200b]/g, ''], [/\\s+/g, ' ']] });"
+      "await expect($('[data-testid=\"total\"]')).toHaveText('Total 42', LOCATRA_TEXT);"
+    );
+    expect(helpers('webdriverio', 'typescript')).toContain(
+      "const LOCATRA_TEXT = { replace: [[/[\\u00ad\\u200b]/g, ''], [/\\s+/g, ' ']] as [RegExp, string][] };"
     );
   });
 });
@@ -458,22 +476,19 @@ describe('M6 / C4: numeric target fields never become code', () => {
       'await browser.switchFrame($(await browser.execute<HTMLIFrameElement, [number]>(LOCATRA_FRAME_JS, 1)));'
     );
     // …and the declaration carries DEEP_IFRAME_JS, once, in every file that switches.
-    const js = (lang) => C.q(I.DEEP_IFRAME_JS, lang);
-    expect(C.testScript([{ action: 'click', target }], 'selenium', 'javascript')).toContain(
-      `const LOCATRA_FRAME_JS = ${js('javascript')};`
-    );
-    expect(C.testScript([{ action: 'click', target }], 'selenium', 'python')).toContain(
-      `LOCATRA_FRAME_JS = ${js('python')}`
-    );
+    const declared = (fw, lang, name = 'LOCATRA_FRAME_JS') =>
+      declaredString(C.testScript([{ action: 'click', target }], fw, lang), name, lang);
+    expect(declared('selenium', 'javascript')).toBe(I.DEEP_IFRAME_JS);
+    expect(declared('selenium', 'python')).toBe(I.DEEP_IFRAME_JS);
     expect(C.testScript([{ action: 'click', target }], 'selenium', 'java')).toContain(
-      `private static final String LOCATRA_FRAME_JS = ${JSON.stringify(I.DEEP_IFRAME_JS)};`
+      'private static final String LOCATRA_FRAME_JS =\n'
     );
+    expect(declared('selenium', 'java')).toBe(I.DEEP_IFRAME_JS);
     expect(C.testScript([{ action: 'click', target }], 'selenium', 'csharp')).toContain(
-      `private const string LocatraFrameJs = ${JSON.stringify(I.DEEP_IFRAME_JS)};`
+      'private const string LocatraFrameJs =\n'
     );
-    expect(C.testScript([{ action: 'click', target }], 'webdriverio', 'typescript')).toContain(
-      `const LOCATRA_FRAME_JS = ${js('typescript')};`
-    );
+    expect(declared('selenium', 'csharp', 'LocatraFrameJs')).toBe(I.DEEP_IFRAME_JS);
+    expect(declared('webdriverio', 'typescript')).toBe(I.DEEP_IFRAME_JS);
     for (const [fw, lang] of ALL) {
       const file = C.testScript(
         [
@@ -495,7 +510,7 @@ describe('M6 / C4: numeric target fields never become code', () => {
     // Page objects use the same switch.
     const po = C.pageObject({ elements: [{ name: 'x', kind: 'button', target }] }, 'selenium', 'python');
     expect(po).toContain('self.driver.switch_to.frame(self.driver.execute_script(LOCATRA_FRAME_JS, 1))');
-    expect(po).toContain(`LOCATRA_FRAME_JS = ${js('python')}`);
+    expect(declaredString(po, 'LOCATRA_FRAME_JS', 'python')).toBe(I.DEEP_IFRAME_JS);
   });
 
   it('falls back to the default viewport for anything but a positive finite size', () => {
@@ -615,11 +630,11 @@ describe('C2: sensitive toHaveValue assertions', () => {
   it('reads the environment variable, never the value, in every target', () => {
     const want = {
       'playwright/typescript':
-        "await expect.poll(async () => (await page.getByTestId('pw').inputValue()) === (process.env.MY_PW ?? ''), " +
-        "{ message: 'the value does not match MY_PW' }).toBe(true);",
+        "await expect.poll(async () => (await page.getByTestId('pw').inputValue()) === (process.env.MY_PW ?? ''), {\n" +
+        "  message: 'the value does not match MY_PW',\n}).toBe(true);",
       'playwright/javascript':
-        "await expect.poll(async () => (await page.getByTestId('pw').inputValue()) === (process.env.MY_PW ?? ''), " +
-        "{ message: 'the value does not match MY_PW' }).toBe(true);",
+        "await expect.poll(async () => (await page.getByTestId('pw').inputValue()) === (process.env.MY_PW ?? ''), {\n" +
+        "  message: 'the value does not match MY_PW',\n}).toBe(true);",
       'playwright/python':
         'try:\n' +
         '    expect(page.get_by_test_id("pw")).to_have_value(os.environ.get("MY_PW", ""))\n' +
@@ -648,14 +663,14 @@ describe('C2: sensitive toHaveValue assertions', () => {
         '"[data-testid=\\"pw\\"]")).getDomProperty("value")), "the value does not match MY_PW");',
       'selenium/csharp':
         'Assert.That(driver.FindElement(By.CssSelector("[data-testid=\\"pw\\"]")).GetDomProperty("value") == ' +
-        '(Environment.GetEnvironmentVariable("MY_PW") ?? ""), Is.True, "the value does not match MY_PW");',
+        '(Environment.GetEnvironmentVariable("MY_PW") ?? ""), Is.True,\n    "the value does not match MY_PW");',
       'cypress/javascript':
         "locatraSecret('MY_PW').then((secret) => {\n" +
         '  cy.get(\'[data-testid="pw"]\').should(($el) => { expect($el.val() === secret, ' +
         "'the value does not match MY_PW').to.equal(true); });\n});",
       'webdriverio/typescript':
         'await browser.waitUntil(async () => (await $(\'[data-testid="pw"]\').getValue()) === ' +
-        "(process.env.MY_PW ?? ''), { timeoutMsg: 'the value does not match MY_PW' });",
+        "(process.env.MY_PW ?? ''), {\n  timeoutMsg: 'the value does not match MY_PW',\n});",
     };
     for (const [key, code] of Object.entries(want)) {
       const [fw, lang] = key.split('/');
@@ -813,8 +828,10 @@ describe('C2: sensitive toHaveValue assertions', () => {
 
 // ════════════════════════════════════════════════════════════════════════════
 describe('C3: open shadow DOM', () => {
+  // A CSS target: role / label / text ones go to the helper instead (below).
+  const plain = { kind: 'css', value: 'x-panel button' };
   const inShadow = (o = {}) => ({
-    ...role('button', 'Go'),
+    ...plain,
     shadowHosts: ['x-app', 'x-panel[data-k="p"]'],
     shadowCss: 'button.go',
     ...o,
@@ -823,54 +840,140 @@ describe('C3: open shadow DOM', () => {
 
   it('leaves Playwright alone: its locators pierce shadow roots', () => {
     for (const lang of ['typescript', 'python', 'java', 'csharp']) {
-      expect(C.locatorExpr(inShadow(), 'playwright', lang)).toBe(
-        C.locatorExpr(role('button', 'Go'), 'playwright', lang)
+      expect(C.locatorExpr(inShadow(), 'playwright', lang)).toBe(C.locatorExpr(plain, 'playwright', lang));
+    }
+  });
+
+  it('finds a role / label / text target with the helper, which pierces shadow roots, never a walk', () => {
+    const LONG_HOST =
+      'html > body > header > nav > div:nth-of-type(3) > div:nth-of-type(2) > mdn-search-button';
+    for (const t of [
+      role('button', 'Search the site'),
+      { kind: 'label', value: 'Email' },
+      { kind: 'text', value: 'Copy', exact: true },
+    ]) {
+      for (const sh of [
+        { shadowHosts: [LONG_HOST], shadowCss: 'button[title="Search the site"]' },
+        { shadowHosts: [LONG_HOST, 'mdn-copy-button'], shadowCss: 'mdn-button' },
+        { shadowHosts: [LONG_HOST] }, // no shadowCss: the helper still finds it, so no NOTE
+      ]) {
+        for (const [fw, lang] of ALL) {
+          if (fw === 'playwright') continue;
+          const label = `${fw}/${lang} ${JSON.stringify(t)} ${JSON.stringify(sh)}`;
+          expect(C.locatorExpr({ ...t, ...sh }, fw, lang), label).toBe(C.locatorExpr(t, fw, lang));
+          const code = click({ ...t, ...sh }, fw, lang);
+          expect(code, label).toBe(click(t, fw, lang));
+          expect(code, label).not.toMatch(/shadow|NOTE|nth-of-type/i);
+        }
+      }
+    }
+    // Inside a chain the helper searches the parent, shadow roots included, as
+    // Playwright's parent.getByRole() does.
+    const chained = {
+      kind: 'chain',
+      parent: testid('popup'),
+      child: { ...inShadow(), ...role('button', 'Go') },
+    };
+    for (const [fw, lang] of ALL) {
+      expect(C.locatorExpr(chained, fw, lang), `${fw}/${lang}`).toBe(
+        C.locatorExpr({ kind: 'chain', parent: testid('popup'), child: role('button', 'Go') }, fw, lang)
       );
     }
   });
 
+  it('prefers a short native alternative in shadow DOM, the helper over a long walk', () => {
+    const primary = {
+      ...role('textbox', 'Filter sidebar'),
+      shadowHosts: ['mdn-sidebar-filter'],
+      shadowCss: '#input',
+    };
+    const short = { kind: 'id', value: 'input', shadowHosts: ['mdn-sidebar-filter'], shadowCss: '#input' };
+    const long = {
+      kind: 'id',
+      value: 'reset',
+      shadowHosts: ['interactive-example[name="HTML Demo: &lt;select&gt;"]'],
+      shadowCss: '#reset',
+    };
+    const twoHops = { ...short, shadowHosts: ['x-a', 'x-b'] };
+    const noCss = { kind: 'id', value: 'input', shadowHosts: ['mdn-sidebar-filter'] };
+    for (const fw of ['selenium', 'cypress', 'webdriverio']) {
+      expect(C.preferredTarget(primary, [short], fw), fw).toBe(short);
+      for (const alt of [long, twoHops, noCss]) {
+        expect(C.preferredTarget(primary, [alt], fw), `${fw} ${JSON.stringify(alt)}`).toBe(primary);
+      }
+      expect(C.preferredTarget(primary, [long, short], fw), fw).toBe(short);
+    }
+    expect(C.preferredTarget(primary, [short], 'playwright')).toBe(primary);
+  });
+
   it('walks host by host and finishes with shadowCss everywhere else', () => {
+    // Two hops or more go one per line (Python inside parentheses).
     expect(C.locatorExpr(inShadow(), 'selenium', 'javascript')).toBe(
-      "(await (await (await (await driver.findElement(By.css('x-app')).getShadowRoot())" +
-        ".findElement(By.css('x-panel[data-k=\"p\"]'))).getShadowRoot()).findElement(By.css('button.go')))"
+      "(await (await (await (await driver.findElement(By.css('x-app'))\n" +
+        '    .getShadowRoot()).findElement(By.css(\'x-panel[data-k="p"]\')))\n' +
+        "    .getShadowRoot()).findElement(By.css('button.go')))"
     );
     expect(C.locatorExpr(inShadow(), 'selenium', 'python')).toBe(
-      'driver.find_element(By.CSS_SELECTOR, "x-app").shadow_root.find_element(By.CSS_SELECTOR, ' +
-        '"x-panel[data-k=\\"p\\"]").shadow_root.find_element(By.CSS_SELECTOR, "button.go")'
+      '(driver.find_element(By.CSS_SELECTOR, "x-app")\n' +
+        '    .shadow_root.find_element(By.CSS_SELECTOR, "x-panel[data-k=\\"p\\"]")\n' +
+        '    .shadow_root.find_element(By.CSS_SELECTOR, "button.go"))'
     );
     expect(C.locatorExpr(inShadow(), 'selenium', 'java')).toBe(
-      'driver.findElement(By.cssSelector("x-app")).getShadowRoot().findElement(By.cssSelector(' +
-        '"x-panel[data-k=\\"p\\"]")).getShadowRoot().findElement(By.cssSelector("button.go"))'
+      'driver.findElement(By.cssSelector("x-app"))\n' +
+        '    .getShadowRoot().findElement(By.cssSelector("x-panel[data-k=\\"p\\"]"))\n' +
+        '    .getShadowRoot().findElement(By.cssSelector("button.go"))'
     );
     expect(C.locatorExpr(inShadow(), 'selenium', 'csharp')).toBe(
-      'driver.FindElement(By.CssSelector("x-app")).GetShadowRoot().FindElement(By.CssSelector(' +
-        '"x-panel[data-k=\\"p\\"]")).GetShadowRoot().FindElement(By.CssSelector("button.go"))'
+      'driver.FindElement(By.CssSelector("x-app"))\n' +
+        '    .GetShadowRoot().FindElement(By.CssSelector("x-panel[data-k=\\"p\\"]"))\n' +
+        '    .GetShadowRoot().FindElement(By.CssSelector("button.go"))'
     );
     expect(C.locatorExpr(inShadow(), 'cypress', 'javascript')).toBe(
-      "cy.get('x-app').shadow().find('x-panel[data-k=\"p\"]').shadow().find('button.go')"
+      "cy.get('x-app')\n    .shadow().find('x-panel[data-k=\"p\"]')\n    .shadow().find('button.go')"
     );
     expect(C.locatorExpr(inShadow(), 'webdriverio', 'typescript')).toBe(
-      "$('x-app').shadow$('x-panel[data-k=\"p\"]').shadow$('button.go')"
+      "$('x-app')\n    .shadow$('x-panel[data-k=\"p\"]')\n    .shadow$('button.go')"
     );
     // A selector WebdriverIO would read as another strategy keeps its css prefix.
     expect(C.locatorExpr(inShadow({ shadowCss: 'id=x' }), 'webdriverio', 'typescript')).toBe(
-      "$('x-app').shadow$('x-panel[data-k=\"p\"]').shadow$('css selector:id=x')"
+      "$('x-app')\n    .shadow$('x-panel[data-k=\"p\"]')\n    .shadow$('css selector:id=x')"
     );
+    // One short hop stays on one line; a long one (a recorded structural path) breaks.
+    const oneHop = { ...plain, shadowHosts: ['x-app'], shadowCss: 'button.go' };
+    expect(C.locatorExpr(oneHop, 'cypress', 'javascript')).toBe("cy.get('x-app').shadow().find('button.go')");
+    expect(C.locatorExpr(oneHop, 'webdriverio', 'javascript')).toBe("$('x-app').shadow$('button.go')");
+    expect(C.locatorExpr(oneHop, 'selenium', 'java')).toBe(
+      'driver.findElement(By.cssSelector("x-app")).getShadowRoot().findElement(By.cssSelector("button.go"))'
+    );
+    const LONG_HOST =
+      'html > body > main > article > div:nth-of-type(2) > div:nth-of-type(1) > div:nth-of-type(1) > sl-checkbox';
+    const longHop = { ...plain, shadowHosts: [LONG_HOST], shadowCss: 'input' };
+    for (const [fw, lang] of ALL) {
+      if (fw === 'playwright') continue;
+      const lines = C.locatorExpr(longHop, fw, lang).split('\n');
+      expect(lines, `${fw}/${lang}`).toHaveLength(2);
+      expect(lines[0], `${fw}/${lang}`).toContain(LONG_HOST);
+      expect(lines[1], `${fw}/${lang}`).toMatch(
+        /^\s+\.(getShadowRoot|GetShadowRoot|shadow_root|shadow)\b|^\s+\.shadow\$/
+      );
+    }
     // No note: the element is reachable.
     for (const [fw, lang] of ALL) expect(click(inShadow(), fw, lang), `${fw}/${lang}`).not.toContain('NOTE');
   });
 
   it('enters frames first, and starts a chained child from the document', () => {
     const framed = { kind: 'frame', selector: '#f', index: 0, child: inShadow() };
-    expect(click(framed, 'selenium', 'python').split('\n')).toEqual([
-      'driver.switch_to.frame(driver.find_element(By.CSS_SELECTOR, "#f"))',
-      `${C.locatorExpr(inShadow(), 'selenium', 'python')}.click()`,
-      'driver.switch_to.default_content()',
-    ]);
+    expect(click(framed, 'selenium', 'python')).toBe(
+      [
+        'driver.switch_to.frame(driver.find_element(By.CSS_SELECTOR, "#f"))',
+        `${C.locatorExpr(inShadow(), 'selenium', 'python')}.click()`,
+        'driver.switch_to.default_content()',
+      ].join('\n')
+    );
     // One frame per line once the chain grows long.
     expect(C.locatorExpr(framed, 'cypress', 'javascript')).toBe(
       "cy.get('#f').its('0.contentDocument.body').should('not.be.empty').then(cy.wrap)\n" +
-        "  .find('x-app').shadow().find('x-panel[data-k=\"p\"]').shadow().find('button.go')"
+        "  .find('x-app')\n    .shadow().find('x-panel[data-k=\"p\"]')\n    .shadow().find('button.go')"
     );
     const chained = { kind: 'chain', parent: testid('row'), child: inShadow() };
     for (const [fw, lang] of ALL) {
@@ -886,19 +989,19 @@ describe('C3: open shadow DOM', () => {
 
   it('keeps the target own locator with a NOTE when shadowCss is missing', () => {
     const noCss = inShadow({ shadowCss: undefined });
-    const note = 'NOTE: this element is inside shadow DOM but no CSS selector was recorded for it there';
+    const note = 'NOTE: inside shadow DOM, but no CSS selector was recorded for it there';
     for (const [fw, lang] of ALL) {
       const code = click(noCss, fw, lang);
       if (fw === 'playwright') expect(code, `${fw}/${lang}`).not.toContain('NOTE');
       else {
         expect(code, `${fw}/${lang}`).toContain(note);
-        expect(code).toContain(click(role('button', 'Go'), fw, lang).split('\n').pop());
+        expect(code).toContain(click(plain, fw, lang).split('\n').pop());
       }
     }
     // Unusable shadowHosts are ignored entirely.
     for (const shadowHosts of [[], ['x-app', ''], ['x-app', 3], 'x-app', null]) {
       for (const [fw, lang] of ALL) {
-        expect(click(inShadow({ shadowHosts }), fw, lang)).toBe(click(role('button', 'Go'), fw, lang));
+        expect(click(inShadow({ shadowHosts }), fw, lang)).toBe(click(plain, fw, lang));
       }
     }
   });
@@ -909,49 +1012,50 @@ describe('C3: open shadow DOM', () => {
         { name: 'go', kind: 'button', target: inShadow() },
         { name: 'plain', kind: 'button', target: testid('p') },
         { name: 'lost', kind: 'button', target: inShadow({ shadowCss: '' }) },
+        { name: 'named', kind: 'button', target: { ...inShadow(), ...role('button', 'Go') } },
       ],
     };
     const ts = C.pageObject(model, 'selenium', 'typescript');
-    // 'lost' (no shadowCss) keeps its role locator: the helper, whose WebElementPromise is a value.
+    // 'lost' (no shadowCss) keeps its own locator; 'named' (a role) goes to the helper,
+    // whose WebElementPromise is a value.
     expect(ts).toContain(
       "import { By, WebElementPromise, type WebDriver, type WebElement } from 'selenium-webdriver';"
     );
     expect(ts).toContain(
-      "lost(): WebElementPromise {\n    return locatraFind(this.driver, 'role', 'button', 'Go');"
+      "lost(): WebElementPromise {\n    return this.driver.findElement(By.css('x-panel button'));"
+    );
+    expect(ts).toContain(
+      "named(): WebElementPromise {\n    return locatraFind(this.driver, 'role', 'button', 'Go');"
     );
     expect(ts).toContain(
       'async go(): Promise<WebElement> {\n    return (await (await (await (await this.driver.findElement('
     );
     expect(ts).toContain('plain(): WebElementPromise {');
-    expect(ts).toContain('  // NOTE: this element is inside shadow DOM');
+    expect(ts).toContain('  // NOTE: inside shadow DOM');
     const allShadow = C.pageObject({ elements: [model.elements[0]] }, 'selenium', 'javascript');
     expect(allShadow).toContain('async go() {');
     expect(C.pageObject({ elements: [model.elements[0]] }, 'selenium', 'typescript')).toContain(
       'import { By, type WebDriver, type WebElement }'
     );
     expect(C.pageObject(model, 'selenium', 'python')).toContain(
-      'return self.driver.find_element(By.CSS_SELECTOR, "x-app").shadow_root'
+      'return (self.driver.find_element(By.CSS_SELECTOR, "x-app")\n            .shadow_root'
     );
     expect(C.pageObject(model, 'selenium', 'java')).toContain(
-      'return driver.findElement(By.cssSelector("x-app")).getShadowRoot()'
+      'return driver.findElement(By.cssSelector("x-app"))\n            .getShadowRoot()'
     );
-    expect(C.pageObject(model, 'selenium', 'java')).toContain('// NOTE: this element is inside shadow DOM');
+    expect(C.pageObject(model, 'selenium', 'java')).toContain('// NOTE: inside shadow DOM');
     expect(C.pageObject(model, 'selenium', 'csharp')).toContain(
-      'public IWebElement Go => Driver.FindElement(By.CssSelector("x-app")).GetShadowRoot()'
+      'public IWebElement Go => Driver.FindElement(By.CssSelector("x-app"))\n        .GetShadowRoot()'
     );
-    expect(C.pageObject(model, 'selenium', 'csharp')).toContain('// NOTE: this element is inside shadow DOM');
+    expect(C.pageObject(model, 'selenium', 'csharp')).toContain('// NOTE: inside shadow DOM');
     expect(C.pageObject(model, 'cypress', 'typescript')).toContain(
-      "return cy.get('x-app').shadow().find('x-panel[data-k=\"p\"]').shadow().find('button.go');"
+      "return cy.get('x-app')\n      .shadow().find('x-panel[data-k=\"p\"]')\n      .shadow().find('button.go');"
     );
-    expect(C.pageObject(model, 'cypress', 'typescript')).toContain(
-      '// NOTE: this element is inside shadow DOM'
-    );
+    expect(C.pageObject(model, 'cypress', 'typescript')).toContain('// NOTE: inside shadow DOM');
     expect(C.pageObject(model, 'webdriverio', 'typescript')).toContain(
-      "return $('x-app').shadow$('x-panel[data-k=\"p\"]').shadow$('button.go');"
+      "return $('x-app')\n      .shadow$('x-panel[data-k=\"p\"]')\n      .shadow$('button.go');"
     );
-    expect(C.pageObject(model, 'webdriverio', 'typescript')).toContain(
-      '// NOTE: this element is inside shadow DOM'
-    );
+    expect(C.pageObject(model, 'webdriverio', 'typescript')).toContain('// NOTE: inside shadow DOM');
     // Playwright page objects need neither the walk nor the note.
     for (const lang of ['typescript', 'python', 'java', 'csharp']) {
       expect(C.pageObject(model, 'playwright', lang), lang).not.toMatch(/shadow|NOTE: this element/i);
@@ -994,6 +1098,143 @@ describe('C3: open shadow DOM', () => {
       const res = new Function('cy', `return ${C.locatorExpr(inShadow(), 'cypress', 'javascript')};`)(cy);
       expect(res.node.getAttribute('data-k')).toBe('go');
     });
+  });
+});
+
+// ════════════════════════════════════════════════════════════════════════════
+// A recorded step whose locator the recorder found for several elements (the
+// real-site run: Shoelace's `svg`, 103 matches) says so on the line before it, in
+// every framework and language — never silently, and never by adding .first().
+describe('non-unique recorded steps carry a NOTE', () => {
+  const svg = (o = {}) => ({ kind: 'css', value: 'svg', ...o });
+  const commentOf = (lang) => (lang === 'python' ? '# ' : '// ');
+  const MANY = 'NOTE: this locator matched 103 elements when recorded; make it unique before relying on it.';
+  const SOME = 'NOTE: this locator was not unique when recorded; make it unique before relying on it.';
+
+  it.each(ALL)('%s / %s: the NOTE heads the statement, which is otherwise unchanged', (fw, lang) => {
+    const step = { action: 'click', target: svg({ matchCount: 103, unique: false }) };
+    const plain = stmt({ action: 'click', target: svg() }, fw, lang);
+    expect(stmt(step, fw, lang)).toBe(`${commentOf(lang)}${MANY}\n${plain}`);
+    expect(stmt({ action: 'click', target: svg({ unique: false }) }, fw, lang)).toBe(
+      `${commentOf(lang)}${SOME}\n${plain}`
+    );
+    // Playwright keeps the strict locator: nothing picks one of the matches silently.
+    expect(stmt(step, fw, lang)).not.toMatch(/\.first\(|\.First\b|\.nth\(|nth=/i);
+    // Unique, a count of one or none at all: no NOTE.
+    for (const target of [
+      svg({ matchCount: 1, unique: true }),
+      svg({ unique: true }),
+      svg({ matchCount: 1 }),
+      svg(),
+    ]) {
+      expect(stmt({ action: 'click', target }, fw, lang), JSON.stringify(target)).toBe(plain);
+    }
+    // A count the recorder could not take (0, or a corrupt one) says nothing either.
+    for (const matchCount of [0, -3, 'many', 2.5]) {
+      expect(stmt({ action: 'click', target: svg({ matchCount }) }, fw, lang)).not.toContain(
+        'NOTE: this locator'
+      );
+    }
+    // Page-level steps never carry it.
+    expect(
+      stmt({ action: 'goto', value: 'https://e.example/', target: svg({ matchCount: 3 }) }, fw, lang)
+    ).not.toContain('NOTE');
+  });
+
+  it('reads the count through frame wrappers, and puts the NOTE before the frame switch', () => {
+    const inner = { kind: 'frame', selector: '#f', index: 0, child: svg({ matchCount: 4, unique: false }) };
+    const outer = { kind: 'frame', selector: '#f', index: 0, child: svg(), matchCount: 4, unique: false };
+    for (const [fw, lang] of ALL) {
+      for (const target of [inner, outer]) {
+        const lines = stmt({ action: 'click', target }, fw, lang).split('\n');
+        expect(lines[0], `${fw}/${lang}`).toBe(
+          `${commentOf(lang)}NOTE: this locator matched 4 elements when recorded; make it unique before relying on it.`
+        );
+      }
+    }
+  });
+
+  it('says nothing where a walk through shadow roots is rendered: it is unique by construction', () => {
+    const SL =
+      'html > body > main > article > div:nth-of-type(2) > div:nth-of-type(3) > div:nth-of-type(1) > sl-checkbox';
+    const target = svg({
+      shadowHosts: [SL, 'sl-icon[name="check"]'],
+      shadowCss: 'svg',
+      matchCount: 103,
+      unique: false,
+    });
+    for (const [fw, lang] of ALL) {
+      const code = stmt({ action: 'click', target }, fw, lang);
+      if (fw === 'playwright') expect(code.split('\n')[0], `${fw}/${lang}`).toBe(`${commentOf(lang)}${MANY}`);
+      else expect(code, `${fw}/${lang}`).not.toContain('NOTE');
+    }
+    // A role / label / text target in shadow DOM goes to the helper, which matches as
+    // Playwright does: the count still applies.
+    const named = role('button', 'Copy', {
+      shadowHosts: [SL],
+      shadowCss: 'button',
+      matchCount: 6,
+      unique: false,
+    });
+    for (const [fw, lang] of ALL) {
+      expect(stmt({ action: 'click', target: named }, fw, lang), `${fw}/${lang}`).toContain(
+        'matched 6 elements'
+      );
+    }
+  });
+
+  it('says nothing when an alternative (verified unique) is rendered instead', () => {
+    const step = {
+      action: 'click',
+      target: role('button', 'Save', { matchCount: 3, unique: false }),
+      altTargets: [{ kind: 'id', value: 'save' }],
+    };
+    for (const [fw, lang] of ALL) {
+      const code = stmt(step, fw, lang);
+      if (fw === 'playwright') expect(code, `${fw}/${lang}`).toContain('matched 3 elements');
+      else expect(code, `${fw}/${lang}`).not.toContain('NOTE');
+    }
+  });
+
+  it('replaces the "no accessible name" NOTE when the count is known', () => {
+    const counted = { action: 'click', target: role('checkbox', null, { matchCount: 7, unique: false }) };
+    const unknown = { action: 'click', target: role('checkbox') };
+    for (const [fw, lang] of ALL) {
+      const code = stmt(counted, fw, lang);
+      expect(code.match(/NOTE:/g), `${fw}/${lang}`).toHaveLength(1);
+      expect(code, `${fw}/${lang}`).toContain('matched 7 elements when recorded');
+      if (fw !== 'playwright')
+        expect(stmt(unknown, fw, lang), `${fw}/${lang}`).toContain('has no accessible name');
+    }
+  });
+
+  it('appears in whole tests, literal and test-data, and they still parse', () => {
+    const steps = [
+      { action: 'goto', value: 'https://shoelace.example/' },
+      { action: 'click', target: svg({ matchCount: 103, unique: false }) },
+      { action: 'fill', target: { kind: 'css', value: 'input', matchCount: 2, unique: false }, value: 'Ada' },
+    ];
+    const dir = mkdtempSync(join(tmpdir(), 'locatra-nonunique-'));
+    try {
+      for (const [fw, lang] of ALL) {
+        for (const opts of [undefined, { variables: true }]) {
+          const code = C.testScript(steps, fw, lang, opts);
+          expect(code, `${fw}/${lang}`).toContain('matched 103 elements when recorded');
+          expect(code, `${fw}/${lang}`).toContain('matched 2 elements when recorded');
+          if (lang === 'java' || lang === 'csharp') continue; // compiled in their own suites
+          const ext = lang === 'python' ? 'py' : fw === 'selenium' ? 'cjs' : 'mjs';
+          const file = join(dir, `${fw}-${lang}.${ext}`);
+          writeFileSync(file, lang === 'typescript' ? stripTypeScriptTypes(code) : code);
+          const args =
+            lang === 'python'
+              ? ['python3', ['-I', '-c', 'import ast, sys; ast.parse(open(sys.argv[1]).read())', file]]
+              : [process.execPath, ['--check', file]];
+          expect(() => execFileSync(args[0], args[1], { stdio: 'pipe' }), `${fw}/${lang}`).not.toThrow();
+        }
+      }
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
   });
 });
 

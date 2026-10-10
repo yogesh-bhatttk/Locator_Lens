@@ -3,8 +3,9 @@
 // both as JUnit 5 tests. Registers with LLCodegen (codegen.js must load first) and
 // reuses its shared helpers, so every locator selects exactly what the JS/TS/Python
 // output of the same framework selects — only the host-language syntax differs.
-// A Selenium role / label / text target calls Locatra.find(), a static nested class
-// declared once per file (C9.4).
+// A Selenium role / label / text target calls Locatra.find(), and a text assertion
+// reads Locatra.text(el): members of a static nested class declared once per file,
+// holding only the members the file calls (C9.4).
 //
 // Java specifics handled here:
 //   * String literals are double-quoted. Control characters become octal escapes and
@@ -99,7 +100,7 @@
   function withNotes(notes, stmt) { return notes.length ? notes.join('\n') + '\n' + stmt : stmt; }
 
   function ambiguousNote(target) {
-    var notes = I.hasAmbiguousRole(target)
+    var notes = I.roleNote(target)
       ? [comment('NOTE: this role locator has no accessible name and may match several elements; the first match is used.')]
       : [];
     if (I.lacksShadowCss(target)) notes.push(comment(I.SHADOW_NOTE));
@@ -201,10 +202,11 @@
   }
 
   /** Re-point an expression rooted at `page.` at the receiver before it. */
+  // A chain longer than 120 characters continues on its own line.
   function continueFrom(parent, child) {
     if (!parent) return child;
     if (!/^page\./.test(child)) return child;
-    return parent + child.replace(/^page\./, '.');
+    return parent + (parent.length + child.length > 120 ? '\n    ' : '') + child.replace(/^page\./, '.');
   }
 
   function pwChainExpr(t, recv, pageType) {
@@ -249,7 +251,7 @@
       toBeEnabled: 'isEnabled()',
       toBeChecked: String(v) === 'false' ? 'not().isChecked()' : 'isChecked()'
     };
-    return 'assertThat(' + loc + ').' + (map[t] || map.toBeVisible) + ';';
+    return I.callOn('assertThat(' + loc + ')', '.' + (map[t] || map.toBeVisible) + ';');
   }
 
   function pathsArg(files) {
@@ -269,13 +271,13 @@
     switch (a) {
       case 'assert': return pwAssert(step, loc);
       case 'click': case 'hover': case 'dblclick': case 'check': case 'uncheck':
-        return loc + '.' + a + '();';
+        return I.callOn(loc, '.' + a + '();');
       // fill() also sets range/color/date inputs, so inputType needs no special case.
-      case 'fill': return loc + '.fill(' + valueExpr(step) + ');';
-      case 'upload': return uploadNote() + '\n' + loc + '.setInputFiles(' + pathsArg(I.uploadFiles(step.value)) + ');';
+      case 'fill': return I.callOn(loc, '.fill(' + valueExpr(step) + ');');
+      case 'upload': return uploadNote() + '\n' + I.callOn(loc, '.setInputFiles(' + pathsArg(I.uploadFiles(step.value)) + ');');
       case 'selectOption': {
         var many = I.multiValues(step);
-        return loc + '.selectOption(' + (many ? 'new String[] {' + many.map(jq).join(', ') + '}' : valueExpr(step)) + ');';
+        return I.callOn(loc, '.selectOption(' + (many ? 'new String[] {' + many.map(jq).join(', ') + '}' : valueExpr(step)) + ');');
       }
       default: return todo('unsupported step "' + I.commentSafe(a) + '"');
     }
@@ -318,8 +320,9 @@
   // Selenium has no getByRole / getByLabel / getByText: a role, label or text
   // target calls Locatra.find(root, kind, value[, name[, exact[, level, nth]]]), a
   // static nested class declared once per file (the in-page matcher every target
-  // runs, codegen.js MATCH_JS). It waits up to the driver's implicit wait, as
-  // findElement does, and throws when several elements match.
+  // runs, codegen.js MATCH_JS, compacted and concatenated from literals). It waits up
+  // to the driver's implicit wait, as findElement does, and throws when several
+  // elements match.
   function helperCall(spec, root) {
     var args = [root, jq(spec.kind), jq(spec.value)];
     var full = spec.level || spec.nth >= 0;
@@ -329,74 +332,101 @@
     return 'Locatra.find(' + args.join(', ') + ')';
   }
 
-  var HELPER_CLASS = [
-    '// Locatra: the one element a role / label / text locator matches, found the way Playwright\'s',
-    '// getByRole / getByLabel / getByText find it (Selenium has none of them). It waits up to the',
-    '// driver\'s implicit wait, as findElement does, and fails when several elements match.',
-    'static final class Locatra {',
-    '    private static final String JS = String.join("\\n",',
-    '@@JS@@);',
+  // The class is a member of the test class / page object (indented once there), so
+  // the script's literals start 8 columns in: `+ "…"` and the closing `;` leave
+  // HELPER_WIDTH - 13 for the script, counted as escaped.
+  var JS_WIDTH = I.HELPER_WIDTH - 13;
+
+  var FIND_MEMBERS = [
     '',
-    '    private Locatra() {',
-    '    }',
+    'static WebElement find(SearchContext root, String kind, String value) {',
+    '    return find(root, kind, value, null, false, 0, -1);',
+    '}',
     '',
-    '    static WebElement find(SearchContext root, String kind, String value) {',
-    '        return find(root, kind, value, null, false, 0, -1);',
-    '    }',
+    'static WebElement find(SearchContext root, String kind, String value, String name) {',
+    '    return find(root, kind, value, name, false, 0, -1);',
+    '}',
     '',
-    '    static WebElement find(SearchContext root, String kind, String value, String name) {',
-    '        return find(root, kind, value, name, false, 0, -1);',
-    '    }',
+    'static WebElement find(SearchContext root, String kind, String value, String name, boolean exact) {',
+    '    return find(root, kind, value, name, exact, 0, -1);',
+    '}',
     '',
-    '    static WebElement find(SearchContext root, String kind, String value, String name, boolean exact) {',
-    '        return find(root, kind, value, name, exact, 0, -1);',
-    '    }',
-    '',
-    '    static WebElement find(SearchContext root, String kind, String value, String name, boolean exact, int level, int nth) {',
-    '        WebDriver driver = root instanceof WrapsDriver ? ((WrapsDriver) root).getWrappedDriver() : (WebDriver) root;',
-    '        Object scope = root instanceof WebDriver ? null : root;',
-    '        String what = kind + " \\"" + value + "\\"" + (name != null ? " named \\"" + name + "\\"" : "") + (exact ? " (exact)" : "");',
-    '        long end = System.nanoTime() + driver.manage().timeouts().getImplicitWaitTimeout().toNanos();',
-    '        while (true) {',
-    '            List<WebElement> found = new ArrayList<>();',
-    '            Object result = ((JavascriptExecutor) driver).executeScript(JS, kind, value, name, exact, level, scope);',
-    '            if (result instanceof List<?>) {',
-    '                for (Object item : (List<?>) result) found.add((WebElement) item);',
+    '// Waits up to the implicit wait, as findElement does; several matches are an error.',
+    'static WebElement find(',
+    '        SearchContext root, String kind, String value, String name, boolean exact, int level, int nth) {',
+    '    WebDriver driver = root instanceof WrapsDriver',
+    '        ? ((WrapsDriver) root).getWrappedDriver() : (WebDriver) root;',
+    '    Object scope = root instanceof WebDriver ? null : root;',
+    '    String what = kind + " \\"" + value + "\\"" + (name != null ? " named \\"" + name + "\\"" : "")',
+    '        + (exact ? " (exact)" : "");',
+    '    long end = System.nanoTime() + driver.manage().timeouts().getImplicitWaitTimeout().toNanos();',
+    '    while (true) {',
+    '        List<WebElement> found = new ArrayList<>();',
+    '        Object result = ((JavascriptExecutor) driver).executeScript(JS, kind, value, name, exact, level, scope);',
+    '        if (result instanceof List<?>) {',
+    '            for (Object item : (List<?>) result) found.add((WebElement) item);',
+    '        }',
+    '        if (found.size() > Math.max(nth, 0)) {',
+    '            if (nth < 0 && found.size() > 1) {',
+    '                String count = "Locatra: " + found.size() + " elements match ";',
+    '                throw new WebDriverException(count + what + "; expected exactly one");',
     '            }',
-    '            if (found.size() > Math.max(nth, 0)) {',
-    '                if (nth < 0 && found.size() > 1) {',
-    '                    throw new WebDriverException("Locatra: " + found.size() + " elements match " + what + "; expected exactly one");',
-    '                }',
-    '                return found.get(Math.max(nth, 0));',
-    '            }',
-    '            if (System.nanoTime() - end >= 0) throw new NoSuchElementException("Locatra: no element matches " + what);',
-    '            try {',
-    '                Thread.sleep(100);',
-    '            } catch (InterruptedException e) {',
-    '                Thread.currentThread().interrupt();',
-    '                throw new WebDriverException(e);',
-    '            }',
+    '            return found.get(Math.max(nth, 0));',
+    '        }',
+    '        if (System.nanoTime() - end >= 0) {',
+    '            throw new NoSuchElementException("Locatra: no element matches " + what);',
+    '        }',
+    '        try {',
+    '            Thread.sleep(100);',
+    '        } catch (InterruptedException e) {',
+    '            Thread.currentThread().interrupt();',
+    '            throw new WebDriverException(e);',
     '        }',
     '    }',
     '}'
-  ].join('\n');
+  ];
+
+  // Text is compared as rendered (getText()), normalised like the recording. (?U)
+  // makes \s match Unicode white space (e.g. no-break spaces), as JavaScript's \s
+  // does; soft hyphens and zero-width spaces are dropped, as the recorder drops them.
+  var TEXT_MEMBER = [
+    '',
+    '// The text as rendered: soft hyphens and zero-width spaces dropped, white space collapsed.',
+    'static String text(WebElement el) {',
+    '    return el.getText().replaceAll("[\\\\u00ad\\\\u200b]", "").replaceAll("(?U)\\\\s+", " ").trim();',
+    '}'
+  ];
+
+  /** The Locatra class with the members `code` calls: find() (and the script it runs), text(). */
+  function helperClass(code) {
+    var find = I.uses(code, 'Locatra.find');
+    var out = ['// ' + (find ? I.HELPER_BANNER : I.TEXT_BANNER), 'static final class Locatra {'];
+    if (find) {
+      var cost = function (c) { return c === '\\' || c === '"' ? 2 : 1; };
+      var lines = I.matchScriptChunks(JS_WIDTH, cost).map(function (l, k) { return '    ' + (k ? '+ ' : '  ') + jq(l); });
+      out.push('    private static final String JS =', lines.join('\n') + ';', '');
+    }
+    out.push('    private Locatra() {', '    }');
+    if (find) out.push(I.indent(FIND_MEMBERS, '    '));
+    if (I.uses(code, 'Locatra.text')) out.push(I.indent(TEXT_MEMBER, '    '));
+    out.push('}');
+    return out.join('\n');
+  }
 
   var FRAME_JS = 'LOCATRA_FRAME_JS';
+
+  /** A page script as a constant: literals concatenated, each line within HELPER_WIDTH once indented. */
+  function constSource(name, note, js) {
+    var parts = I.literalLines(js, I.HELPER_WIDTH - 13, jq);
+    return '// ' + note + '\nprivate static final String ' + name + ' =\n    ' + parts.join('\n    + ') + ';';
+  }
 
   /** The class members code needs (the frame script, the Locatra class), in order. */
   function selHelpers(code) {
     var out = [];
-    if (I.uses(code, FRAME_JS)) {
-      out.push('// ' + I.FRAME_JS_NOTE + '\nprivate static final String ' + FRAME_JS + ' = ' + jq(I.DEEP_IFRAME_JS) + ';');
-    }
-    if (I.uses(code, I.SET_VALUE_NAME)) {
-      out.push('// ' + I.SET_VALUE_NOTE + '\nprivate static final String ' + I.SET_VALUE_NAME + ' = ' + jq(I.SET_VALUE_JS) + ';');
-    }
-    if (I.uses(code, 'Locatra')) {
-      // Every line of the script is one literal, joined with line breaks.
-      var lines = I.MATCH_JS.split('\n').map(function (l) { return '        ' + jq(l); }).join(',\n');
-      out.push(HELPER_CLASS.replace('@@JS@@', function () { return lines; }));
-    }
+    if (I.uses(code, FRAME_JS)) out.push(constSource(FRAME_JS, I.FRAME_JS_NOTE, I.DEEP_IFRAME_JS));
+    if (I.uses(code, I.SET_VALUE_NAME)) out.push(constSource(I.SET_VALUE_NAME, I.SET_VALUE_NOTE, I.SET_VALUE_JS));
+    if (I.uses(code, 'Locatra')) out.push(helperClass(code));
     return out;
   }
 
@@ -410,12 +440,12 @@
   function selExpr(t, rel, root) {
     if (!t) return '';
     if (t.kind === 'frame') return selExpr(I.unwrapFrames(t).inner, false);
-    var sh = I.shadowOf(t);
+    var sh = I.shadowWalk(t);
     if (sh) {
       var el = selFind('css', sh.hosts[0]);
-      var hops = sh.hosts.slice(1).concat(sh.css);
-      hops.forEach(function (sel) {
-        el += hopBreak(hops.length) + '.getShadowRoot().findElement(By.cssSelector(' + jq(sel) + '))';
+      var br = I.shadowBreak(sh) ? '\n    ' : '';
+      sh.hosts.slice(1).concat(sh.css).forEach(function (sel) {
+        el += br + '.getShadowRoot().findElement(By.cssSelector(' + jq(sel) + '))';
       });
       return el;
     }
@@ -423,7 +453,7 @@
       var parent = selExpr(t.parent, rel, root);
       if (!t.child) return parent;
       // A child reached through shadow roots starts from the document.
-      if (!parent || I.shadowOf(t.child)) return selExpr(t.child, true);
+      if (!parent || I.shadowWalk(t.child)) return selExpr(t.child, true);
       return selExpr(t.child, true, parent);
     }
     var spec = I.helperSpec(t);
@@ -442,14 +472,15 @@
 
   // An <iframe> inside shadow DOM is reached host by host: WebDriver searches a
   // shadow root with CSS only, one tree at a time.
-  // More than two hops go one per line.
-  function hopBreak(hops) { return hops > 2 ? '\n    ' : ''; }
+  // Two hops or more go one per line.
+  /** A line break before each hop of an <iframe>'s shadowPath once it is long. */
+  function hopBreak(path) { return path.length > 2 || I.pathBreak(path) ? '\n    ' : ''; }
 
   function selFrameSwitch(frame) {
     if (frame.shadowPath) {
       var el = selFind('css', frame.shadowPath[0]);
       for (var i = 1; i < frame.shadowPath.length; i++) {
-        el += hopBreak(frame.shadowPath.length - 1) + '.getShadowRoot().findElement(By.cssSelector(' + jq(frame.shadowPath[i]) + '))';
+        el += hopBreak(frame.shadowPath) + '.getShadowRoot().findElement(By.cssSelector(' + jq(frame.shadowPath[i]) + '))';
       }
       return 'driver.switchTo().frame(' + el + ');';
     }
@@ -497,18 +528,16 @@
     var h = I.vpH(step);
     return '{\n' +
       '    JavascriptExecutor js = (JavascriptExecutor) driver;\n' +
-      '    int width = ((Number) js.executeScript(' + jq('return ' + w + ' + window.outerWidth - window.innerWidth;') + ')).intValue();\n' +
-      '    int height = ((Number) js.executeScript(' + jq('return ' + h + ' + window.outerHeight - window.innerHeight;') + ')).intValue();\n' +
+      '    int width = ((Number) js.executeScript(\n' +
+      '        ' + jq('return ' + w + ' + window.outerWidth - window.innerWidth;') + ')).intValue();\n' +
+      '    int height = ((Number) js.executeScript(\n' +
+      '        ' + jq('return ' + h + ' + window.outerHeight - window.innerHeight;') + ')).intValue();\n' +
       '    driver.manage().window().setSize(new Dimension(width, height));\n' +
       '}';
   }
 
-  // Normalised visible text, compared like Playwright's toHaveText. (?U) makes \s
-  // match Unicode white space (e.g. no-break spaces), as JavaScript's \s does; soft
-  // hyphens and zero-width spaces are dropped, as the recorder drops them.
-  function selText(loc) {
-    return loc + '.getText().replaceAll("[\\\\u00ad\\\\u200b]", "").replaceAll("(?U)\\\\s+", " ").trim()';
-  }
+  // Normalised visible text, compared like Playwright's toHaveText (Locatra.text()).
+  function selText(loc) { return 'Locatra.text(' + loc + ')'; }
 
   function selAssert(step, loc) {
     var t = step.assertType || 'toBeVisible';
@@ -831,6 +860,7 @@
     wrapScript: pwWrap,
     // LLCodegen's own TODOs (unknown action, no locator) come through here too.
     todo: function (text) { return todo(text); },
+    comment: function (text) { return comment(text); },
     pageObject: function (model) { return poPlaywright(model || {}); }
   });
 
@@ -844,6 +874,7 @@
     helpers: function (code) { return selHelpers(code); },
     // LLCodegen's own TODOs (unknown action, no locator) come through here too.
     todo: function (text) { return todo(text); },
+    comment: function (text) { return comment(text); },
     pageObject: function (model) { return poSelenium(model || {}); }
   });
 })(typeof window !== 'undefined' ? window : globalThis);

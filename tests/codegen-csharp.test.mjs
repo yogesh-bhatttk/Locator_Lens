@@ -15,7 +15,7 @@ import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { csproj, runsettings, chromeWrapper, scaffold, PACKAGES } from '../scripts/e2e/runners/csharp.mjs';
 import { dotnetEnv, findDotnet } from '../scripts/e2e/setup-csharp.mjs';
 import * as CORPUS from './codegen-corpus.mjs';
-import { helperCallSpan } from './codegen-helper-calls.mjs';
+import { declaredString, helperCallSpan } from './codegen-helper-calls.mjs';
 
 let C;
 let X;
@@ -353,7 +353,8 @@ describe('Playwright for .NET statements', () => {
     const out = pw({ action: 'fill', target: t, value: 'hunter2', sensitive: true, secretName: 'MY_SECRET' });
     expect(out).toBe(`await ${L}.FillAsync(Environment.GetEnvironmentVariable("MY_SECRET") ?? "");`);
     expect(pw({ action: 'fill', target: t, sensitive: true, secretName: 'bad name;' })).toBe(
-      `await ${L}.FillAsync(Environment.GetEnvironmentVariable("LOCATRA_PASSWORD") ?? "");`
+      // Past STMT_WIDTH the action continues on its own line.
+      `await ${L}\n    .FillAsync(Environment.GetEnvironmentVariable("LOCATRA_PASSWORD") ?? "");`
     );
   });
 
@@ -379,7 +380,7 @@ describe('Playwright for .NET statements', () => {
     expect(a(undefined)).toBe(`await Expect(${L}).ToBeVisibleAsync();`);
     expect(a('toBeSomethingNew')).toBe(`await Expect(${L}).ToBeVisibleAsync();`);
     expect(a('toHaveText', 'Ada  Lovelace')).toBe(
-      `await Expect(${L}).ToHaveTextAsync("Ada  Lovelace", new() { UseInnerText = true });`
+      `await Expect(${L})\n    .ToHaveTextAsync("Ada  Lovelace", new() { UseInnerText = true });`
     );
     expect(a('toContainText', 'Ada')).toBe(
       `await Expect(${L}).ToContainTextAsync("Ada", new() { UseInnerText = true });`
@@ -664,7 +665,7 @@ describe('Selenium for C# statements', () => {
 
   it('renders every assertion with NUnit constraints, normalising text like Playwright', () => {
     const a = (assertType, value) => sel({ action: 'assert', assertType, target: t, value });
-    const TEXT = `Regex.Replace(Regex.Replace(${L}.Text, @"[\\u00AD\\u200B]", ""), @"\\s+", " ").Trim()`;
+    const TEXT = `Locatra.Text(${L})`;
     expect(a('toBeVisible')).toBe(`Assert.That(${L}.Displayed, Is.True);`);
     expect(a(undefined)).toBe(`Assert.That(${L}.Displayed, Is.True);`);
     expect(a('toBeSomethingNew')).toBe(`Assert.That(${L}.Displayed, Is.True);`);
@@ -751,16 +752,18 @@ describe('Selenium for C# frames', () => {
       shadowPath: ['#shell', 'x-pay', 'iframe:nth-of-type(2)'],
       child: inner,
     };
+    // Two hops or more go one per line.
     expect(fill(SHADOW)).toBe(
-      'driver.SwitchTo().Frame(driver.FindElement(By.CssSelector("#shell")).GetShadowRoot()' +
-        '.FindElement(By.CssSelector("x-pay")).GetShadowRoot().FindElement(By.CssSelector("iframe:nth-of-type(2)")));\n' +
+      'driver.SwitchTo().Frame(driver.FindElement(By.CssSelector("#shell"))\n' +
+        '    .GetShadowRoot().FindElement(By.CssSelector("x-pay"))\n' +
+        '    .GetShadowRoot().FindElement(By.CssSelector("iframe:nth-of-type(2)")));\n' +
         FILL +
         '\ndriver.SwitchTo().DefaultContent();'
     );
     const nested = { kind: 'frame', selector: '#outer', index: 0, child: SHADOW };
     const lines = fill(nested).split('\n');
     expect(lines[0]).toBe('driver.SwitchTo().Frame(driver.FindElement(By.CssSelector("#outer")));');
-    expect(lines[1]).toContain('.GetShadowRoot().FindElement(By.CssSelector("x-pay"))');
+    expect(lines.join('\n')).toContain('.GetShadowRoot().FindElement(By.CssSelector("x-pay"))');
     expect(lines[lines.length - 1]).toBe('driver.SwitchTo().DefaultContent();');
     expect(lines.filter((l) => l.includes('SwitchTo().Frame('))).toHaveLength(2);
     // Every hop is quoted for C#.
@@ -988,13 +991,16 @@ describe('test file scaffolds', () => {
     );
     const pwCode = C.testScript(flow.actions, 'playwright', 'csharp');
     expect(pwCode).toContain(
-      '        await Page.FrameLocator("#payment-frame").GetByRole(AriaRole.Button, new() { Name = "Pay now" }).ClickAsync();\n'
+      '        await Page.FrameLocator("#payment-frame").GetByRole(AriaRole.Button, new() { Name = "Pay now" })\n' +
+        '            .ClickAsync();\n'
     );
     expect(pwCode).toContain(
-      '        await Page.GetByLabel("Password", new() { Exact = true }).FillAsync(Environment.GetEnvironmentVariable("LOCATRA_PASSWORD") ?? "");\n'
+      '        await Page.GetByLabel("Password", new() { Exact = true })\n' +
+        '            .FillAsync(Environment.GetEnvironmentVariable("LOCATRA_PASSWORD") ?? "");\n'
     );
     expect(pwCode).toContain(
-      '        await Expect(Page.Locator("table").GetByText("Refactoring", new() { Exact = true })).ToBeVisibleAsync();\n'
+      '        await Expect(Page.Locator("table").GetByText("Refactoring", new() { Exact = true }))\n' +
+        '            .ToBeVisibleAsync();\n'
     );
     expect(pwCode).toContain('        await Expect(Page.Locator("#save-details")).Not.ToBeCheckedAsync();\n');
     expect(pwCode).toContain(
@@ -1386,9 +1392,8 @@ describe('page objects: every element kind and target', () => {
         '            Driver.SwitchTo().Frame((IWebElement)((IJavaScriptExecutor)Driver).ExecuteScript(LocatraFrameJs, 2)!);\n' +
         '            return Locatra.Find(Driver, "text", "Go", exact: true);'
     );
-    expect(code).toContain(
-      `    private const string LocatraFrameJs = ${JSON.stringify(C._internals.DEEP_IFRAME_JS)};`
-    );
+    expect(code).toContain('    private const string LocatraFrameJs =\n');
+    expect(declaredString(code, 'LocatraFrameJs', 'csharp')).toBe(C._internals.DEEP_IFRAME_JS);
     expect(code).toContain(
       '            Driver.SwitchTo().DefaultContent();\n            Driver.SwitchTo().Frame(Driver.FindElement(By.CssSelector("#pay")));\n'
     );
@@ -1401,7 +1406,8 @@ describe('page objects: every element kind and target', () => {
     expect(code).toContain(
       '    public void FillQtyInput(string value)\n    {\n        ((IJavaScriptExecutor)Driver).ExecuteScript(LocatraSetValueJs, QtyInput, value);\n    }'
     );
-    expect(code).toContain(`    private const string LocatraSetValueJs = ${X.q(C._internals.SET_VALUE_JS)};`);
+    expect(code).toContain('    private const string LocatraSetValueJs =\n');
+    expect(declaredString(code, 'LocatraSetValueJs', 'csharp')).toBe(C._internals.SET_VALUE_JS);
     expect(code).toContain(
       '    public void SelectCountrySelect(string value)\n    {\n        new SelectElement(CountrySelect).SelectByText(value);\n    }'
     );
@@ -1757,6 +1763,14 @@ describe.skipIf(!DOTNET)('dotnet build of the generated code', () => {
       add(C.testScript(CORPUS.STEPS, fw, 'csharp'), fw + 'Corpus');
       add(C.testScript(CORPUS.STEPS, fw, 'csharp', { variables: true }), fw + 'CorpusData');
       add(C.pageObject({ ...CORPUS.MODEL, className: 'Corpus' }, fw, 'csharp'), fw + 'CorpusPage');
+      // A Locatra class holding Text() alone.
+      const text = {
+        action: 'assert',
+        assertType: 'toHaveText',
+        target: { kind: 'id', value: 'x' },
+        value: 'Hi',
+      };
+      add(C.testScript([text], fw, 'csharp'), fw + 'TextOnly');
     }
     // The literals, read back by the compiler: one line of UTF-16 code units each.
     files.push(

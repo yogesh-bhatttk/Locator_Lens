@@ -6,12 +6,18 @@
 // engine made the exported test act on something other than what the panel showed,
 // so it runs here, in jsdom, against the engine on every Playwright-verified table
 // the engine suites keep (roles, accessible names, match counts), read from those
-// files so the two can never drift apart.
+// files so the two can never drift apart. Files embed the matcher compacted (codegen.js
+// compactPieces); the readable source, the compact script and the compact Cypress
+// declaration all run on every row here, and the compact one is proven the same
+// program (one syntax tree, its locals renamed).
 import { readFileSync, readdirSync } from 'node:fs';
+import { createRequire } from 'node:module';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import vm from 'node:vm';
 import { beforeAll, describe, expect, it } from 'vitest';
+
+import { declaredString } from './codegen-helper-calls.mjs';
 
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 
@@ -20,29 +26,47 @@ let C;
 let I;
 /** The matcher exactly as WebDriver runs it: executeScript(MATCH_JS, …args). */
 let matchScript;
-/** The matcher exactly as a Cypress spec declares it. */
+/** The matcher as written (codegen.js MATCH_SRC, readable). */
 let matchFunction;
+/** The matcher exactly as a Cypress spec declares it (compact). */
+let cypressFunction;
 beforeAll(async () => {
   vm.runInThisContext(readFileSync(join(ROOT, 'src/content-locator-engine.js'), 'utf8'), {
     filename: 'src/content-locator-engine.js',
   });
   E = globalThis.__LocatorLensEngine;
   await import('../src/codegen.js');
+  await import('../src/codegen-java.js');
+  await import('../src/codegen-csharp.js');
   await import('../src/codegen-wdio.js');
   C = globalThis.LLCodegen;
   I = C._internals;
   matchScript = new Function(I.MATCH_JS);
   matchFunction = new Function(`${I.tsOnly(I.MATCH_SRC, 'javascript')}\nreturn locatraMatch;`)();
+  cypressFunction = new Function(`${cypressMatcher()}\nreturn locatraMatch;`)();
   // jsdom has no pseudo-element styles (it logs "not implemented" and answers with
   // the element's own style); the engine skips them there, and so does this.
   const real = window.getComputedStyle.bind(window);
   window.getComputedStyle = (el, pseudo) => (pseudo ? null : real(el));
 });
 
+/** The locatraMatch declaration a Cypress JavaScript spec carries, as written there. */
+function cypressMatcher() {
+  const spec = C.testScript(
+    [{ action: 'click', target: { kind: 'role', role: 'button' } }],
+    'cypress',
+    'javascript'
+  );
+  const start = spec.indexOf('\nfunction locatraMatch(') + 1;
+  return spec.slice(start, spec.indexOf('\n\n', start));
+}
+
 function match(kind, value, name = null, exact = false, level = 0, scope = null) {
   const a = matchScript(kind, value, name, exact, level, scope);
   const b = matchFunction(kind, value, name, exact, level, scope || document);
+  const c = cypressFunction(kind, value, name, exact, level, scope || document);
   expect(b).toEqual(a);
+  expect(c).toEqual(a);
   return a;
 }
 
@@ -343,12 +367,36 @@ describe('matching details', () => {
     }
   });
 
-  it('embeds verbatim in every host language (String.raw, a raw Python string, @"…", one literal per line)', () => {
-    // A backtick or "${" would end / interpolate the JS String.raw template, '"""' the
-    // Python raw string; plain ASCII keeps javac's -encoding US-ASCII happy.
-    expect(I.MATCH_JS).not.toMatch(/`|\$\{|"""/);
+  it('embeds as one script in every host language, every line within 120 columns', () => {
+    // A backtick or "${" would end / interpolate the JS String.raw template; plain
+    // ASCII keeps javac's -encoding US-ASCII happy.
+    expect(I.MATCH_JS).not.toMatch(/`|\$\{/);
     expect(I.MATCH_JS).toMatch(/^[\x20-\x7e\n]*$/);
-    expect(I.MATCH_JS.endsWith('\\')).toBe(false);
+    const line = I.MATCH_JS.replace(/\n/g, '');
+    expect(line).toBe(I.matchSource('javascript') + I.MATCH_RUN);
+    const target = { kind: 'role', role: 'button', name: 'Go' };
+    // (A String.raw template starts on the line after its backtick.)
+    const embedded = [
+      ['selenium', 'javascript', 'LOCATRA_JS', `\n${I.MATCH_JS}`],
+      ['selenium', 'typescript', 'LOCATRA_JS', `\n${I.MATCH_JS}`],
+      ['webdriverio', 'typescript', 'LOCATRA_JS', `\n${I.MATCH_JS}`],
+      ['selenium', 'python', 'LOCATRA_JS', line],
+      ['selenium', 'java', 'JS', line],
+      ['selenium', 'csharp', 'Js', line],
+    ];
+    for (const [fw, lang, name, want] of embedded) {
+      const files = [
+        C.testScript([{ action: 'click', target }], fw, lang),
+        C.pageObject({ elements: [{ name: 'go', kind: 'button', target }] }, fw, lang),
+      ];
+      for (const code of files) {
+        expect(declaredString(code, name, lang), `${fw}/${lang}`).toBe(want);
+        for (const l of code.split('\n')) expect(l.length, `${fw}/${lang}: ${l}`).toBeLessThanOrEqual(120);
+      }
+    }
+    // The line breaks fall where JavaScript reads the same program either way.
+    expect(shape(parse(I.MATCH_JS))).toBe(shape(parse(line)));
+    expect(shape(parse(cypressMatcher()))).toBe(shape(parse(I.matchSource('javascript'))));
   });
 
   it('rejects an unknown kind loudly', () => {
@@ -356,5 +404,114 @@ describe('matching details', () => {
     expect(() => matchScript('nope', 'x', null, false, 0, null)).toThrow(
       'Locatra: unknown locator kind nope'
     );
+  });
+});
+
+// ── the compact matcher is the readable one ────────────────────────────────────
+// ESLint's own parser and scope analysis (installed with ESLint) read both programs.
+const fromEslint = createRequire(join(ROOT, 'node_modules/eslint/package.json'));
+const espree = fromEslint('espree');
+const eslintScope = fromEslint('eslint-scope');
+// (A WebDriver script is a function body: it may return.)
+const parse = (src) =>
+  espree.parse(src, { ecmaVersion: 2022, range: true, ecmaFeatures: { globalReturn: true } });
+const POSITION = new Set(['start', 'end', 'range', 'loc', 'raw']);
+/** A syntax tree without positions or raw spellings: what the program says, not its layout. */
+const shape = (ast) => JSON.stringify(ast, (k, v) => (POSITION.has(k) ? undefined : v));
+
+describe('the compact matcher is the readable program, compacted', () => {
+  it('has the syntax tree of MATCH_SRC with each local variable renamed, and nothing else', () => {
+    const readable = I.tsOnly(I.MATCH_SRC, 'javascript');
+    const names = I.matchNames();
+    const ast = parse(readable);
+    const scopes = eslintScope.analyze(ast, { ecmaVersion: 2022 });
+    // Rename every declaration and reference of each renamed variable (by scope
+    // analysis, so a property, a key or a global of the same spelling stays).
+    const edits = new Map();
+    const declared = new Set();
+    for (const scope of scopes.scopes) {
+      for (const v of scope.variables) {
+        if (!v.defs.length) continue;
+        declared.add(v.name);
+        if (!Object.hasOwn(names, v.name)) continue;
+        for (const id of [...v.identifiers, ...v.references.map((r) => r.identifier)]) {
+          edits.set(id.range[0], [id.range[1], names[v.name]]);
+        }
+      }
+    }
+    let renamed = readable;
+    for (const [start, [end, to]] of [...edits].sort((a, b) => b[0] - a[0])) {
+      renamed = renamed.slice(0, start) + to + renamed.slice(end);
+    }
+    expect(shape(parse(I.matchSource('javascript')))).toBe(shape(parse(renamed)));
+    // Only the matcher's own locals are renamed, each to a name no identifier of the
+    // readable source spells (so no rename captures or shadows another binding).
+    const spelled = new Set();
+    JSON.stringify(ast, (k, v) => {
+      if (v && v.type === 'Identifier') spelled.add(v.name);
+      return v;
+    });
+    const short = Object.values(names);
+    expect(new Set(short).size).toBe(short.length);
+    for (const [from, to] of Object.entries(names)) {
+      expect(declared.has(from), from).toBe(true);
+      expect(spelled.has(to), `${from} -> ${to}`).toBe(false);
+    }
+    expect(Object.keys(names)).not.toContain('locatraMatch');
+    expect(short.length).toBeGreaterThan(50);
+  });
+
+  it('keeps the TypeScript annotations on the same program', () => {
+    expect(I.matchSource('typescript')).toMatch(
+      /^function locatraMatch\(\w+:string,\w+:string,\w+:string\|null,\w+:boolean,\w+:number,\w+:any\):any\[\]\{/
+    );
+  });
+
+  it('refuses source it cannot compact safely', () => {
+    expect(() => I.compactPieces('const a = `x`;')).toThrow(/unsupported syntax/);
+    expect(() => I.compactPieces('const a = 1; /* b */')).toThrow(/unsupported syntax/);
+    expect(() => I.compactPieces('const value = 1; const o = { value };')).toThrow(/shorthand property/);
+    // Kept apart: two words, and "+" / "-" that would merge into "++" / "--".
+    expect(I.compactPieces('const total = a + +b - -c; // why\nreturn  total;').join('')).toMatch(
+      /^const \w+=a\+ \+b- -c;return \w+;$/
+    );
+  });
+
+  it('renames parameters of every form, never a property, key or global', () => {
+    const src =
+      'function keep(alpha, beta = f(gamma)) { const delta = (epsilon) => epsilon + alpha; ' +
+      'const zeta = eta => eta; try { g(); } catch (theta) { h(theta); } ' +
+      'return { alpha: alpha.beta, delta: document.title + delta(zeta(beta)) }; }';
+    const out = I.compactPieces(src, ['keep']).join('');
+    // Every local is renamed; a property (.beta), a key (alpha:, delta:) and a global stay.
+    expect(out).not.toMatch(/(?<![.\w])(?:alpha|beta|delta|epsilon|zeta|eta|theta)\b(?!:)/);
+    expect(out).toMatch(/^function keep\(\w{1,2},\w{1,2}=f\(gamma\)\)/);
+    expect(out).toContain('{alpha:');
+    expect(out).toContain('.beta,delta:document.title+');
+    // A TypeScript annotation that starts with a word keeps its space.
+    expect(I.compactPieces('const x = y$T{ as any};').join('')).toBe('const x=y$T{ as any};');
+  });
+
+  it('cuts long text where a host language concatenates it again', () => {
+    const quote = (s) => JSON.stringify(s);
+    expect(I.literalLines('aaa bbb ccc', 9, quote)).toEqual(['"aaa "', '"bbb ccc"']);
+    // A word longer than the width is cut inside, never past it.
+    const long = I.literalLines(`x ${'y'.repeat(30)} z`, 12, quote);
+    expect(long.every((l) => l.length <= 12)).toBe(true);
+    expect(long.map((l) => JSON.parse(l)).join('')).toBe(`x ${'y'.repeat(30)} z`);
+    // No chunk ends in a backslash; each costs at most the width.
+    const cost = (c) => (c === '\\' ? 2 : 1);
+    const chunks = I.chunkText('ab\\cd\\ef', 4, cost);
+    expect(chunks).toEqual(['ab', '\\cd', '\\ef']);
+    for (const c of chunks) {
+      expect(c.endsWith('\\')).toBe(false);
+      expect([...c].reduce((n, ch) => n + cost(ch), 0)).toBeLessThanOrEqual(4);
+    }
+    expect(I.wrapPieces(['a', '"b"', ';', 'c'], 4, (c) => (c === '"' ? 2 : 1))).toEqual(['a', '"b"', ';c']);
+  });
+
+  it('is a fraction of the readable source', () => {
+    expect(I.MATCH_JS.length).toBeLessThan(I.MATCH_SRC.length * 0.75);
+    expect(I.MATCH_JS.split('\n').length).toBeLessThan(150);
   });
 });

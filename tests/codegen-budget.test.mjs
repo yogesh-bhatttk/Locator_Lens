@@ -4,15 +4,16 @@
 // and not, quotes and unicode, long-ish names, chains, frames, nested frames, shadow
 // DOM, every action) through every exported shape — locator expressions, single
 // statements, whole tests (literal and test-data), page objects — and holds every
-// line to a budget: at most BUDGET characters of code beyond the user-supplied text
-// in its string literals. The Locatra helper declarations (emitted once per file) are
-// left out of the budget, but must appear only when a line uses them, and only once.
+// line, as emitted (indentation included), to a budget: at most BUDGET characters
+// beyond the user-supplied text in its string literals. That includes the Locatra
+// helper declarations (the compact matcher, the page-script constants, the text
+// helpers), which must also appear only when a line uses them, and only once.
 import { beforeAll, describe, expect, it } from 'vitest';
 
 import { MODEL, STEPS, TARGETS, frame, kind, role } from './codegen-corpus.mjs';
 import { decodeLiteral } from './codegen-helper-calls.mjs';
 
-const BUDGET = 160;
+const BUDGET = 120;
 
 let C;
 let I;
@@ -83,7 +84,7 @@ function userLength(line, lang, users) {
   return total;
 }
 
-/** Lines of `code` that are not part of a helper declaration. */
+/** Lines of `code` that are not part of a helper declaration (the call sites). */
 function codeLines(code, helperLines) {
   return code.split('\n').filter((l) => l.trim() && !helperLines.has(l.trim()));
 }
@@ -111,15 +112,46 @@ function expressionLines(fw, lang) {
   return [...out].sort((a, b) => b.length - a.length);
 }
 
-/** A statement line with every embedded (separately budgeted) locator expression replaced by "L". */
+/** A line with every embedded (separately budgeted) locator expression replaced by "L". */
 function withoutExpressions(line, exprs) {
   let out = line;
-  for (const e of exprs) if (out.includes(e)) out = out.split(e).join('L');
+  for (const e of exprs) if (out.includes(e) && out.trim() !== e) out = out.split(e).join('L');
   return out;
 }
 
 function fixedLength(line, lang, users) {
   return line.length - userLength(line, lang, users);
+}
+
+// The selectors a walk through shadow roots is made of (shadowHosts, shadowCss, an
+// <iframe>'s shadowPath). Recorded host selectors are often whole structural paths
+// (`html > body > main > … > sl-checkbox`), so they are budgeted like user text — but
+// a line holds two of them only while they stay short together: a walk goes one hop
+// per line (C9.4, from the real-site run).
+const WALK_INLINE = 48;
+function walkStrings() {
+  const out = new Set();
+  const walk = (t) => {
+    if (!t || typeof t !== 'object') return;
+    for (const k of ['shadowHosts', 'shadowPath']) if (Array.isArray(t[k])) t[k].forEach((h) => out.add(h));
+    if (typeof t.shadowCss === 'string') out.add(t.shadowCss);
+    walk(t.child);
+    walk(t.parent);
+  };
+  TARGETS.forEach(walk);
+  MODEL.elements.forEach((e) => walk(e.target));
+  return out;
+}
+
+/** The walk selectors a line holds side by side, when together they are too long. */
+function crowdedWalk(line, lang, walks) {
+  const found = [];
+  for (const m of line.matchAll(LITERAL[lang])) {
+    const decoded = decodeLiteral(m[0], lang);
+    if (decoded != null && walks.has(decoded)) found.push(decoded);
+  }
+  const total = found.reduce((n, s) => n + s.length, 0);
+  return found.length > 1 && total > WALK_INLINE ? found : null;
 }
 
 // The definitions that make a helper "declared" in a file, per language, and what
@@ -128,11 +160,14 @@ const JS_HELPERS = [
   [/^\s*(?:async )?function locatraFind\(/gm, /\blocatraFind\(/],
   [/^\s*const LOCATRA_JS = /gm, /\blocatraFind\(/],
   [/^\s*function locatraGet\(/gm, /\blocatraGet\(/],
-  [/^\s*function locatraMatch\(/gm, /\blocatraGet\(/],
+  // Cypress declares the matcher; Selenium and WebdriverIO hold it in LOCATRA_JS.
+  [/^function locatraMatch\(/gm, /\b(?:locatraGet|locatraFind)\(/],
   [/^\s*function locatraFrame\(/gm, /\blocatraFrame\(/],
   [/^\s*function locatraSecret\(/gm, /\blocatraSecret\(/],
-  [/^\s*const LOCATRA_FRAME_JS = /gm, /\bLOCATRA_FRAME_JS\b/],
-  [/^\s*const LOCATRA_SET_VALUE_JS = /gm, /\bLOCATRA_SET_VALUE_JS\b/],
+  [/^\s*(?:async )?function locatraText\(/gm, /\blocatraText\(/],
+  [/^\s*const LOCATRA_TEXT = /gm, /\bLOCATRA_TEXT\b/],
+  [/^\s*const LOCATRA_FRAME_JS =/gm, /\bLOCATRA_FRAME_JS\b/],
+  [/^\s*const LOCATRA_SET_VALUE_JS =/gm, /\bLOCATRA_SET_VALUE_JS\b/],
 ];
 const HELPERS = {
   javascript: JS_HELPERS,
@@ -140,18 +175,26 @@ const HELPERS = {
   python: [
     [/^def locatra_find\(/gm, /\blocatra_find\(/],
     [/^LOCATRA_JS = /gm, /\blocatra_find\(/],
+    [/^def locatra_text\(/gm, /\blocatra_text\(/],
     [/^LOCATRA_FRAME_JS = /gm, /\bLOCATRA_FRAME_JS\b/],
     [/^LOCATRA_SET_VALUE_JS = /gm, /\bLOCATRA_SET_VALUE_JS\b/],
   ],
+  // One Locatra class, holding the members the file calls.
   java: [
-    [/^\s*static final class Locatra \{/gm, /\bLocatra\.find\(/],
-    [/^\s*private static final String LOCATRA_FRAME_JS = /gm, /\bLOCATRA_FRAME_JS\b/],
-    [/^\s*private static final String LOCATRA_SET_VALUE_JS = /gm, /\bLOCATRA_SET_VALUE_JS\b/],
+    [/^\s*static final class Locatra \{/gm, /\bLocatra\.(?:find|text)\(/],
+    [/^\s*private static final String JS =/gm, /\bLocatra\.find\(/],
+    [/^\s*static WebElement find\(SearchContext root, String kind, String value\) \{/gm, /\bLocatra\.find\(/],
+    [/^\s*static String text\(WebElement el\) \{/gm, /\bLocatra\.text\(/],
+    [/^\s*private static final String LOCATRA_FRAME_JS =/gm, /\bLOCATRA_FRAME_JS\b/],
+    [/^\s*private static final String LOCATRA_SET_VALUE_JS =/gm, /\bLOCATRA_SET_VALUE_JS\b/],
   ],
   csharp: [
-    [/^\s*private static class Locatra$/gm, /\bLocatra\.Find\(/],
-    [/^\s*private const string LocatraFrameJs = /gm, /\bLocatraFrameJs\b/],
-    [/^\s*private const string LocatraSetValueJs = /gm, /\bLocatraSetValueJs\b/],
+    [/^\s*private static class Locatra$/gm, /\bLocatra\.(?:Find|Text)\(/],
+    [/^\s*private const string Js =/gm, /\bLocatra\.Find\(/],
+    [/^\s*public static IWebElement Find\(/gm, /\bLocatra\.Find\(/],
+    [/^\s*public static string Text\(IWebElement el\)/gm, /\bLocatra\.Text\(/],
+    [/^\s*private const string LocatraFrameJs =/gm, /\bLocatraFrameJs\b/],
+    [/^\s*private const string LocatraSetValueJs =/gm, /\bLocatraSetValueJs\b/],
   ],
 };
 
@@ -184,24 +227,36 @@ describe('C9.4 budget: every line within BUDGET characters beyond its user text'
         .filter(Boolean)
     );
     const fails = [];
-    const longest = { expr: { fixed: 0, line: '' }, stmt: { fixed: 0, line: '' } };
-    const note = (which, fixed, line, what) => {
-      if (fixed > BUDGET) fails.push(`${what}: [${fixed}] ${line}`);
-      if (fixed > longest[which].fixed) longest[which] = { fixed, line };
+    const longest = {};
+    const walks = walkStrings();
+    const note = (which, fixed, line, what, enforce = true) => {
+      if (enforce && fixed > BUDGET) fails.push(`${what}: [${fixed}] ${line}`);
+      if (fixed > (longest[which]?.fixed ?? -1)) longest[which] = { fixed, line };
     };
-    // (A) Every locator expression, line by line: at most BUDGET beyond its user text.
+    // (A) Every locator expression, line by line as a statement embeds it: at most
+    // BUDGET beyond its user text; so is every line of the helpers it needs.
     for (const t of TARGETS) {
-      for (const l of codeLines(C.locatorSnippet(t, fw, lang).expr, helperLines)) {
+      const snippet = C.locatorSnippet(t, fw, lang);
+      for (const l of codeLines(snippet.expr, helperLines)) {
         note('expr', fixedLength(l.trim(), lang, users), l.trim(), `expr ${JSON.stringify(t)}`);
       }
+      for (const l of snippet.helpers.split('\n'))
+        note('helper', l.length, l, `helpers of ${JSON.stringify(t)}`);
     }
-    // (B) Every statement line: at most BUDGET beyond its user text and the locator
+    // (B) Every line as emitted, indentation included — statements and the helper
+    // declarations alike: at most BUDGET beyond its user text and the locator
     // expression it embeds (budgeted under A).
     const exprs = expressionLines(fw, lang);
     const check = (code, what) => {
-      for (const l of codeLines(code, helperLines)) {
-        const line = withoutExpressions(l.trim(), exprs);
-        note('stmt', fixedLength(line, lang, users), line, what);
+      for (const l of code.split('\n')) {
+        if (!l.trim()) continue;
+        const helper = helperLines.has(l.trim());
+        const line = withoutExpressions(l, exprs);
+        note(helper ? 'helper' : 'stmt', fixedLength(line, lang, users), line, what);
+        // Reported only: the whole line, the expression it embeds included.
+        if (!helper) note('full', fixedLength(l, lang, users), l, what, false);
+        const crowded = helper ? null : crowdedWalk(l, lang, walks);
+        if (crowded) fails.push(`walk ${what}: ${JSON.stringify(crowded)} on one line: ${l}`);
       }
     };
     for (const step of STEPS) check(C.actionStatement(step, fw, lang), `step ${JSON.stringify(step)}`);
@@ -223,13 +278,14 @@ describe('C9.4 budget: every line within BUDGET characters beyond its user text'
   });
 
   it('measured every framework / language', async () => {
-    // The longest expression and statement line of each (characters beyond user text),
+    // The longest line of each kind (expression, statement, helper; "full": a statement
+    // line with its expression, not budgeted) in characters beyond user text,
     // written out when BUDGET_REPORT names a file; the budget is enforced above.
     expect(Object.keys(results)).toHaveLength(COMBOS.length);
     if (process.env.BUDGET_REPORT) {
       const { writeFileSync } = await import('node:fs');
-      const rows = Object.entries(results).map(
-        ([k, v]) => `${k}\texpr ${v.expr.fixed}\t${v.expr.line}\n${k}\tstmt ${v.stmt.fixed}\t${v.stmt.line}`
+      const rows = Object.entries(results).flatMap(([k, v]) =>
+        Object.entries(v).map(([which, { fixed, line }]) => `${k}\t${which} ${fixed}\t${line}`)
       );
       writeFileSync(process.env.BUDGET_REPORT, rows.join('\n') + '\n');
     }

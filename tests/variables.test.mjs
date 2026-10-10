@@ -789,7 +789,7 @@ describe('rendering in every framework × language', () => {
     ];
     const out = C.testScript(steps, 'cypress', 'typescript', { variables: true });
     expect(out).toContain(
-      "import 'cypress-real-events';\n\nconst testData = {\n  firstName: 'Ada',\n};\n\n// Locatra: the elements"
+      "import 'cypress-real-events';\n\nconst testData = {\n  firstName: 'Ada',\n};\n\n// Locatra helper (generated)"
     );
   });
 

@@ -16,6 +16,7 @@ import vm from 'node:vm';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 
 import * as CORPUS from './codegen-corpus.mjs';
+import { declaredString } from './codegen-helper-calls.mjs';
 
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const WDIO_MODULES = join(ROOT, 'node_modules/.cache/locatra-e2e/wdio/node_modules');
@@ -381,7 +382,14 @@ describe('actions', () => {
     const js = 'LOCATRA_SET_VALUE_JS';
     expect(
       C.testScript([{ action: 'fill', target: T, value: '42', inputType: 'date' }], FW, 'typescript')
-    ).toContain(`const LOCATRA_SET_VALUE_JS = ${C.q(C._internals.SET_VALUE_JS, 'typescript')};`);
+    ).toContain('const LOCATRA_SET_VALUE_JS =\n');
+    expect(
+      declaredString(
+        C.testScript([{ action: 'fill', target: T, value: '42', inputType: 'date' }], FW, 'typescript'),
+        'LOCATRA_SET_VALUE_JS',
+        'typescript'
+      )
+    ).toBe(C._internals.SET_VALUE_JS);
     for (const inputType of ['range', 'color', 'date', 'time', 'datetime-local', 'month', 'week']) {
       expect(stmt({ action: 'fill', target: T, value: '42', inputType })).toBe(
         `await browser.execute(${js}, await ${L}, '42');`
@@ -417,11 +425,11 @@ describe('actions', () => {
     expect(stmt({ action: 'goto' })).toBe(`await browser.url('');`);
     const js = "'return [1280 + outerWidth - innerWidth, 800 + outerHeight - innerHeight];'";
     expect(stmt({ action: 'viewport', value: '1280x800' }, 'typescript')).toBe(
-      `{\n  const [width, height] = await browser.execute<[number, number], []>(${js});\n` +
+      `{\n  const [width, height] = await browser.execute<[number, number], []>(\n    ${js});\n` +
         '  await browser.setWindowSize(width, height);\n}'
     );
     expect(stmt({ action: 'viewport', value: '1280x800' }, 'javascript')).toBe(
-      `{\n  const [width, height] = await browser.execute(${js});\n  await browser.setWindowSize(width, height);\n}`
+      `{\n  const [width, height] = await browser.execute(\n    ${js});\n  await browser.setWindowSize(width, height);\n}`
     );
     expect(stmt({ action: 'viewport', width: 390, height: 844 }, 'javascript')).toContain('[390 + ');
     expect(stmt({ action: 'viewport', width: 390, height: 844 }, 'javascript')).toContain(', 844 + ');
@@ -511,16 +519,35 @@ describe('assertions', () => {
   const L = `$('[data-testid="t"]')`;
   const a = (assertType, value, target = T) => stmt({ action: 'assert', target, assertType, value });
 
+  it('declares LOCATRA_TEXT when the only text check is a "contains" one (a spread use)', () => {
+    const steps = [{ action: 'assert', target: T, assertType: 'toContainText', value: 'Card ending' }];
+    for (const lang of ['typescript', 'javascript']) {
+      const out = C.testScript(steps, 'webdriverio', lang);
+      expect(out, lang).toContain('{ ...LOCATRA_TEXT, containing: true }');
+      expect(out.match(/^const LOCATRA_TEXT\b/gm), lang).toHaveLength(1);
+    }
+  });
+
   it('maps every assertion to expect-webdriverio with normalised text', () => {
     expect(a('toBeVisible')).toBe(`await expect(${L}).toBeDisplayed();`);
     expect(a(undefined)).toBe(`await expect(${L}).toBeDisplayed();`);
     expect(a('toBeSomethingNew')).toBe(`await expect(${L}).toBeDisplayed();`);
     expect(a('toHaveText', '  Ada \n  Lovelace ')).toBe(
-      `await expect(${L}).toHaveText('Ada Lovelace', { replace: [[/[\\u00ad\\u200b]/g, ''], [/\\s+/g, ' ']] });`
+      `await expect(${L}).toHaveText('Ada Lovelace', LOCATRA_TEXT);`
     );
     expect(a('toContainText', 'Card   ending')).toBe(
-      `await expect(${L}).toHaveText('Card ending', { containing: true, replace: [[/[\\u00ad\\u200b]/g, ''], [/\\s+/g, ' ']] });`
+      `await expect(${L}).toHaveText('Card ending', { ...LOCATRA_TEXT, containing: true });`
     );
+    // The normalisation, declared once per file that compares text.
+    const steps = [{ action: 'assert', target: T, assertType: 'toHaveText', value: 'x' }];
+    for (const lang of ['typescript', 'javascript']) {
+      const out = C.testScript([...steps, ...steps], 'webdriverio', lang);
+      expect(out.match(/^const LOCATRA_TEXT = /gm), lang).toHaveLength(1);
+      expect(out).toContain(
+        "const LOCATRA_TEXT = { replace: [[/[\\u00ad\\u200b]/g, ''], [/\\s+/g, ' ']]" +
+          (lang === 'typescript' ? ' as [RegExp, string][] };' : ' };')
+      );
+    }
     expect(a('toHaveValue', ' raw  value ')).toBe(`await expect(${L}).toHaveValue(' raw  value ');`);
     expect(a('toBeEnabled')).toBe(`await expect(${L}).toBeEnabled();`);
   });
@@ -741,9 +768,9 @@ describe('test file', () => {
     // The helper declarations differ only in their annotations (one source, $T{…} kept or dropped).
     const head = (code) => code.slice(0, code.indexOf("describe('recorded test'"));
     expect(head(ts)).toContain(
-      'async function locatraFind(kind: string, value: string, name: string | null = null'
+      'async function locatraFind(\n  kind: string, value: string, name: string | null = null, opts: any = {}\n'
     );
-    expect(head(js)).toContain('async function locatraFind(kind, value, name = null, opts = {}) {');
+    expect(head(js)).toContain('async function locatraFind(\n  kind, value, name = null, opts = {}\n) {');
   });
 });
 
@@ -786,7 +813,7 @@ describe('test-data variables', () => {
     expect(out).toContain(".setValue(process.env.LOCATRA_PASSWORD ?? '');");
     expect(out).not.toContain('secret');
     expect(out).toContain(`await ${loc(label('Notes'))}.clearValue();`);
-    expect(out).toContain(`.toHaveText('Ada \\'A\\'', {`);
+    expect(out).toContain(`.toHaveText('Ada \\'A\\'', LOCATRA_TEXT);`);
   });
 
   it('declares exactly the keys the statements reference', () => {
@@ -1027,7 +1054,7 @@ describe('page objects', () => {
     expect(ts).toContain(
       `    await browser.switchFrame(${deepFrame(1)});\n    return $('#go').getElement();`
     );
-    expect(ts).toContain(`const LOCATRA_FRAME_JS = ${C.q(C._internals.DEEP_IFRAME_JS, 'typescript')};`);
+    expect(declaredString(ts, 'LOCATRA_FRAME_JS', 'typescript')).toBe(C._internals.DEEP_IFRAME_JS);
     expect(ts).toContain(
       "  async goto(): Promise<void> {\n    await browser.switchFrame(null);\n    await browser.url('https://e.example/');\n  }"
     );

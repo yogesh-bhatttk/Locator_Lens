@@ -47,7 +47,14 @@
 // (Selenium JS/TS), locatra_find(driver, …) (Python), Locatra.find(driver, …)
 // (Java), Locatra.Find(driver, …) (C#), await locatraFind('role', …)
 // (WebdriverIO), locatraGet('role', …) (Cypress). All run MATCH_SRC in the page, a
-// port of the engine's matching, and insist on exactly one match (see MATCH_SRC).
+// port of the engine's matching, and insist on exactly one match (see MATCH_SRC). A
+// file embeds the matcher compacted (compactPieces: no comments or white space, short
+// local names; proven the same program by tests/codegen-helpers.dom.test.mjs), and
+// every line a helper declaration emits stays within HELPER_WIDTH (120) columns. A
+// text assertion outside Playwright reads the rendered text through a helper too —
+// locatraText(el) (Selenium JS/TS, Cypress), locatra_text(el) (Python),
+// Locatra.text(el) (Java), Locatra.Text(el) (C#), the LOCATRA_TEXT options
+// (WebdriverIO) — declared once per file, only when used.
 // The page scripts statements run are declared once too: LOCATRA_FRAME_JS (a
 // cross-origin frame by position) and LOCATRA_SET_VALUE_JS (date / range / colour
 // values). locatorSnippet(target, framework, language, altTargets?) returns
@@ -765,9 +772,283 @@
     return src.replace(/\$T\{([^}]*)\}/g, function (m, t) { return lang === 'typescript' ? t : ''; });
   }
 
-  /** The matcher as a script for executeScript(): (kind, value, name, exact, level, scope) → elements. */
-  var MATCH_JS = tsOnly(MATCH_SRC, 'javascript') +
-    '\nreturn locatraMatch(arguments[0], arguments[1], arguments[2], arguments[3], arguments[4], arguments[5]);';
+  // ── The matcher as a file embeds it: compacted ───────────────────────────────
+  // MATCH_SRC stays readable here; a test file embeds the same program compacted, in
+  // dense lines of at most HELPER_WIDTH, a third of its 500 lines: comments and white
+  // space dropped (a space stays only between two words, or between two "+" / "-"
+  // that would otherwise merge), and every local name — each const, let, function and
+  // parameter but locatraMatch — shortened to one or two letters no word of the
+  // source uses. The tokenizer knows exactly what
+  // MATCH_SRC is written with: '…' and "…" strings, regular expression literals (a
+  // "/" where an operand starts; MATCH_SRC never divides), words, one-character
+  // punctuation and the `$T{…}` annotations, kept whole; a template literal or a
+  // block comment is refused, and a shortened name may not appear as a shorthand
+  // property. tests/codegen-helpers.dom.test.mjs proves the result is the same
+  // program: its syntax tree equals the readable source's with each variable renamed
+  // (by scope analysis), and both find the same elements across the parity corpus.
+  var TOKEN_RES = {
+    s: /\s+|\/\/[^\n]*/y,
+    q: /'(?:[^'\\\n]|\\.)*'|"(?:[^"\\\n]|\\.)*"/y,
+    a: /\$T\{[^}]*\}/y,
+    w: /(?:(?!\$T\{)[\w$])+/y,
+    r: /\/(?:[^/\\[\n]|\\.|\[(?:[^\]\\\n]|\\.)*\])+\/[a-z]*/y
+  };
+
+  /** The tokens of a helper source: { s: text, t: type (TOKEN_RES key, 'p' = punctuation), gap: white space before }. */
+  function jsTokens(src) {
+    var out = [];
+    var gap = false;
+    for (var i = 0; i < src.length;) {
+      var prev = out[out.length - 1];
+      // A "/" starts a regular expression where an operand is expected.
+      var operand = !prev || (prev.t === 'p' && ')]}'.indexOf(prev.s) === -1) ||
+        (prev.t === 'w' && /^(return|typeof)$/.test(prev.s));
+      var type = null;
+      var m = null;
+      for (var t in TOKEN_RES) {
+        if (t === 'r' && !operand) continue;
+        TOKEN_RES[t].lastIndex = i;
+        if ((m = TOKEN_RES[t].exec(src))) { type = t; break; }
+      }
+      var text = m ? m[0] : src.charAt(i);
+      if (src.substr(i, 2) === '/*' || (!m && (text === '`' || (text === '/' && operand)))) {
+        throw new Error('compactPieces: unsupported syntax at ' + i + ': ' + src.substr(i, 20));
+      }
+      i += text.length;
+      if (type === 's') { gap = true; continue; }
+      if (type === 'a') text = compactAnnotation(text);
+      out.push({ s: text, t: type || 'p', gap: gap });
+      gap = false;
+    }
+    return out;
+  }
+
+  /** A `$T{…}` annotation with its white space dropped (kept before a word: `$T{ as any}`). */
+  function compactAnnotation(a) {
+    var body = a.slice(3, -1).replace(/\s*([:,|<>()=[\]?])\s*/g, '$1').replace(/\s+/g, ' ').trim();
+    return '$T{' + (/^[\w$]/.test(body) ? ' ' : '') + body + '}';
+  }
+
+  /** The local names a token list declares: after const / let / function, and every parameter. */
+  function declaredNames(all) {
+    var toks = all.filter(function (tk) { return tk.t !== 'a'; });
+    var names = {};
+    var params = function (open) {
+      for (var k = open + 1, depth = 1; k < toks.length && depth; k++) {
+        if (toks[k].s === '(') depth++;
+        else if (toks[k].s === ')') depth--;
+        else if (depth === 1 && toks[k].t === 'w' && /^(\(|,)$/.test(toks[k - 1].s)) names[toks[k].s] = true;
+      }
+    };
+    toks.forEach(function (tk, k) {
+      var prev = toks[k - 1] || {};
+      if (tk.t === 'w' && prev.t === 'w' && /^(const|let|var|function)$/.test(prev.s)) names[tk.s] = true;
+      if (tk.s === '(' && prev.t === 'w' && /^(function|catch)$/.test(prev.s)) params(k);
+      if (tk.s === '(' && prev.t === 'w' && (toks[k - 2] || {}).s === 'function') params(k);
+      if (tk.s === '=' && (toks[k + 1] || {}).s === '>' && !toks[k + 1].gap) {
+        if (prev.t === 'w') names[prev.s] = true;
+        if (prev.s === ')') {
+          for (var j = k - 1, depth = 0; j >= 0; j--) {
+            if (toks[j].s === ')') depth++;
+            else if (toks[j].s === '(' && !--depth) { params(j); break; }
+          }
+        }
+      }
+    });
+    return Object.keys(names).filter(function (n) { return !/^\d/.test(n); });
+  }
+
+  /**
+   * Short names for a source's longer local names, the most used first: { name: short }.
+   * A short name is one or two letters (and digits) no word of the source spells.
+   */
+  function shortNames(toks, keep) {
+    var words = {};
+    toks.forEach(function (tk) { if (tk.t === 'w') words[tk.s] = (words[tk.s] || 0) + 1; });
+    var taken = ' as do if in is of ';
+    var letters = 'abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ';
+    var fresh = letters.split('');
+    letters.split('').forEach(function (a) {
+      (letters + '0123456789').split('').forEach(function (b) { fresh.push(a + b); });
+    });
+    fresh = fresh.filter(function (n) {
+      return !Object.prototype.hasOwnProperty.call(words, n) && taken.indexOf(' ' + n + ' ') === -1;
+    });
+    var map = {};
+    declaredNames(toks)
+      .filter(function (n) { return n.length > 1 && keep.indexOf(n) === -1; })
+      .sort(function (a, b) { return words[b] - words[a] || (a < b ? -1 : 1); })
+      .forEach(function (n, k) { map[n] = fresh[k]; });
+    return map;
+  }
+
+  /**
+   * A helper source compacted (see above), as pieces: each token's text, renamed, with
+   * the one space it needs in front. `keep` lists names that stay (the function others call).
+   */
+  function compactPieces(src, keep) {
+    var toks = jsTokens(src);
+    var map = shortNames(toks, keep || []);
+    var last = '';
+    return toks.map(function (tk, k) {
+      var prev = toks[k - 1] || {};
+      var next = toks[k + 1] || {};
+      var s = tk.s;
+      if (tk.t === 'w' && Object.prototype.hasOwnProperty.call(map, s) && prev.s !== '.') {
+        var key = /^[{,]$/.test(prev.s) && next.s === ':';
+        if (/^[{,]$/.test(prev.s) && /^[,}]$/.test(next.s) && (prev.s === '{' || next.s === '}')) {
+          throw new Error('compactPieces: shorthand property ' + s);
+        }
+        if (!key) s = map[s];
+      }
+      var a = last.slice(-1);
+      var b = s.charAt(0);
+      var space = tk.gap && ((/[\w$]/.test(a) && /[\w$]/.test(b)) || (a === b && /[+\-/]/.test(a)));
+      if (tk.t !== 'a') last = s;
+      return (space ? ' ' : '') + s;
+    });
+  }
+
+  /**
+   * Whether a line may break between pieces `p` and `next`: never after return /
+   * throw / break / continue (a line break would end the statement), never before a
+   * piece that starts with an operator character or a space (so no operator is split
+   * — "=" ">" is "=>", "+" "+" is "++" — no "=>" or postfix "++" / "--" moves to the
+   * next line, and no TypeScript annotation is cut from its name). Anywhere else a
+   * line break changes nothing JavaScript or TypeScript reads, and neither does
+   * joining the lines again with nothing between them.
+   */
+  function breakable(p, next) {
+    return !!next && !/^(return|throw|break|continue)$/.test(p) && !/^[ =+\-.:?<>&|*/%]/.test(next);
+  }
+
+  /**
+   * Pieces joined into lines costing at most `width` (`cost(c)`: the characters c
+   * takes once quoted; one each by default), broken only where breakable() allows. A
+   * host language may keep those line breaks (and its own indentation) in the
+   * script, or concatenate the lines.
+   */
+  function wrapPieces(pieces, width, cost) {
+    var size = function (p) {
+      var n = 0;
+      for (var i = 0; i < p.length; i++) n += cost ? cost(p.charAt(i)) : 1;
+      return n;
+    };
+    var lines = [];
+    var line = [];
+    var used = 0;
+    var cut = -1;
+    pieces.forEach(function (p, k) {
+      var n = size(p);
+      if (used + n > width && cut > 0) {
+        lines.push(line.slice(0, cut).join(''));
+        line = line.slice(cut);
+        used = size(line.join(''));
+        cut = -1;
+      }
+      line.push(p);
+      used += n;
+      if (breakable(p, pieces[k + 1])) cut = line.length;
+    });
+    if (line.length) lines.push(line.join(''));
+    return lines;
+  }
+
+  // Every line a helper declaration emits stays within this width.
+  var HELPER_WIDTH = 120;
+
+  var MATCH_PIECES = compactPieces(MATCH_SRC, ['locatraMatch']);
+  /** The names compactPieces gives MATCH_SRC's locals: { name: short } (for the tests that prove it). */
+  function matchNames() { return shortNames(jsTokens(MATCH_SRC), ['locatraMatch']); }
+  // What a WebDriver script adds: run the matcher on executeScript()'s arguments.
+  var MATCH_RUN = 'return locatraMatch.apply(null,arguments)';
+
+  /** The compact matcher in `lang` (TypeScript keeps its annotations), as one line. */
+  function matchSource(lang) { return tsOnly(MATCH_PIECES.join(''), lang); }
+
+  /** The compact matcher as a function declaration in `lang`, in lines of at most `width`. */
+  function matchLines(lang, width) {
+    return wrapPieces(MATCH_PIECES.map(function (p) { return tsOnly(p, lang); }), width);
+  }
+
+  /**
+   * `text` cut into consecutive chunks costing at most `width` each (`cost(c)`: the
+   * characters c takes once quoted; one by default), for a host language to
+   * concatenate again. No chunk ends in a backslash (unless it holds nothing else),
+   * so a reader never sees an escape split in two.
+   */
+  function chunkText(text, width, cost) {
+    var size = function (c) { return cost ? cost(c) : 1; };
+    var out = [];
+    var cur = '';
+    var used = 0;
+    for (var i = 0; i < text.length; i++) {
+      var c = text.charAt(i);
+      if (used + size(c) > width && cur) {
+        var tail = /\\+$/.exec(cur);
+        var at = tail && tail[0].length < cur.length ? cur.length - tail[0].length : cur.length;
+        out.push(cur.slice(0, at));
+        cur = cur.slice(at);
+        used = 0;
+        for (var j = 0; j < cur.length; j++) used += size(cur.charAt(j));
+      }
+      cur += c;
+      used += size(c);
+    }
+    if (cur) out.push(cur);
+    return out;
+  }
+
+  /**
+   * A long string as literals to concatenate, each at most `width` long once quoted
+   * (`quote(text)`: the literal), cut after a space where one is near enough.
+   */
+  function literalLines(text, width, quote) {
+    var cost = function (c) { return quote(c).length - 2; };
+    var out = [];
+    var words = String(text).match(/[^ ]+ *| +/g) || [''];
+    var cur = '';
+    words.forEach(function (w) {
+      if (cur && quote(cur + w).length > width) {
+        out.push(cur);
+        cur = '';
+      }
+      if (quote(w).length > width) {
+        var pieces = chunkText(cur + w, width - 2, cost);
+        cur = pieces.pop();
+        out = out.concat(pieces);
+      } else {
+        cur += w;
+      }
+    });
+    out.push(cur);
+    return out.map(quote);
+  }
+
+  /**
+   * The matcher as a script for executeScript() — (kind, value, name, exact, level,
+   * scope) → elements — as JavaScript embeds it: ASCII, no backtick or "${" (a
+   * String.raw template holds it), in lines of at most HELPER_WIDTH (see wrapPieces).
+   */
+  var MATCH_JS = wrapPieces(MATCH_PIECES.map(function (p) { return tsOnly(p, 'javascript'); }).concat(MATCH_RUN),
+    HELPER_WIDTH).join('\n');
+
+  /**
+   * The same script on one line, cut into chunks costing at most `width` once quoted,
+   * for a host language that concatenates string literals (Python, Java, C#).
+   */
+  function matchScriptChunks(width, cost) { return chunkText(MATCH_JS.replace(/\n/g, ''), width, cost); }
+
+  /** MATCH_JS as a JavaScript constant: a String.raw template. */
+  function jsMatchConst(name) { return 'const ' + name + ' = String.raw`\n' + MATCH_JS + '`;'; }
+
+  /** The script as a Python constant: double-quoted literals, concatenated inside parentheses. */
+  function pyMatchConst(name) {
+    var cost = function (c) { return c === '\\' || c === '"' ? 2 : 1; };
+    return name + ' = (\n' + matchScriptChunks(HELPER_WIDTH - 6, cost).map(function (l) {
+      return '    ' + q(l, 'python');
+    }).join('\n') + '\n)';
+  }
 
   // The kinds a helper looks up; every other kind has a native locator.
   var HELPER_KINDS = ['role', 'label', 'text'];
@@ -821,26 +1102,34 @@
       .replace(/'(?:[^'\\\n]|\\.)*'|"(?:[^"\\\n]|\\.)*"/g, '""');
   }
   /** Whether code (string literals and comments aside) calls / names `id`. */
-  function uses(code, id) { return new RegExp('(^|[^\\w$.])' + id.replace(/\$/g, '\\$') + '\\b').test(codeOnly(code)); }
+  // A use, not a property of the same name (`x.NAME`) — but a spread (`...NAME`) is one.
+  function uses(code, id) {
+    return new RegExp('(^|[^\\w$.]|\\.\\.\\.)' + id.replace(/\$/g, '\\$') + '\\b').test(codeOnly(code));
+  }
 
   // ── Selenium JS/TS and Python: the helper, the frame script ─────────────────
+  // One banner line heads every helper declaration, whatever the framework.
+  var HELPER_BANNER = 'Locatra helper (generated): finds role / label / text like Playwright\'s getBy* does.';
+  // A Java / C# Locatra class holding text() alone says so instead.
+  var TEXT_BANNER = 'Locatra helper (generated): an element\'s text as rendered, normalised like the recording.';
+
   var SEL_JS_HELPER = [
-    '// Locatra: the one element a role / label / text locator matches, found the way Playwright\'s',
-    '// getByRole / getByLabel / getByText find it (Selenium has none of them). It waits up to the',
-    '// driver\'s implicit wait, as findElement does, and fails when several elements match.',
-    'const LOCATRA_JS = String.raw`@@MATCH_JS@@`;',
-    '',
     'function locatraFind(root$T{: any}, kind$T{: string}, value$T{: string}, name$T{: string | null} = null, opts$T{: any} = {})$T{: any} {',
     '  const driver = typeof root.getDriver === \'function\' ? root.getDriver() : root;',
     '  const nth$T{: number} = typeof opts.nth === \'number\' ? opts.nth : -1;',
-    '  const what = kind + \' \' + JSON.stringify(value) + (name ? \' named \' + JSON.stringify(name) : \'\') + (opts.exact ? \' (exact)\' : \'\');',
+    '  const level$T{: number} = opts.level || 0;',
+    '  const what = kind + \' \' + JSON.stringify(value) + (name ? \' named \' + JSON.stringify(name) : \'\') +',
+    '    (opts.exact ? \' (exact)\' : \'\');',
+    '  // Waits up to the implicit wait, as findElement does; several matches are an error.',
     '  return new WebElementPromise(driver, (async () => {',
     '    const scope = root === driver ? null : await root;',
     '    const end = Date.now() + ((await driver.manage().getTimeouts()).implicit || 0);',
     '    for (;;) {',
-    '      const found$T{: any[]} = await driver.executeScript(LOCATRA_JS, kind, value, name, !!opts.exact, opts.level || 0, scope);',
+    '      const found$T{: any[]} = await driver.executeScript(LOCATRA_JS, kind, value, name, !!opts.exact, level, scope);',
     '      if (found.length > Math.max(nth, 0)) {',
-    '        if (nth < 0 && found.length > 1) throw new Error(\'Locatra: \' + found.length + \' elements match \' + what + \'; expected exactly one\');',
+    '        if (nth < 0 && found.length > 1) {',
+    '          throw new Error(\'Locatra: \' + found.length + \' elements match \' + what + \'; expected exactly one\');',
+    '        }',
     '        return found[Math.max(nth, 0)];',
     '      }',
     '      if (Date.now() >= end) throw new Error(\'Locatra: no element matches \' + what);',
@@ -851,13 +1140,6 @@
   ].join('\n');
 
   var PY_HELPER = [
-    '# Locatra: the one element a role / label / text locator matches, found the way Playwright\'s',
-    '# get_by_role / get_by_label / get_by_text find it (Selenium has none of them).',
-    'LOCATRA_JS = r"""',
-    '@@MATCH_JS@@',
-    '"""',
-    '',
-    '',
     'def locatra_find(root, kind, value, name=None, exact=False, level=0, nth=-1):',
     '    """Wait up to the driver\'s implicit wait, as find_element does; fail when several elements match."""',
     '    driver = root if hasattr(root, "execute_script") else root.parent',
@@ -876,13 +1158,27 @@
   ].join('\n');
 
   /**
-   * Selenium JS/TS/Python: the helper declaration (LOCATRA_JS + locatraFind /
-   * locatra_find). MATCH_JS goes in verbatim: a String.raw template (no backtick or
-   * "${" in it) or a raw triple-quoted Python string (no '"""' in it).
+   * Selenium JS/TS/Python: the helper declaration (LOCATRA_JS, the compact matcher,
+   * and locatraFind / locatra_find).
    */
   function selHelperSource(lang) {
-    if (lang === 'python') return PY_HELPER.replace('@@MATCH_JS@@', function () { return MATCH_JS; });
-    return tsOnly(SEL_JS_HELPER, lang).replace('@@MATCH_JS@@', function () { return MATCH_JS; });
+    if (lang === 'python') return '# ' + HELPER_BANNER + '\n' + pyMatchConst('LOCATRA_JS') + '\n\n\n' + PY_HELPER;
+    return '// ' + HELPER_BANNER + '\n' + jsMatchConst('LOCATRA_JS') + '\n\n' + tsOnly(SEL_JS_HELPER, lang);
+  }
+
+  // Text is compared as rendered (getText(), innerText), normalised as the recorder
+  // read it: soft hyphens and zero-width spaces dropped, white space collapsed. One
+  // small helper per file, so an assertion reads assert.ok((await locatraText(el)).includes(…)).
+  var TEXT_NOTE = 'Locatra: the text as rendered, soft hyphens and zero-width spaces dropped, white space collapsed.';
+  var SEL_TEXT_NAME = 'locatraText';
+  var PY_TEXT_NAME = 'locatra_text';
+  function selTextSource(lang) {
+    if (lang === 'python') {
+      return '# ' + TEXT_NOTE + '\ndef locatra_text(el):\n' +
+        '    return " ".join(el.text.replace("\\u00ad", "").replace("\\u200b", "").split())';
+    }
+    return tsOnly('// ' + TEXT_NOTE + '\nasync function locatraText(el$T{: any})$T{: Promise<string>} {\n' +
+      "  return (await el.getText()).replace(/[\\u00ad\\u200b]/g, '').replace(/\\s+/g, ' ').trim();\n}", lang);
   }
 
   // Page scripts a statement runs are declared once per file, as constants, rather
@@ -894,8 +1190,9 @@
   var FRAME_JS_NOTE = 'Locatra: the index-th <iframe>, counting those in open shadow roots (arguments[0] = index).';
   var SET_VALUE_NOTE = 'Locatra: set arguments[0]\'s value to arguments[1] the way typing would (input and change events).';
   function selConstSource(name, note, js, lang) {
-    if (lang === 'python') return '# ' + note + '\n' + name + ' = ' + q(js, lang);
-    return '// ' + note + '\nconst ' + name + ' = ' + q(js, lang) + ';';
+    var parts = literalLines(js, HELPER_WIDTH - 6, function (c) { return q(c, lang); });
+    if (lang === 'python') return '# ' + note + '\n' + name + ' = (\n    ' + parts.join('\n    ') + '\n)';
+    return '// ' + note + '\nconst ' + name + ' =\n  ' + parts.join(' +\n  ') + ';';
   }
 
   /** The declarations Selenium JS/TS/Python code needs, in order ('' when none). */
@@ -903,6 +1200,7 @@
     var out = [];
     if (uses(code, FRAME_JS_NAME)) out.push(selConstSource(FRAME_JS_NAME, FRAME_JS_NOTE, DEEP_IFRAME_JS, lang));
     if (uses(code, SET_VALUE_NAME)) out.push(selConstSource(SET_VALUE_NAME, SET_VALUE_NOTE, SET_VALUE_JS, lang));
+    if (uses(code, lang === 'python' ? PY_TEXT_NAME : SEL_TEXT_NAME)) out.push(selTextSource(lang));
     if (uses(code, lang === 'python' ? 'locatra_find' : 'locatraFind')) out.push(selHelperSource(lang));
     return out;
   }
@@ -920,13 +1218,14 @@
   // locatraGet(…, { within: $el })).
   var CY_GET_NAME = 'locatraGet';
   var CY_GET_SRC = [
-    '// Locatra: the one element a role / label / text locator matches, found the way Playwright\'s',
-    '// getByRole / getByLabel / getByText find it (Cypress has none of them). It retries until exactly',
-    '// one element matches (the nth, for a positional locator), like cy.get().',
-    'function locatraGet(kind$T{: string}, value$T{: string}, name$T{: string | null} = null, opts$T{: any} = {})$T{: Cypress.Chainable<JQuery<HTMLElement>>} {',
+    'function locatraGet(',
+    '  kind$T{: string}, value$T{: string}, name$T{: string | null} = null, opts$T{: any} = {}',
+    ')$T{: Cypress.Chainable<JQuery<HTMLElement>>} {',
     '  const nth$T{: number} = typeof opts.nth === \'number\' ? opts.nth : -1;',
-    '  const what = kind + \' \' + JSON.stringify(value) + (name ? \' named \' + JSON.stringify(name) : \'\') + (opts.exact ? \' (exact)\' : \'\');',
+    '  const what = kind + \' \' + JSON.stringify(value) + (name ? \' named \' + JSON.stringify(name) : \'\') +',
+    '    (opts.exact ? \' (exact)\' : \'\');',
     '  let found$T{: HTMLElement[]} = [];',
+    '  // Retries until exactly one element matches (the nth, for a positional locator), like cy.get().',
     '  return cy.document({ log: false }).should((doc) => {',
     '    const scope = opts.within ? opts.within[0] || opts.within : doc;',
     '    found = locatraMatch(kind, value, name, !!opts.exact, opts.level || 0, scope);',
@@ -936,10 +1235,17 @@
     '}'
   ].join('\n');
 
-  /** Cypress: the matcher (a function declaration) and locatraGet(). */
+  /** Cypress: the compact matcher (a function declaration) and locatraGet(). */
   function cyGetSource(lang) {
-    return '// Locatra: the elements a role / label / text locator matches (a port of the Locatra engine).\n' +
-      tsOnly(MATCH_SRC, lang) + '\n\n' + tsOnly(CY_GET_SRC, lang);
+    return '// ' + HELPER_BANNER + '\n' + matchLines(lang, HELPER_WIDTH).join('\n') + '\n\n' + tsOnly(CY_GET_SRC, lang);
+  }
+
+  // A text assertion compares the rendered text (innerText) normalised like the
+  // recording, in a retried should(): expect(locatraText($el)).to.equal(…).
+  var CY_TEXT_NAME = 'locatraText';
+  function cyTextSource(lang) {
+    return tsOnly('// ' + TEXT_NOTE + '\nfunction locatraText($el$T{: JQuery<HTMLElement>})$T{: string} {\n' +
+      "  return $el[0].innerText.replace(/[\\u00ad\\u200b]/g, '').replace(/\\s+/g, ' ').trim();\n}", lang);
   }
 
   /** A Cypress helper call; `within` names the element to search inside (a chain, a frame). */
@@ -989,6 +1295,7 @@
   function cyHelpers(stmts, lang) {
     var code = stmts.join('\n');
     var out = [];
+    if (uses(code, CY_TEXT_NAME)) out.push(cyTextSource(lang));
     if (uses(code, CY_GET_NAME)) out.push(cyGetSource(lang));
     if (uses(code, CY_FRAME_NAME)) out.push(cyFrameSource(lang));
     if (uses(code, CY_SECRET_NAME)) out.push(cySecretSource(lang));
@@ -1038,6 +1345,46 @@
   function isAmbiguousRole(t) {
     return !!t && t.kind === 'role' && !t.name && !hasNth(t) && t.matchCount !== 1 && t.unique !== true;
   }
+
+  /**
+   * How many elements the recorder found for a step's locator: its matchCount (or 1
+   * when it is marked unique, -2 when marked not unique without a count), read off
+   * the target or, through frame wrappers, the target inside; -1 when unknown. A
+   * chain's parts are not consulted: a chain exists to narrow an ambiguous child.
+   */
+  function recordedCount(t) {
+    for (var d = 0; t && typeof t === 'object' && d < 64; d++) {
+      var n = nonNegInt(t.matchCount, -1);
+      if (n >= 0) return n;
+      if (t.unique === true) return 1;
+      if (t.unique === false) return -2;
+      if (t.kind !== 'frame') break;
+      t = t.child;
+    }
+    return -1;
+  }
+
+  /**
+   * The NOTE a recorded step gets when its locator was known to match more than one
+   * element (Playwright's strict mode would throw on it; Selenium would take the
+   * first), else null. Nothing is added to the locator to hide it (no .first()).
+   */
+  function nonUniqueNote(target) {
+    var n = recordedCount(target);
+    if (n > 1) return 'NOTE: this locator matched ' + n + ' elements when recorded; make it unique before relying on it.';
+    if (n === -2) return 'NOTE: this locator was not unique when recorded; make it unique before relying on it.';
+    return null;
+  }
+
+  /** Whether a framework other than Playwright renders the target as a shadow walk (C3). */
+  function walked(t) {
+    var inner = unwrapFrames(t).inner;
+    if (inner && inner.kind === 'chain') inner = inner.child;
+    return !!shadowWalk(inner);
+  }
+
+  /** Whether a statement needs the "no accessible name" NOTE (not when the count NOTE says more). */
+  function roleNote(t) { return hasAmbiguousRole(t) && !nonUniqueNote(t); }
 
   function hasAmbiguousRole(t) {
     if (!t) return false;
@@ -1106,11 +1453,20 @@
     return HELPER_KINDS.indexOf(t.kind) !== -1;
   }
 
-  /** Whether `alt` is a whole target `fw` renders natively (no helper, no chain). */
+  /**
+   * Whether `alt` is a whole target `fw` renders natively (no helper, no chain) and
+   * simply. In shadow DOM the native form is a host-by-host walk: an alternative
+   * there is simpler than the helper (which pierces shadow roots itself) only when
+   * the walk is one short hop; one with no shadowCss could not be walked at all.
+   */
   function usableAlt(alt, fw) {
     var inner = alt && typeof alt === 'object' ? unwrapFrames(alt).inner : null;
     if (!inner || ALT_KINDS.indexOf(inner.kind) === -1 || typeof inner.value !== 'string' || !inner.value) return false;
     if (inner.kind === 'testid' && (typeof inner.attr !== 'string' || !inner.attr)) return false;
+    if (shadowHostsOf(inner)) {
+      var sh = shadowOf(inner);
+      if (!sh || shadowBreak(sh)) return false;
+    }
     return !(fw === 'cypress' && inner.kind === 'xpath');
   }
 
@@ -1168,7 +1524,7 @@
       var c = t.child ? cyContinue(t.child, lang) : '';
       return p == null || c == null ? null : p + c;
     }
-    var sh = shadowOf(t);
+    var sh = shadowWalk(t);
     if (sh) return cyShadowExpr(sh, lang).replace(/^cy\.get\(/, '.find(');
     var spec = cyHelperSpec(t);
     if (spec) return '.then(($el) => ' + cyHelperCall(spec, lang, '$el') + ')';
@@ -1212,7 +1568,7 @@
 
   /** Selenium: `t` searched inside the element `root` evaluates to. */
   function selScoped(t, lang, root) {
-    if (t.kind === 'frame' || shadowOf(t)) return locatorExpr(t, 'selenium', lang);
+    if (t.kind === 'frame' || shadowWalk(t)) return locatorExpr(t, 'selenium', lang);
     if (t.kind !== 'chain') return selLocator(t, lang, true, root);
     var parent = selScoped(t.parent, lang, root);
     return t.child ? selScoped(t.child, lang, parent) : parent;
@@ -1230,11 +1586,12 @@
     var child = locatorExpr(t.child, fw, lang, true);
     // A child reached through its shadow roots starts from the document: its first
     // host is unique there, and need not be inside the parent.
-    if (!parent || (fw !== 'playwright' && shadowOf(t.child))) return child;
+    if (!parent || (fw !== 'playwright' && shadowWalk(t.child))) return child;
     if (fw === 'selenium') return selScoped(t.child, lang, parent);
     if (fw === 'cypress') {
+      // A chain longer than 120 characters continues on its own line.
       var rest = cyContinue(t.child, lang);
-      return rest == null ? child : parent + rest;
+      return rest == null ? child : parent + (parent.length + rest.length > 120 ? '\n  ' : '') + rest;
     }
     // Unrecognised child shape: the parent scope cannot be applied without silently
     // changing what the code selects, so return the child on its own rather than
@@ -1296,16 +1653,21 @@
       var base = sel
         ? 'cy.get(' + q(sel, lang) + ')'
         : 'cy.document().then((doc) => ' + CY_FRAME_NAME + '(doc, ' + frame.index + '))';
+      var hop = '';
       if (frame.shadowPath) {
         // cy.get/find stay inside one tree (and includeShadowDom matches a selector
-        // within a single root, not a path across several), so step host by host.
+        // within a single root, not a path across several), so step host by host —
+        // one hop per line once the path is long (see shadowBreak).
+        hop = pathBreak(frame.shadowPath) ? '\n    ' : '';
         base = 'cy.get(' + q(frame.shadowPath[0], lang) + ')';
         for (var h = 1; h < frame.shadowPath.length; h++) {
-          base += '.shadow().find(' + q(frame.shadowPath[h], lang) + ')';
+          base += hop + '.shadow().find(' + q(frame.shadowPath[h], lang) + ')';
         }
       }
-      // The no-plugin recipe: reach the frame's body, then continue inside it.
-      return base + ".its('0.contentDocument.body').should('not.be.empty').then(cy.wrap)";
+      // The no-plugin recipe: reach the frame's body, then continue inside it (on the
+      // next line after a long shadow path).
+      var br = hop || (frame.shadowPath && frame.shadowPath.length > 3) ? '\n  ' : '';
+      return base + br + ".its('0.contentDocument.body').should('not.be.empty').then(cy.wrap)";
     }
     var py = lang === 'python';
     var fl = py ? 'frame_locator' : 'frameLocator';
@@ -1328,7 +1690,8 @@
         // Inside a frame: look in the document of the body the chain yields.
         // (cy.wrap yields an untyped subject, so TypeScript is told what it is.)
         var body = lang === 'typescript' ? '(body as JQuery<HTMLElement>)' : 'body';
-        enter = enter.replace(/^cy\.document\(\)\.then\(\(doc\) => (\w+)\(doc, /, '.then((body) => $1(' + body + '[0].ownerDocument, ');
+        enter = enter.replace(/^cy\.document\(\)\.then\(\(doc\) => (\w+)\(doc, /, '.then((body) => $1(' + body + '[0].ownerDocument, ')
+          .replace(".its('0.contentDocument.body')", "\n  .its('0.contentDocument.body')");
       }
       parts.push(parts.length ? enter.replace(/^cy\.get\(/, '.find(').replace(/^page\./, '.') : enter);
     }
@@ -1349,9 +1712,11 @@
   // host, outermost first, each unique in the tree that holds it) and `shadowCss`
   // (unique inside the innermost root). Playwright's locators pierce shadow roots and
   // need neither. Selenium and Cypress search one tree at a time, and a shadow root
-  // takes CSS only, so they walk host by host and finish with shadowCss — whatever
-  // kind the target's own locator is. Without shadowCss the target's own locator is
-  // kept, with a NOTE that it may not find the element.
+  // takes CSS only, so they walk host by host and finish with shadowCss. Not a role /
+  // label / text target: the Locatra helper finds it, and its matcher pierces open
+  // shadow roots as the engine does — one short call instead of a walk whose host
+  // selectors are often long structural paths (see shadowWalk). Without shadowCss
+  // any other kind keeps its own locator, with a NOTE that it may not find the element.
   function shadowHostsOf(t) {
     if (!t || !Array.isArray(t.shadowHosts) || !t.shadowHosts.length) return null;
     for (var i = 0; i < t.shadowHosts.length; i++) {
@@ -1366,22 +1731,43 @@
     return hosts && typeof t.shadowCss === 'string' && t.shadowCss ? { hosts: hosts, css: t.shadowCss } : null;
   }
 
-  /** Whether a step's element is in shadow DOM with no shadowCss to reach it by. */
-  function lacksShadowCss(target) {
-    var inner = unwrapFrames(target).inner;
-    return !!shadowHostsOf(inner) && !shadowOf(inner);
+  /**
+   * The host-by-host walk a framework other than Playwright renders for `t`, or null:
+   * a role / label / text target goes to the helper (which pierces shadow roots)
+   * instead, whatever its shadowHosts say.
+   */
+  function shadowWalk(t) {
+    return t && HELPER_KINDS.indexOf(t.kind) === -1 ? shadowOf(t) : null;
   }
 
-  var SHADOW_NOTE = 'NOTE: this element is inside shadow DOM but no CSS selector was recorded for it there; ' +
-    'this locator does not search shadow roots and may not find it.';
+  // A walk goes one hop per line once it has two hops or more, or once its selectors
+  // are long enough (recorded host selectors can be whole structural paths) that one
+  // line would hold them all: every line then carries a single selector.
+  var SHADOW_INLINE = 48;
+  function shadowBreak(sh) {
+    return sh.hosts.length > 1 || sh.hosts[0].length + sh.css.length > SHADOW_INLINE;
+  }
+
+  /** Whether an <iframe>'s shadowPath (its hosts, then the <iframe>) is too long for one line. */
+  function pathBreak(path) {
+    return path.join('').length > SHADOW_INLINE;
+  }
+
+  /** Whether a step's element is in shadow DOM with no shadowCss to reach it by (and no helper). */
+  function lacksShadowCss(target) {
+    var inner = unwrapFrames(target).inner;
+    return !!shadowHostsOf(inner) && !shadowOf(inner) && HELPER_KINDS.indexOf(inner.kind) === -1;
+  }
+
+  var SHADOW_NOTE = 'NOTE: inside shadow DOM, but no CSS selector was recorded for it there; this locator may not find it.';
 
   // Selenium JS/TS: a shadow root's findElement returns a plain promise, so every hop
   // is awaited (see selShadowFrameSwitch); the result is a WebElement expression.
-  // More than two hops go one per line (inside parentheses, so Python reads it too).
+  // Two hops or more go one per line (inside parentheses, so Python reads it too).
   function selShadowExpr(sh, lang) {
     var expr = selFind('css', sh.hosts[0], lang);
     var rest = sh.hosts.slice(1).concat(sh.css);
-    var br = rest.length > 2 ? '\n    ' : '';
+    var br = shadowBreak(sh) ? '\n    ' : '';
     rest.forEach(function (sel) {
       expr = lang === 'python'
         ? expr + br + '.shadow_root.find_element(By.CSS_SELECTOR, ' + q(sel, lang) + ')'
@@ -1391,8 +1777,9 @@
   }
 
   function cyShadowExpr(sh, lang) {
+    var br = shadowBreak(sh) ? '\n    ' : '';
     return 'cy.get(' + q(sh.hosts[0], lang) + ')' + sh.hosts.slice(1).concat(sh.css).map(function (sel) {
-      return '.shadow().find(' + q(sel, lang) + ')';
+      return br + '.shadow().find(' + q(sel, lang) + ')';
     }).join('');
   }
 
@@ -1402,7 +1789,7 @@
     var plug = targetFor(fw, lang);
     if (plug) return plug.locatorExpr(target, lang, rel);
     if (target.kind === 'frame') return frameExpr(target, fw, lang);
-    var sh = fw === 'selenium' || fw === 'cypress' ? shadowOf(target) : null;
+    var sh = fw === 'selenium' || fw === 'cypress' ? shadowWalk(target) : null;
     if (sh) return fw === 'selenium' ? selShadowExpr(sh, lang) : cyShadowExpr(sh, lang);
     if (target.kind === 'chain') return chainExpr(target, fw, lang);
     if (fw === 'selenium') return selLocator(target, lang, rel);
@@ -1753,12 +2140,11 @@
     return t.kind === 'xpath';
   }
 
-  var CY_XPATH_NOTE = 'NOTE: Cypress has no XPath; locatraGet() evaluates this one with document.evaluate ' +
-    '(it does not search shadow roots).';
+  var CY_XPATH_NOTE = 'NOTE: Cypress has no XPath; locatraGet() runs it with document.evaluate (no shadow roots).';
 
   function statementNotes(step, fw, lang) {
     var notes = [];
-    if (hasAmbiguousRole(step.target)) {
+    if (roleNote(step.target)) {
       notes.push(comment(lang, 'NOTE: this role locator has no accessible name and may match several elements; the first match is used.'));
     }
     if (fw === 'cypress' && hasXpath(step.target)) notes.push(comment(lang, CY_XPATH_NOTE));
@@ -1768,6 +2154,15 @@
     }
     if (lacksShadowCss(step.target)) notes.push(comment(lang, SHADOW_NOTE));
     return notes;
+  }
+
+  // A statement continues on a line of its own before the action (`.fill(…)`, an
+  // assertion's matcher) when one line would pass STMT_WIDTH, where the language reads
+  // that naturally (Java, C#): `head` is everything before it, possibly several lines.
+  var STMT_WIDTH = 100;
+  function callOn(head, call) {
+    var lines = String(head).split('\n');
+    return lines[lines.length - 1].length + call.length > STMT_WIDTH ? head + '\n    ' + call : head + call;
   }
 
   function withNotes(notes, stmt) {
@@ -1916,7 +2311,7 @@
   // out with awaits — at run time a shadow root's findElement returns a plain
   // promise, so chaining off it the way off driver.findElement() fails.
   function selShadowFrameSwitch(path, lang) {
-    if (lang === 'python' && path.length === 2) {
+    if (lang === 'python' && path.length === 2 && !pathBreak(path)) {
       return 'driver.switch_to.frame(' + selFind('css', path[0], lang) + '.shadow_root.find_element(By.CSS_SELECTOR, ' +
         q(path[1], lang) + '))';
     }
@@ -2019,12 +2414,12 @@
       // The recorded size is the viewport (innerWidth x innerHeight); Selenium sizes
       // the whole window, so add the browser chrome measured at run time.
       if (py) {
-        return 'driver.set_window_size(*driver.execute_script(' + q('return [' + vpW(step) + ' + window.outerWidth - window.innerWidth, ' +
-          vpH(step) + ' + window.outerHeight - window.innerHeight];', lang) + '))';
+        return 'driver.set_window_size(*driver.execute_script(\n    ' + q('return [' + vpW(step) +
+          ' + window.outerWidth - window.innerWidth, ' + vpH(step) + ' + window.outerHeight - window.innerHeight];', lang) + '))';
       }
       // (The script's driver comes from require(): untyped, so no type argument.)
-      return '{\n  const chrome' + (lang === 'typescript' ? ': number[]' : '') + ' = await driver.executeScript' +
-        "('return [window.outerWidth - window.innerWidth, window.outerHeight - window.innerHeight];');\n" +
+      return '{\n  const chrome' + (lang === 'typescript' ? ': number[]' : '') + ' = await driver.executeScript(\n' +
+        "    'return [window.outerWidth - window.innerWidth, window.outerHeight - window.innerHeight];');\n" +
         '  await driver.manage().window().setRect({ width: ' + vpW(step) + ' + chrome[0], height: ' + vpH(step) + ' + chrome[1] });\n}';
     }
     return withNotes(statementNotes(step, 'selenium', lang), selTargetStatement(step, lang));
@@ -2145,8 +2540,8 @@
       return 'try:\n    expect(' + loc + ').to_have_value(' + secret + ')\n' +
         'except AssertionError:\n    raise AssertionError(' + msg + ') from None';
     }
-    return 'await expect.poll(async () => (await ' + loc + '.inputValue()) === (' + secret + '), ' +
-      '{ message: ' + msg + ' }).toBe(true);';
+    return 'await expect.poll(async () => (await ' + loc + '.inputValue()) === (' + secret + '), {\n' +
+      '  message: ' + msg + ',\n}).toBe(true);';
   }
 
   // Text assertions: the recorder takes an element's text from innerText (what is
@@ -2194,7 +2589,7 @@
       return secretExpr(step, 'cypress', lang) + '.then((secret) => {\n' +
         '  ' + loc + '.should(($el) => { expect($el.val() === secret, ' + q(secretMismatch(step), lang) + ').to.equal(true); });\n});';
     }
-    var rendered = "$el[0].innerText.replace(/[\\u00ad\\u200b]/g, '').replace(/\\s+/g, ' ').trim()";
+    var rendered = CY_TEXT_NAME + '($el)';
     var map = {
       toBeVisible: ".should('be.visible')",
       toHaveText: '.should(($el) => { expect(' + rendered + ').to.equal(' + q(normText(v), lang) + '); })',
@@ -2216,7 +2611,7 @@
     var unchecked = String(v) === 'false';
     var sensitive = sensitiveAssert(step);
     if (py) {
-      var pyText = '" ".join(' + loc + '.text.replace("\\u00ad", "").replace("\\u200b", "").split())';
+      var pyText = PY_TEXT_NAME + '(' + loc + ')';
       switch (t) {
         case 'toHaveText': return 'assert ' + pyText + ' == ' + q(normText(v), lang);
         case 'toContainText': return 'assert ' + q(normText(v), lang) + ' in ' + pyText;
@@ -2231,9 +2626,9 @@
         case 'toBeVisible': default: return 'assert ' + loc + '.is_displayed()';
       }
     }
-    var jsText = '(await ' + loc + ".getText()).replace(/[\\u00ad\\u200b]/g, '').replace(/\\s+/g, ' ').trim()";
+    var jsText = '(await ' + SEL_TEXT_NAME + '(' + loc + '))';
     switch (t) {
-      case 'toHaveText': return 'assert.strictEqual(' + jsText + ', ' + q(normText(v), lang) + ');';
+      case 'toHaveText': return 'assert.strictEqual(await ' + SEL_TEXT_NAME + '(' + loc + '), ' + q(normText(v), lang) + ');';
       case 'toContainText': return 'assert.ok(' + jsText + '.includes(' + q(normText(v), lang) + '));';
       case 'toHaveValue':
         if (sensitive) {
@@ -2270,11 +2665,20 @@
     if (!urlStep && TARGETLESS_ACTIONS.indexOf(a) === -1 && !unwrapFrames(step.target).inner) {
       return targetTodo(plug, lang, '"' + a + '" step has no element locator');
     }
-    if (plug) return plug.actionStatement(step, lang);
-    if (urlStep) return urlAssert(step, fw, lang);
-    if (fw === 'selenium') return selStatement(step, lang);
-    if (fw === 'cypress') return cyStatement(step, lang);
-    return pwStatement(step, lang);
+    var stmt;
+    if (plug) stmt = plug.actionStatement(step, lang);
+    else if (urlStep) stmt = urlAssert(step, fw, lang);
+    else if (fw === 'selenium') stmt = selStatement(step, lang);
+    else if (fw === 'cypress') stmt = cyStatement(step, lang);
+    else stmt = pwStatement(step, lang);
+    // A locator the recorder found more than one element for says so, in every
+    // framework, on the line before the step — unless what is rendered is not that
+    // locator: an alternative chosen above, or a walk through shadow roots (each host
+    // unique in its tree, shadowCss unique in the last root) are unique.
+    var note = urlStep || TARGETLESS_ACTIONS.indexOf(a) !== -1 || (fw !== 'playwright' && walked(step.target))
+      ? null : nonUniqueNote(step.target);
+    if (!note) return stmt;
+    return (plug && typeof plug.comment === 'function' ? plug.comment(note, lang) : comment(lang, note)) + '\n' + stmt;
   }
 
   // ════════════════════════════════════════════════════════════════════════════
@@ -2789,7 +3193,7 @@
       body.push('  await this.driver.get(' + q(url, lang) + ');', '}');
     }
     // A lookup through shadow roots awaits each hop, so it is an async method too.
-    var isAsync = function (m) { return anyFrames || !!shadowOf(unwrapFrames(m.el.target).inner); };
+    var isAsync = function (m) { return anyFrames || !!shadowWalk(unwrapFrames(m.el.target).inner); };
     members.forEach(function (m) {
       body.push('');
       body = body.concat(poNote(m.el, 'selenium', lang));
@@ -2925,8 +3329,9 @@
   function allHelpers(fw, lang) {
     lang = pluginLang(fw, lang);
     var plug = targetFor(fw, lang);
-    var every = 'locatraFind( locatra_find( Locatra( LOCATRA_FRAME_JS LocatraFrameJs LOCATRA_SET_VALUE_JS LocatraSetValueJs ' +
-      'locatraGet( locatraFrame( locatraSecret(';
+    var every = 'locatraFind( locatra_find( Locatra( Locatra.find( Locatra.Find( LOCATRA_FRAME_JS LocatraFrameJs ' +
+      'LOCATRA_SET_VALUE_JS LocatraSetValueJs locatraGet( locatraFrame( locatraSecret( locatraText( locatra_text( ' +
+      'Locatra.text( Locatra.Text( LOCATRA_TEXT';
     if (plug) return typeof plug.helpers === 'function' ? plug.helpers(every, lang) : [];
     if (fw === 'selenium') return selHelpers(every, lang);
     return fw === 'cypress' ? cyHelpers([every], lang) : [];
@@ -2972,15 +3377,21 @@
       DEEP_IFRAME_JS: DEEP_IFRAME_JS, cyFrameSource: cyFrameSource,
       // multi-select (C1), sensitive assertions (C2), open shadow DOM (C3)
       multiValues: multiValues, sensitiveAssert: sensitiveAssert, secretMismatch: secretMismatch,
-      shadowOf: shadowOf, lacksShadowCss: lacksShadowCss, SHADOW_NOTE: SHADOW_NOTE, attrMatchSel: attrMatchSel,
+      shadowOf: shadowOf, shadowWalk: shadowWalk, shadowBreak: shadowBreak, pathBreak: pathBreak, lacksShadowCss: lacksShadowCss, SHADOW_NOTE: SHADOW_NOTE, attrMatchSel: attrMatchSel,
       unwrapFrames: unwrapFrames, validShadowPath: validShadowPath,
       // the Locatra helpers (C9.4) and the target a framework prefers (C9.2)
-      MATCH_SRC: MATCH_SRC, MATCH_JS: MATCH_JS, tsOnly: tsOnly, helperSpec: helperSpec, jsHelperArgs: jsHelperArgs,
+      MATCH_SRC: MATCH_SRC, MATCH_JS: MATCH_JS, MATCH_RUN: MATCH_RUN, tsOnly: tsOnly, helperSpec: helperSpec,
+      // the compact matcher and the line widths of what a file declares
+      jsTokens: jsTokens, compactPieces: compactPieces, matchNames: matchNames, matchSource: matchSource,
+      matchLines: matchLines, matchScriptChunks: matchScriptChunks, wrapPieces: wrapPieces, chunkText: chunkText,
+      literalLines: literalLines, jsMatchConst: jsMatchConst, pyMatchConst: pyMatchConst, HELPER_WIDTH: HELPER_WIDTH,
+      HELPER_BANNER: HELPER_BANNER, TEXT_BANNER: TEXT_BANNER, TEXT_NOTE: TEXT_NOTE, jsHelperArgs: jsHelperArgs,
       pyHelperArgs: pyHelperArgs, selHelperSource: selHelperSource, cyGetSource: cyGetSource, uses: uses,
       HELPER_KINDS: HELPER_KINDS, ALT_KINDS: ALT_KINDS, needsHelper: needsHelper, scopedXpath: scopedXpath,
       FRAME_JS_NAME: FRAME_JS_NAME, SET_VALUE_NAME: SET_VALUE_NAME, FRAME_JS_NOTE: FRAME_JS_NOTE,
       SET_VALUE_NOTE: SET_VALUE_NOTE, hasXpath: hasXpath, CY_XPATH_NOTE: CY_XPATH_NOTE, allHelpers: allHelpers,
-      hasNth: hasNth, isAmbiguousRole: isAmbiguousRole, hasAmbiguousRole: hasAmbiguousRole,
+      hasNth: hasNth, isAmbiguousRole: isAmbiguousRole, hasAmbiguousRole: hasAmbiguousRole, roleNote: roleNote,
+      recordedCount: recordedCount, nonUniqueNote: nonUniqueNote, callOn: callOn, STMT_WIDTH: STMT_WIDTH,
       hasPositionalFrame: hasPositionalFrame, parseKeyCombo: parseKeyCombo, KEY_SELENIUM: KEY_SELENIUM,
       MOD_SELENIUM: MOD_SELENIUM, REAL_PRESS_MODS: REAL_PRESS_MODS, secretName: secretName,
       uploadFiles: uploadFiles, parseViewport: parseViewport, vpW: vpW, vpH: vpH,

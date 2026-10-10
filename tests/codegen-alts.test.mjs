@@ -232,7 +232,7 @@ describe("the target kind 'xpath'", () => {
   it('Cypress: forced on it, a NOTE says it is document.evaluate, outside shadow DOM', () => {
     const out = C.actionStatement({ action: 'click', target: x }, 'cypress', 'typescript');
     expect(out.split('\n')).toEqual([
-      '// NOTE: Cypress has no XPath; locatraGet() evaluates this one with document.evaluate (it does not search shadow roots).',
+      '// NOTE: Cypress has no XPath; locatraGet() runs it with document.evaluate (no shadow roots).',
       `locatraGet('xpath', '//button[normalize-space(.)="Save"]').click();`,
     ]);
     const po = C.pageObject(

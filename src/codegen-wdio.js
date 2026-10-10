@@ -4,7 +4,8 @@
 // globals from @wdio/globals, matchers from expect-webdriverio).
 //
 // WebdriverIO has no getByRole/getByLabel/getByText: a role, label or text target
-// calls the Locatra helper locatraFind() (declared once per file, see below);
+// calls the Locatra helper locatraFind() (declared once per file, see below), and a
+// text assertion compares with the LOCATRA_TEXT options (declared likewise);
 // every other locator uses the selector Selenium JS uses (codegen.js _internals),
 // handed to `$()` instead of `driver.findElement(By…)`. Two differences:
 //   * id and name become CSS (#id / [name="…"]): WDIO has no By.id / By.name.
@@ -75,41 +76,46 @@
   // browser.waitUntil (waitforTimeout, as an element command waits for its element)
   // and fails when several elements match; a chain passes its parent as `within`.
   var HELPER_SRC = [
-    '// Locatra: the one element a role / label / text locator matches, found the way Playwright\'s',
-    '// getByRole / getByLabel / getByText find it (WebdriverIO has none of them). It waits up to',
-    '// waitforTimeout and fails when several elements match.',
-    'const LOCATRA_JS = String.raw`@@MATCH_JS@@`;',
-    '',
-    'async function locatraFind(kind$T{: string}, value$T{: string}, name$T{: string | null} = null, opts$T{: any} = {})$T{: Promise<WebdriverIO.Element>} {',
+    'async function locatraFind(',
+    '  kind$T{: string}, value$T{: string}, name$T{: string | null} = null, opts$T{: any} = {}',
+    ')$T{: Promise<WebdriverIO.Element>} {',
     '  const nth$T{: number} = typeof opts.nth === \'number\' ? opts.nth : -1;',
-    '  const what = kind + \' \' + JSON.stringify(value) + (name ? \' named \' + JSON.stringify(name) : \'\') + (opts.exact ? \' (exact)\' : \'\');',
+    '  const what = kind + \' \' + JSON.stringify(value) + (name ? \' named \' + JSON.stringify(name) : \'\') +',
+    '    (opts.exact ? \' (exact)\' : \'\');',
     '  const scope = opts.within ? await opts.within : null;',
     '  let found$T{: WebdriverIO.Element[]} = [];',
+    '  // Waits up to waitforTimeout, as an element command does; several matches are an error.',
     '  await browser.waitUntil(async () => {',
     '    found = await browser.execute$T{<HTMLElement[], [string, string, string | null, boolean, number, any]>}(',
     '      LOCATRA_JS, kind, value, name, !!opts.exact, opts.level || 0, scope);',
     '    return found.length > Math.max(nth, 0);',
     '  }, { timeoutMsg: \'Locatra: no element matches \' + what });',
-    '  if (nth < 0 && found.length > 1) throw new Error(\'Locatra: \' + found.length + \' elements match \' + what + \'; expected exactly one\');',
+    '  if (nth < 0 && found.length > 1) {',
+    '    throw new Error(\'Locatra: \' + found.length + \' elements match \' + what + \'; expected exactly one\');',
+    '  }',
     '  return $(found[Math.max(nth, 0)]).getElement();',
     '}'
   ].join('\n');
 
   function helperSource(lang) {
-    return I.tsOnly(HELPER_SRC, lang).replace('@@MATCH_JS@@', function () { return I.MATCH_JS; });
+    return '// ' + I.HELPER_BANNER + '\n' + I.jsMatchConst('LOCATRA_JS') + '\n\n' + I.tsOnly(HELPER_SRC, lang);
   }
 
   // A cross-origin frame (no selector) is entered by its position: LOCATRA_FRAME_JS
   // (codegen.js DEEP_IFRAME_JS) is declared once and run with the frame's index.
   // So is LOCATRA_SET_VALUE_JS (codegen.js SET_VALUE_JS), which sets a date / range /
   // colour input's value.
-  function constSource(name, note, js, lang) { return '// ' + note + '\nconst ' + name + ' = ' + q(js, lang) + ';'; }
+  function constSource(name, note, js, lang) {
+    var parts = I.literalLines(js, I.HELPER_WIDTH - 6, function (c) { return q(c, lang); });
+    return '// ' + note + '\nconst ' + name + ' =\n  ' + parts.join(' +\n  ') + ';';
+  }
 
   /** The declarations code needs, in order (an empty list when none). */
   function helpers(code, lang) {
     var out = [];
     if (I.uses(code, I.FRAME_JS_NAME)) out.push(constSource(I.FRAME_JS_NAME, I.FRAME_JS_NOTE, I.DEEP_IFRAME_JS, lang));
     if (I.uses(code, I.SET_VALUE_NAME)) out.push(constSource(I.SET_VALUE_NAME, I.SET_VALUE_NOTE, I.SET_VALUE_JS, lang));
+    if (I.uses(code, TEXT_NAME)) out.push(textSource(lang));
     if (I.uses(code, 'locatraFind')) out.push(helperSource(lang));
     return out;
   }
@@ -155,17 +161,18 @@
       var inner = I.unwrapFrames(target).inner;
       return inner ? expr(inner, lang, rel, null) : '';
     }
-    var sh = I.shadowOf(target);
+    var sh = I.shadowWalk(target);
     if (sh) {
+      var br = I.shadowBreak(sh) ? '\n    ' : '';
       return find('css', sh.hosts[0], lang) + sh.hosts.slice(1).concat(sh.css).map(function (sel) {
-        return '.shadow$(' + q(cssArg(sel), lang) + ')';
+        return br + '.shadow$(' + q(cssArg(sel), lang) + ')';
       }).join('');
     }
     if (target.kind === 'chain') {
       var parent = expr(target.parent, lang, rel, within);
       if (!target.child) return parent;
       // A child reached through shadow roots starts from the document.
-      if (!parent || I.shadowOf(target.child)) return expr(target.child, lang, true, null);
+      if (!parent || I.shadowWalk(target.child)) return expr(target.child, lang, true, null);
       if (I.helperSpec(target.child) || (target.child.kind === 'chain' && I.needsHelper(target.child))) {
         return expr(target.child, lang, true, parent);
       }
@@ -183,8 +190,9 @@
   function frameElementExpr(frame, lang) {
     if (frame.shadowPath) {
       var expr = find('css', frame.shadowPath[0], lang);
+      var br = I.pathBreak(frame.shadowPath) ? '\n    ' : '';
       for (var i = 1; i < frame.shadowPath.length; i++) {
-        expr += '.shadow$(' + q(cssArg(frame.shadowPath[i]), lang) + ')';
+        expr += br + '.shadow$(' + q(cssArg(frame.shadowPath[i]), lang) + ')';
       }
       return expr;
     }
@@ -266,7 +274,7 @@
   // ── statements ─────────────────────────────────────────────────────────────
   function notes(step) {
     var out = [];
-    if (I.hasAmbiguousRole(step.target)) {
+    if (I.roleNote(step.target)) {
       out.push(comment('NOTE: this role locator has no accessible name and may match several elements; the first match is used.'));
     }
     if (I.lacksShadowCss(step.target)) out.push(comment(I.SHADOW_NOTE));
@@ -292,23 +300,29 @@
   }
 
   // Normalise the text like the recorder and Playwright's toHaveText: expect-webdriverio
-  // trims the element text (getText(), already the rendered text), then `replace`
-  // drops soft hyphens and zero-width spaces and collapses every run of whitespace.
-  var NORM_TEXT = "replace: [[/[\\u00ad\\u200b]/g, ''], [/\\s+/g, ' ']]";
+  // trims the element text (getText(), already the rendered text), then LOCATRA_TEXT's
+  // `replace` drops soft hyphens and zero-width spaces and collapses every run of
+  // whitespace. Declared once per file (textSource), so the retrying assertion reads
+  // toHaveText('…', LOCATRA_TEXT).
+  var TEXT_NAME = 'LOCATRA_TEXT';
+  function textSource(lang) {
+    return '// ' + I.TEXT_NOTE + '\nconst ' + TEXT_NAME + " = { replace: [[/[\\u00ad\\u200b]/g, ''], [/\\s+/g, ' ']]" +
+      (lang === 'typescript' ? ' as [RegExp, string][]' : '') + ' };';
+  }
 
   function assertStatement(step, lang) {
     var loc = locatorExpr(step.target, lang);
     var v = step.value;
     switch (step.assertType || 'toBeVisible') {
-      case 'toHaveText': return 'await expect(' + loc + ').toHaveText(' + q(I.normText(v), lang) + ', { ' + NORM_TEXT + ' });';
+      case 'toHaveText': return 'await expect(' + loc + ').toHaveText(' + q(I.normText(v), lang) + ', ' + TEXT_NAME + ');';
       case 'toContainText':
-        return 'await expect(' + loc + ').toHaveText(' + q(I.normText(v), lang) + ', { containing: true, ' + NORM_TEXT + ' });';
+        return 'await expect(' + loc + ').toHaveText(' + q(I.normText(v), lang) + ', { ...' + TEXT_NAME + ', containing: true });';
       case 'toHaveValue':
         // A secret (C2) is compared without ever being printed: toHaveValue's failure
         // message would show the expected value.
         if (I.sensitiveAssert(step)) {
-          return 'await browser.waitUntil(async () => (await ' + loc + '.getValue()) === (' + valueExpr(step, lang) + '), ' +
-            '{ timeoutMsg: ' + q(I.secretMismatch(step), lang) + ' });';
+          return 'await browser.waitUntil(async () => (await ' + loc + '.getValue()) === (' + valueExpr(step, lang) + '), {\n' +
+            '  timeoutMsg: ' + q(I.secretMismatch(step), lang) + ',\n});';
         }
         return 'await expect(' + loc + ').toHaveValue(' + q(v, lang) + ');';
       case 'toBeEnabled': return 'await expect(' + loc + ').toBeEnabled();';
@@ -381,7 +395,7 @@
       // at run time (works with and without WebDriver BiDi).
       var js = 'return [' + I.vpW(step) + ' + outerWidth - innerWidth, ' + I.vpH(step) + ' + outerHeight - innerHeight];';
       var generic = lang === 'typescript' ? '<[number, number], []>' : '';
-      return '{\n  const [width, height] = await browser.execute' + generic + '(' + q(js, lang) + ');\n' +
+      return '{\n  const [width, height] = await browser.execute' + generic + '(\n    ' + q(js, lang) + ');\n' +
         '  await browser.setWindowSize(width, height);\n}';
     }
     if (a === 'assert' && step.assertType === 'toHaveURL') {
@@ -601,6 +615,7 @@
     // The declarations a locator expression needs (LLCodegen.locatorSnippet).
     helpers: helpers,
     // codegen.js writes its own TODOs (unknown action, no locator) through this.
-    todo: function (text) { return todo(text); }
+    todo: function (text) { return todo(text); },
+    comment: function (text) { return comment(text); }
   });
 })(typeof window !== 'undefined' ? window : (typeof globalThis !== 'undefined' ? globalThis : this));

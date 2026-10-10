@@ -94,6 +94,29 @@ export function decodeLiteral(lit, lang) {
   });
 }
 
+const ANY_LITERAL = /@"(?:[^"]|"")*"|"(?:[^"\\\n]|\\.)*"|'(?:[^'\\\n]|\\.)*'/y;
+
+/**
+ * The string a file declares as `name = …`: one literal, several concatenated (`+`,
+ * or Python's implicit concatenation inside parentheses) or a String.raw template,
+ * decoded as `lang` reads it; null when `name` is not declared.
+ */
+export function declaredString(code, name, lang) {
+  const at = new RegExp(`\\b${name}\\s*=\\s*`).exec(code);
+  if (!at) return null;
+  let i = at.index + at[0].length;
+  if (code.startsWith('String.raw`', i)) return code.slice(i + 11, code.indexOf('`', i + 11));
+  let out = '';
+  for (;;) {
+    while (/[\s(+]/.test(code[i])) i++;
+    ANY_LITERAL.lastIndex = i;
+    const m = ANY_LITERAL.exec(code);
+    if (!m) return out;
+    out += decodeLiteral(m[0], lang);
+    i += m[0].length;
+  }
+}
+
 /**
  * The first helper call in `code`: { root, kind, value, name, exact, level, nth,
  * within } (root: the receiver expression, null for WebdriverIO and Cypress), or

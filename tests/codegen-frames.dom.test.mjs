@@ -17,6 +17,7 @@ import vm from 'node:vm';
 import { beforeAll, describe, expect, it } from 'vitest';
 
 import * as CORPUS from './codegen-corpus.mjs';
+import { declaredString } from './codegen-helper-calls.mjs';
 
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 
@@ -62,9 +63,9 @@ function seleniumScript(index) {
   expect(m, code).toBeTruthy();
   expect(Number(m[1])).toBe(index);
   const file = C.testScript([{ action: 'click', target }], 'selenium', 'javascript');
-  const decl = /^const LOCATRA_FRAME_JS = '((?:[^'\\]|\\.)*)';$/m.exec(file);
-  expect(decl, file).toBeTruthy();
-  return new Function(`return '${decl[1]}';`)();
+  const script = declaredString(file, 'LOCATRA_FRAME_JS', 'javascript');
+  expect(script, file).toBeTruthy();
+  return script;
 }
 
 /** Runs a WebDriver script the way executeScript does: a function body with arguments. */
@@ -95,16 +96,16 @@ describe('a selector-less frame is found by the engine’s index', () => {
     expect(click('selenium', 'python')).toBe(
       'driver.switch_to.frame(driver.execute_script(LOCATRA_FRAME_JS, 3))'
     );
-    expect(file('selenium', 'python')).toContain(`LOCATRA_FRAME_JS = ${C.q(I.DEEP_IFRAME_JS, 'python')}\n`);
+    expect(declaredString(file('selenium', 'python'), 'LOCATRA_FRAME_JS', 'python')).toBe(I.DEEP_IFRAME_JS);
     expect(click('selenium', 'java')).toContain('executeScript(LOCATRA_FRAME_JS, 3)');
-    expect(file('selenium', 'java')).toContain(`LOCATRA_FRAME_JS = ${JSON.stringify(I.DEEP_IFRAME_JS)};`);
+    expect(declaredString(file('selenium', 'java'), 'LOCATRA_FRAME_JS', 'java')).toBe(I.DEEP_IFRAME_JS);
     expect(click('selenium', 'csharp')).toContain('ExecuteScript(LocatraFrameJs, 3)');
-    expect(file('selenium', 'csharp')).toContain(`LocatraFrameJs = ${JSON.stringify(I.DEEP_IFRAME_JS)};`);
+    expect(declaredString(file('selenium', 'csharp'), 'LocatraFrameJs', 'csharp')).toBe(I.DEEP_IFRAME_JS);
     expect(click('webdriverio', 'javascript')).toBe(
       'await browser.switchFrame($(await browser.execute(LOCATRA_FRAME_JS, 3)));'
     );
-    expect(file('webdriverio', 'javascript')).toContain(
-      `const LOCATRA_FRAME_JS = ${C.q(I.DEEP_IFRAME_JS, 'javascript')};`
+    expect(declaredString(file('webdriverio', 'javascript'), 'LOCATRA_FRAME_JS', 'javascript')).toBe(
+      I.DEEP_IFRAME_JS
     );
   });
 
@@ -128,7 +129,7 @@ describe('a selector-less frame is found by the engine’s index', () => {
     expect(C.locatorExpr(nested, 'cypress', 'typescript')).toBe(
       "cy.document().then((doc) => locatraFrame(doc, 1)).its('0.contentDocument.body').should('not.be.empty')" +
         '.then(cy.wrap)\n  .then((body) => locatraFrame((body as JQuery<HTMLElement>)[0].ownerDocument, 0))' +
-        ".its('0.contentDocument.body').should('not.be.empty').then(cy.wrap)\n  .find('#x')"
+        "\n  .its('0.contentDocument.body').should('not.be.empty').then(cy.wrap)\n  .find('#x')"
     );
     const spec = C.testScript([{ action: 'click', target: nested }], 'cypress', 'typescript');
     expect(

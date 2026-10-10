@@ -20,7 +20,7 @@ import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 
 import { M2_REPO, javaToolchain } from '../scripts/e2e/setup-java.mjs';
 import * as CORPUS from './codegen-corpus.mjs';
-import { helperCallOf } from './codegen-helper-calls.mjs';
+import { declaredString, helperCallOf } from './codegen-helper-calls.mjs';
 
 let C;
 beforeAll(async () => {
@@ -353,7 +353,9 @@ describe('Playwright for Java locators', () => {
         })
       )
     ).toBe(
-      'page.frameLocator("#outer").frameLocator("iframe >> nth=2").getByText("Go", new FrameLocator.GetByTextOptions().setExact(true))'
+      // A long chain continues on the next line.
+      'page.frameLocator("#outer").frameLocator("iframe >> nth=2")\n' +
+        '    .getByText("Go", new FrameLocator.GetByTextOptions().setExact(true))'
     );
     expect(pw({ kind: 'frame', selector: null, child: testid('t') })).toBe(
       'page.frameLocator("iframe >> nth=0").getByTestId("t")'
@@ -373,7 +375,8 @@ describe('Playwright for Java locators', () => {
         )
       )
     ).toBe(
-      'page.locator(".host").frameLocator("iframe").getByPlaceholder("P", new FrameLocator.GetByPlaceholderOptions().setExact(true))'
+      'page.locator(".host")\n' +
+        '    .frameLocator("iframe").getByPlaceholder("P", new FrameLocator.GetByPlaceholderOptions().setExact(true))'
     );
     expect(pw(frame('#f', null))).toBe('');
   });
@@ -553,10 +556,10 @@ describe('Playwright for Java statements', () => {
     expect(a(undefined)).toBe(`assertThat(${loc}).isVisible();`);
     expect(a('toBeSomethingNew')).toBe(`assertThat(${loc}).isVisible();`);
     expect(a('toHaveText', 'Ada  Lovelace')).toBe(
-      `assertThat(${loc}).hasText("Ada  Lovelace", new LocatorAssertions.HasTextOptions().setUseInnerText(true));`
+      `assertThat(${loc})\n    .hasText("Ada  Lovelace", new LocatorAssertions.HasTextOptions().setUseInnerText(true));`
     );
     expect(a('toContainText', 'Ada')).toBe(
-      `assertThat(${loc}).containsText("Ada", new LocatorAssertions.ContainsTextOptions().setUseInnerText(true));`
+      `assertThat(${loc})\n    .containsText("Ada", new LocatorAssertions.ContainsTextOptions().setUseInnerText(true));`
     );
     expect(a('toHaveValue', 'Ireland')).toBe(`assertThat(${loc}).hasValue("Ireland");`);
     expect(a('toHaveValue', null)).toBe(`assertThat(${loc}).hasValue("");`);
@@ -628,8 +631,8 @@ describe('Selenium for Java statements', () => {
         /^\(\(JavascriptExecutor\) driver\)\.executeScript\(LOCATRA_SET_VALUE_JS, driver\.findElement\(.*\), "5"\);$/
       );
       const file = C.testScript([{ action: 'fill', target: t, value: '5', inputType }], 'selenium', 'java');
-      const decl = /private static final String LOCATRA_SET_VALUE_JS = ("(?:[^"\\]|\\.)*");/.exec(file);
-      expect(javaString(decl[1])).toBe(C._internals.SET_VALUE_JS);
+      expect(file).toContain('private static final String LOCATRA_SET_VALUE_JS =\n');
+      expect(declaredString(file, 'LOCATRA_SET_VALUE_JS', 'java')).toBe(C._internals.SET_VALUE_JS);
     }
     expect(seStep({ action: 'fill', target: t, value: 'x', inputType: 'text' })).toBe(
       block('el.clear();', 'el.sendKeys("x");')
@@ -688,8 +691,10 @@ describe('Selenium for Java statements', () => {
       [
         '{',
         '    JavascriptExecutor js = (JavascriptExecutor) driver;',
-        '    int width = ((Number) js.executeScript("return 1280 + window.outerWidth - window.innerWidth;")).intValue();',
-        '    int height = ((Number) js.executeScript("return 800 + window.outerHeight - window.innerHeight;")).intValue();',
+        '    int width = ((Number) js.executeScript(',
+        '        "return 1280 + window.outerWidth - window.innerWidth;")).intValue();',
+        '    int height = ((Number) js.executeScript(',
+        '        "return 800 + window.outerHeight - window.innerHeight;")).intValue();',
         '    driver.manage().window().setSize(new Dimension(width, height));',
         '}',
       ].join('\n')
@@ -701,7 +706,7 @@ describe('Selenium for Java statements', () => {
 
   it('asserts with JUnit, comparing whitespace-normalised text', () => {
     const a = (assertType, value) => seStep({ action: 'assert', target: t, assertType, value });
-    const text = `${loc}.getText().replaceAll("[\\\\u00ad\\\\u200b]", "").replaceAll("(?U)\\\\s+", " ").trim()`;
+    const text = `Locatra.text(${loc})`;
     expect(a('toBeVisible')).toBe(`assertTrue(${loc}.isDisplayed());`);
     expect(a('somethingNew')).toBe(`assertTrue(${loc}.isDisplayed());`);
     expect(a('toHaveText', '  Ada\n Lovelace ')).toBe(`assertEquals("Ada Lovelace", ${text});`);
@@ -772,7 +777,9 @@ describe('Selenium for Java statements', () => {
     );
     expect(seStep({ action: 'click', target })).toBe(
       [
-        'driver.switchTo().frame(driver.findElement(By.cssSelector("#shell")).getShadowRoot().findElement(By.cssSelector("x-inner")).getShadowRoot().findElement(By.cssSelector("iframe")));',
+        'driver.switchTo().frame(driver.findElement(By.cssSelector("#shell"))',
+        '    .getShadowRoot().findElement(By.cssSelector("x-inner"))',
+        '    .getShadowRoot().findElement(By.cssSelector("iframe")));',
         'driver.findElement(By.id("cvc")).click();',
         'driver.switchTo().defaultContent();',
       ].join('\n')
@@ -832,7 +839,8 @@ describe('Playwright for Java test file', () => {
         '        page.navigate("https://shop.example/");',
         '        page.getByLabel("First name").fill("Ada");',
         '        page.getByRole(AriaRole.BUTTON, new Page.GetByRoleOptions().setName("Save")).click();',
-        '        assertThat(page.getByTestId("done")).hasText("Saved", new LocatorAssertions.HasTextOptions().setUseInnerText(true));',
+        '        assertThat(page.getByTestId("done"))',
+        '            .hasText("Saved", new LocatorAssertions.HasTextOptions().setUseInnerText(true));',
         '    }',
         '}',
         '',
@@ -953,11 +961,10 @@ describe('Selenium for Java test file', () => {
     expect(out.startsWith(head)).toBe(true);
     expect(out).toContain(
       [
-        '        assertEquals("Saved", driver.findElement(By.cssSelector("[data-testid=\\"done\\"]")).getText()' +
-          '.replaceAll("[\\\\u00ad\\\\u200b]", "").replaceAll("(?U)\\\\s+", " ").trim());',
+        '        assertEquals("Saved", Locatra.text(driver.findElement(By.cssSelector("[data-testid=\\"done\\"]"))));',
         '    }',
         '',
-        "    // Locatra: the one element a role / label / text locator matches, found the way Playwright's",
+        `    // ${C._internals.HELPER_BANNER}`,
       ].join('\n')
     );
     // The helper class closes the test class, declared once.
@@ -1026,7 +1033,8 @@ describe('test-data variables', () => {
     );
     expect(pwStep(refSteps[0])).toBe('page.getByLabel("First name").fill(TEST_DATA.get("firstName"));');
     expect(pwStep(refSteps[1])).toBe(
-      'page.getByRole(AriaRole.COMBOBOX, new Page.GetByRoleOptions().setName("Country")).selectOption(TEST_DATA.get("country"));'
+      'page.getByRole(AriaRole.COMBOBOX, new Page.GetByRoleOptions().setName("Country"))\n' +
+        '    .selectOption(TEST_DATA.get("country"));'
     );
     expect(seStep(refSteps[1])).toMatch(/\)\.selectByVisibleText\(TEST_DATA\.get\("country"\)\);$/);
     expect(seStep(refSteps[0])).toContain('    el.sendKeys(TEST_DATA.get("firstName"));');
@@ -1203,7 +1211,7 @@ describe('page objects: exact output', () => {
     const xpath = C.locatorExpr(SMALL.elements[0].target, 'selenium', 'java');
     const button = C.locatorExpr(SMALL.elements[1].target, 'selenium', 'java');
     expect(xpath).toBe('Locatra.find(driver, "label", "Email address")');
-    expect(code.slice(0, code.indexOf('    // Locatra: the one element'))).toBe(
+    expect(code.slice(0, code.indexOf(`    // ${C._internals.HELPER_BANNER}`))).toBe(
       [
         '// Page Object generated by Locatra for "Checkout | Shop".',
         '// Page: https://shop.example/checkout',
@@ -1383,9 +1391,8 @@ describe('page objects: members and helpers', () => {
     expect(code).toContain(
       '        driver.switchTo().frame((WebElement) ((JavascriptExecutor) driver).executeScript(LOCATRA_FRAME_JS, 2));\n        return Locatra.find(driver, "text", "Go", null, true);'
     );
-    expect(code).toContain(
-      `    private static final String LOCATRA_FRAME_JS = ${JSON.stringify(C._internals.DEEP_IFRAME_JS)};`
-    );
+    expect(code).toContain('    private static final String LOCATRA_FRAME_JS =\n');
+    expect(declaredString(code, 'LOCATRA_FRAME_JS', 'java')).toBe(C._internals.DEEP_IFRAME_JS);
   });
 
   it('sets range values through the value setter, selects by text, toggles only when needed', () => {
@@ -1662,6 +1669,14 @@ describe.skipIf(!JAVA)('javac compiles every generated file (-Xlint:all -Werror)
       addTest(C.testScript(CORPUS.STEPS, fw, 'java'));
       addTest(C.testScript(CORPUS.STEPS, fw, 'java', { variables: true }));
       addPo({ ...CORPUS.MODEL, className: `${fw} corpus` }, fw);
+      // A Locatra class holding text() alone.
+      const text = {
+        action: 'assert',
+        assertType: 'toHaveText',
+        target: { kind: 'id', value: 'x' },
+        value: 'Hi',
+      };
+      addTest(C.testScript([text], fw, 'java'));
     }
     const out = join(workDir, 'out');
     let output = '';

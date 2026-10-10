@@ -1221,12 +1221,14 @@ describe('Selenium check/uncheck and viewport', () => {
   it('sizes the window to the recorded viewport plus browser chrome', () => {
     const py = C.actionStatement({ action: 'viewport', width: 390, height: 844 }, 'selenium', 'python');
     expect(py).toBe(
-      'driver.set_window_size(*driver.execute_script("return [390 + window.outerWidth - window.innerWidth, 844 + window.outerHeight - window.innerHeight];"))'
+      'driver.set_window_size(*driver.execute_script(\n' +
+        '    "return [390 + window.outerWidth - window.innerWidth, 844 + window.outerHeight - window.innerHeight];"))'
     );
     expect(C.actionStatement({ action: 'viewport', width: 390, height: 844 }, 'selenium', 'typescript')).toBe(
       [
         '{',
-        "  const chrome: number[] = await driver.executeScript('return [window.outerWidth - window.innerWidth, window.outerHeight - window.innerHeight];');",
+        '  const chrome: number[] = await driver.executeScript(',
+        "    'return [window.outerWidth - window.innerWidth, window.outerHeight - window.innerHeight];');",
         '  await driver.manage().window().setRect({ width: 390 + chrome[0], height: 844 + chrome[1] });',
         '}',
       ].join('\n')
@@ -1246,7 +1248,7 @@ describe('text assertions (C6)', () => {
       'expect(page.locator("#total")).to_contain_text("lorem", use_inner_text=True)'
     );
     expect(C.actionStatement(step, 'selenium', 'python')).toBe(
-      'assert "lorem" in " ".join(driver.find_element(By.ID, "total").text.replace("\\u00ad", "").replace("\\u200b", "").split())'
+      'assert "lorem" in locatra_text(driver.find_element(By.ID, "total"))'
     );
     expect(C.actionStatement(step, 'cypress', 'javascript')).toContain('.to.contain(');
   });
@@ -1254,10 +1256,10 @@ describe('text assertions (C6)', () => {
   it('compares whitespace-normalised text for toHaveText in Cypress and Selenium', () => {
     const step = { action: 'assert', assertType: 'toHaveText', target: t, value: '  Total\n 42 ' };
     expect(C.actionStatement(step, 'cypress', 'javascript')).toBe(
-      "cy.get('#total').should(($el) => { expect($el[0].innerText.replace(/[\\u00ad\\u200b]/g, '').replace(/\\s+/g, ' ').trim()).to.equal('Total 42'); });"
+      "cy.get('#total').should(($el) => { expect(locatraText($el)).to.equal('Total 42'); });"
     );
     expect(C.actionStatement(step, 'selenium', 'javascript')).toBe(
-      "assert.strictEqual((await driver.findElement(By.id('total')).getText()).replace(/[\\u00ad\\u200b]/g, '').replace(/\\s+/g, ' ').trim(), 'Total 42');"
+      "assert.strictEqual(await locatraText(driver.findElement(By.id('total'))), 'Total 42');"
     );
   });
 });
@@ -1370,15 +1372,20 @@ describe('Cypress cross-origin', () => {
     const ts = C.testScript(steps, 'cypress', 'typescript');
     expect(ts.match(/function locatraMatch\(/g)).toHaveLength(2);
     expect(ts.match(/function locatraGet\(/g)).toHaveLength(2);
-    expect(ts.startsWith('// Locatra: the elements a role / label / text locator matches')).toBe(true);
-    expect(ts).toContain(
-      'function locatraMatch(kind: string, value: string, name: string | null, exact: boolean, level: number, scope: any): any[] {'
+    expect(ts.startsWith(`// ${C._internals.HELPER_BANNER}\n`)).toBe(true);
+    // The matcher compacted (codegen-helpers.dom.test.mjs proves it the same program).
+    expect(ts).toMatch(
+      /^function locatraMatch\(\w+:string,\w+:string,\w+:string\|null,\w+:boolean,\w+:number,\w+:any\):any\[\]\{/m
     );
     expect(ts).toContain(
-      'function locatraGet(kind: string, value: string, name: string | null = null, opts: any = {}): Cypress.Chainable<JQuery<HTMLElement>> {'
+      [
+        'function locatraGet(',
+        '  kind: string, value: string, name: string | null = null, opts: any = {}',
+        '): Cypress.Chainable<JQuery<HTMLElement>> {',
+      ].join('\n')
     );
     expect(C.testScript(steps, 'cypress', 'javascript')).toContain(
-      'function locatraGet(kind, value, name = null, opts = {}) {'
+      'function locatraGet(\n  kind, value, name = null, opts = {}\n) {'
     );
     expect(C.testScript([{ action: 'goto', value: '/' }], 'cypress', 'javascript')).not.toContain(
       'locatraMatch'
@@ -1751,9 +1758,7 @@ describe('remaining edge cases', () => {
         'selenium',
         'javascript'
       )
-    ).toBe(
-      "assert.ok((await driver.findElement(By.id('f')).getText()).replace(/[\\u00ad\\u200b]/g, '').replace(/\\s+/g, ' ').trim().includes('a b'));"
-    );
+    ).toBe("assert.ok((await locatraText(driver.findElement(By.id('f')))).includes('a b'));");
   });
 
   it('tolerates missing steps when placing cy.origin blocks', () => {

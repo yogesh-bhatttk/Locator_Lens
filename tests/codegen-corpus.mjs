@@ -47,8 +47,57 @@ export const LEAVES = [
   kind('xpath', 'id("main")/descendant::a[@aria-label="Close"]'),
 ];
 
+// Shapes recorded on real sites (MDN, Shoelace, Wikipedia, GitHub, the-internet,
+// TodoMVC): long structural shadow-host selectors, positional CSS, a long heading
+// name, a cross-origin frame by index, and a locator known to match 103 elements.
+export const MDN_HOST =
+  'html > body > header > nav > div:nth-of-type(3) > div:nth-of-type(2) > mdn-search-button';
+export const MDN_CODE_HOST =
+  'html > body > div:nth-of-type(2) > div > main > div:nth-of-type(2) > section:nth-of-type(5) > mdn-code-example';
+export const SL_HOST =
+  'html > body > main > article > div:nth-of-type(2) > div:nth-of-type(3) > div:nth-of-type(1) > sl-checkbox';
+export const REAL = [
+  role('button', 'Search the site', {
+    shadowHosts: [MDN_HOST],
+    shadowCss: 'button[title="Search the site"]',
+    matchCount: 1,
+    unique: true,
+  }),
+  chain(
+    role('region', 'Selecting multiple options'),
+    kind('text', 'Copy', { shadowHosts: [MDN_CODE_HOST, 'mdn-copy-button'], shadowCss: 'mdn-button' })
+  ),
+  role('checkbox', 'Checkbox', { shadowHosts: [SL_HOST], shadowCss: 'input' }),
+  kind('css', 'svg', {
+    shadowHosts: [SL_HOST, 'sl-icon[name="check"]'],
+    shadowCss: 'svg',
+    matchCount: 103,
+    unique: false,
+  }),
+  kind('id', 'reset', {
+    shadowHosts: ['interactive-example[name="HTML Demo: &lt;select&gt;"]'],
+    shadowCss: '#reset',
+  }),
+  kind('css', 'input', { shadowHosts: [SL_HOST], shadowCss: 'input' }),
+  kind(
+    'css',
+    'div.code-preview:nth-of-type(1) > div.code-preview__buttons:nth-of-type(3) > button.code-preview__button.code-preview__button--html:nth-of-type(2)'
+  ),
+  kind(
+    'css',
+    '#toc-Table_basics > button.cdx-button.cdx-button--weight-quiet > span.vector-icon.mw-ui-icon-wikimedia-expand:nth-of-type(1)'
+  ),
+  role('heading', 'This is where you can log into the secure area. Enter tomsmith for the username', {
+    level: 4,
+  }),
+  frame(null, role('combobox', 'Choose a pet:'), { index: 0 }),
+  frame(`${SL_HOST} iframe`, kind('id', 'card'), { shadowPath: [SL_HOST, 'iframe.card'] }),
+  kind('css', 'svg', { matchCount: 102, unique: false }),
+];
+
 export const TARGETS = [
   ...LEAVES,
+  ...REAL,
   chain(kind('css', 'table.orders'), role('button', 'Delete')),
   chain(role('row', 'Ada Lovelace'), kind('text', 'Edit', { exact: true })),
   chain(kind('id', 'cart'), chain(role('listitem', 'Tea'), kind('label', 'Quantity'))),
