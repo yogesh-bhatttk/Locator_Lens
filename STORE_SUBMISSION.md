@@ -53,8 +53,12 @@ loaded a library from `unpkg.com` — remote code, and an automatic rejection.
   pointing at an `http(s)` or protocol-relative (`//cdn…`) URL, `import()` /
   `import … from` a URL, `.src = 'https://…'` / `setAttribute('src', …)`, and CSS
   `@import` / `url()` of a remote URL
-- dynamic code execution: `eval()`, `new Function()`, `importScripts()`, and
-  `setTimeout` / `setInterval` called with a string
+- dynamic code execution: `eval()`, `new Function()`, `importScripts()` of anything
+  but a file shipped in the package, and `setTimeout` / `setInterval` called with a
+  string
+- a manifest that loosens the extension pages' Content Security Policy (anything but
+  `'self'`, `'none'` or `'wasm-unsafe-eval'` in a script directive) or declares
+  `externally_connectable`
 - network APIs: `fetch()`, `XMLHttpRequest`, `navigator.sendBeacon()`,
   `WebSocket`, `EventSource` (they contradict the "runs locally, no network" claim)
 - a manifest, page or injection that references a file the package does not
@@ -144,10 +148,13 @@ stored steps inside the user's own tab (no network); **Page Object export** buil
 class from the elements of a region the user picks; **automatic assertion
 suggestions** propose checks (URL changed, confirmation message shown) that stay out
 of the test until accepted and never carry sensitive values; **step screenshots**
-come from `chrome.tabs.captureVisibleTab`, which the existing host permissions
-already allow — no new permission — and are stored only as local IndexedDB
-thumbnails, deleted with their steps, after 14 days, or never taken when the
-setting is off.
+come from `chrome.tabs.captureVisibleTab`, which needs the optional `<all_urls>`
+grant (requested only when the user switches screenshots on — see §4). They are
+stored only as local IndexedDB thumbnails, deleted with their steps, after 14 days,
+or never taken when the setting is off, and no screenshot is taken of a password,
+one-time-code or card step or while such a value shows in a field. The **locator
+health check** re-checks the user's saved locators against the page they are on,
+when they press Check or, if they opt in, when such a page loads.
 
 Certify all three: no unauthorised use, no unauthorised transfer, no
 creditworthiness use. The package contains no network API at all, which
@@ -159,15 +166,15 @@ rather than merely asserted.
 Paste these into the Chrome Web Store "Privacy practices" tab. Each permission is
 exercised by the feature named; there are no unused permissions.
 
-| Permission                                         | Justification                                                                                                                                                                                                                                                                                                                                                                                                                           |
-| -------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `activeTab`                                        | Grants access to the tab the user is on at the moment they click Inspect, Record, Validate or Stress Test (or use the context menu), so those actions keep working when the user has set the extension's site access to "on click" in Chrome or revoked its host permission in Firefox.                                                                                                                                                 |
-| `scripting`                                        | The inspector, recorder and Selector Lab are content scripts. When a page loaded before the extension did — or after an extension update — `chrome.scripting.executeScript` re-injects them so the user does not have to reload the page.                                                                                                                                                                                               |
-| `storage`                                          | `chrome.storage.local` keeps the user's framework/language choice and settings, the last inspected element and the in-progress recording (timeline and script draft); `chrome.storage.session` keeps the service worker's inspect/recording state and steps recorded while the panel was closed. Passwords and one-time codes are never recorded. Local only; nothing is transmitted.                                                   |
-| `contextMenus`                                     | Adds the right-click "Copy Best Locator" and "Open/Close Results Panel" entries.                                                                                                                                                                                                                                                                                                                                                        |
-| `sidePanel` (Chrome)                               | The results panel is the extension's primary UI surface.                                                                                                                                                                                                                                                                                                                                                                                |
-| `optional_host_permissions: <all_urls>` (optional) | Step screenshots: `chrome.tabs.captureVisibleTab` requires `<all_urls>` or an activeTab grant — http/https host access is not enough. It is optional and requested with `chrome.permissions.request` only when the user switches step screenshots on in the panel, never at install; declining keeps every other feature. Thumbnails are stored locally in IndexedDB, deleted with their steps or after 14 days, and never transmitted. |
-| `host_permissions: http://*/* + https://*/*`       | See below.                                                                                                                                                                                                                                                                                                                                                                                                                              |
+| Permission                                         | Justification                                                                                                                                                                                                                                                                                                                                                                                                                                          |
+| -------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `activeTab`                                        | Grants access to the tab the user is on when they click the toolbar button, use a context-menu item or press one of the keyboard shortcuts (Alt+Shift+E inspect, Alt+Shift+K record), so those entry points keep working when the user has set the extension's site access to "on click" in Chrome or revoked its host permission in Firefox. Side-panel buttons are no such gesture; there the extension tells the user to allow site access instead. |
+| `scripting`                                        | The inspector, recorder and Selector Lab are content scripts. When a page loaded before the extension did — or after an extension update — `chrome.scripting.executeScript` re-injects them so the user does not have to reload the page.                                                                                                                                                                                                              |
+| `storage`                                          | `chrome.storage.local` keeps the user's framework/language choice and settings, the last inspected element and the in-progress recording (timeline and script draft); `chrome.storage.session` keeps the service worker's inspect/recording state and steps recorded while the panel was closed. Passwords and one-time codes are never recorded. Local only; nothing is transmitted.                                                                  |
+| `contextMenus`                                     | Adds the right-click "Copy Best Locator" and "Open Results Panel" entries.                                                                                                                                                                                                                                                                                                                                                                             |
+| `sidePanel` (Chrome)                               | The results panel is the extension's primary UI surface.                                                                                                                                                                                                                                                                                                                                                                                               |
+| `optional_host_permissions: <all_urls>` (optional) | Step screenshots: `chrome.tabs.captureVisibleTab` requires `<all_urls>` or an activeTab grant — http/https host access is not enough. It is optional and requested with `chrome.permissions.request` only when the user switches step screenshots on in the panel, never at install; declining keeps every other feature. Thumbnails are stored locally in IndexedDB, deleted with their steps or after 14 days, and never transmitted.                |
+| `host_permissions: http://*/* + https://*/*`       | See below.                                                                                                                                                                                                                                                                                                                                                                                                                                             |
 
 ### Broad host access
 
@@ -184,9 +191,11 @@ exercised by the feature named; there are no unused permissions.
 > local storage, listens for right-clicks (so "Copy Best Locator" knows its
 > target), and tells the extension's service worker it is ready so an in-progress
 > recording can continue after a navigation — it reads no page content. Element
-> details are read only while the user runs Inspect, Record, Selector Lab, Stress
-> Test or Copy Best Locator, are used solely to generate locator and test code
-> shown in the side panel, and are never transmitted: there is no backend, no
+> details are read only while the user runs Inspect, Record, Replay, Selector Lab,
+> Stress Test, Page Object export, the locator health check (on request, or on page
+> load if the user switched that on) or Copy Best Locator, are used solely to
+> generate locator and test code shown in the side panel or to check the user's own
+> saved locators, and are never transmitted: there is no backend, no
 > analytics and no network request of any kind. This is verifiable — the packaged
 > code contains no `fetch`, `XMLHttpRequest`, `sendBeacon`, `WebSocket` or
 > `EventSource`, which the build enforces.

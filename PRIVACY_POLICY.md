@@ -7,8 +7,8 @@
 Locatra is a browser extension for test authoring. It inspects web page elements
 and surfaces ranked, uniqueness-checked locators, validates selectors against the live
 page (Selector Lab), and optionally records your interactions into a runnable test
-script for **Playwright**, **Selenium** or **Cypress** in TypeScript, JavaScript or
-Python. Everything runs locally in your browser.
+script for **Playwright**, **Selenium**, **Cypress** or **WebdriverIO** in TypeScript,
+JavaScript, Python, Java or C#. Everything runs locally in your browser.
 
 ## Data collection and transmission
 
@@ -54,12 +54,18 @@ Specifically, we do **not**:
   `cc-exp`), is recorded as a step **without its value**. The generated test reads
   the value from an environment variable instead — `LOCATRA_PASSWORD` for passwords,
   `LOCATRA_SECRET` for the others (both names can be changed on the Settings page) —
-  so the secret never leaves the page, never
-  reaches extension storage and never appears in a script.
+  so the secret never leaves the page, never reaches extension storage and never
+  appears in a script. A "has value" assertion on such a field is recorded the same
+  way, and no step screenshot is taken of such a step or while such a value is
+  visible in a field on the page. When a recorded flow is replayed, the value you
+  type for it is handed only to the page frame that owns that step, and only for
+  the length of the run.
 - **Secrets in URLs.** Before a page address is stored or written into a test, the
   values of query/fragment parameters that commonly carry credentials (`password`,
-  `passwd`, `pwd`, `secret`, `client_secret`, `access_token`, `id_token`,
-  `refresh_token`, `api_key`, `apikey`) are replaced with `REDACTED`.
+  `passwd`, `pwd`, `secret`, `client_secret`, `code`, `token`, `access_token`,
+  `id_token`, `refresh_token`, `auth`, `sig`, `signature`, `X-Amz-Signature`,
+  `X-Amz-Credential`, `X-Amz-Security-Token`, `key`, `apikey`, `api_key`, `session`,
+  `sessionid`; names matched case-insensitively) are replaced with `REDACTED`.
 - **File contents.** An upload step records only the selected file **names**, never
   the files.
 

@@ -2,7 +2,7 @@
 
 All notable changes to Locatra (formerly LocatorLens). Versions follow [semantic versioning](https://semver.org).
 
-## [Unreleased]
+## [1.5.0] — 2026-10-10
 
 ### Added
 
@@ -84,6 +84,81 @@ All notable changes to Locatra (formerly LocatorLens). Versions follow [semantic
 - Changing a setting in the side panel no longer erases settings made elsewhere.
 - An edit made just before the side panel closed (a dismissed suggestion, a removed
   step) is no longer lost.
+- Steps recorded with the side panel closed are no longer lost when a second
+  recording starts before the panel is opened.
+- No step screenshot is taken of a password, one-time-code or card step, or of any
+  step taken while such a value shows in a field.
+- A long replay step (a slow page load, a redirect chain) no longer trips the panel's
+  30-second "Replay interrupted" watchdog: the worker reports that the step is still
+  running every 5 seconds.
+- When site access is set to "on click", side-panel actions say to allow site access
+  instead of claiming the page is off-limits.
+- A saved timeline that outgrows the 500-step cap keeps its opening `goto`, and the
+  panel says that older steps were dropped.
+- "Clear timelines" on the Settings page also deletes those steps' screenshots.
+- Imported watched locators: the file's code text is replaced with code generated
+  from its target, and numeric target fields (`level`, frame indexes) must be plain
+  integers, so a shared file cannot inject code into an exported test.
+
+- Selenium and WebdriverIO exports find text, names and labels that contain a
+  non-breaking space, soft hyphen or zero-width space, as the extension does.
+- Text assertions compare the rendered text the recorder captured: Playwright
+  exports pass `useInnerText`, and Cypress checks `innerText`. Markup like
+  `<h3>Title</h3><p>Body</p>` no longer fails the exported test.
+- Selenium-family XPath matches an `aria-labelledby` that lists several ids.
+- Selenium, Cypress and WebdriverIO role selectors agree with the extension's role
+  table: `select[size]` is a listbox, a `<th>` beside data cells is a row header,
+  `time`/`sub`/`sup`/`math` have their roles, and `role="a b"` is matched by token.
+  A parity test checks every row of the Playwright-verified role table.
+- Clicking an icon inside a button or link records the button or link, not the
+  SVG `<path>`.
+- A page element whose id starts with `ll-` or `locatra-` is no longer hidden from
+  locators, replay, the health check and Page Object scans; the extension tells its
+  own UI apart by reference.
+- `selectOption` records the option's label, whitespace-normalised, and a
+  multi-select records every selected option (exported in each framework's array
+  form, and replayed in full).
+- Elements inside open shadow roots export for Selenium (`getShadowRoot()` chains),
+  Cypress (`.shadow()` chains) and WebdriverIO (`shadow$`).
+- Frame indexes: Playwright, Cypress and WebdriverIO count `<iframe>` elements, and
+  Selenium uses the `window.frames` position, each as its framework does.
+- Clicking a checkbox's label records only the check, not an extra text click.
+- Selector Lab counts matches with the same engine as the locators it shows
+  (`getByLabel` on any labelled control, `level`, `frameLocator`, `nth`, `filter`).
+- A replayed step whose frame cannot be verified is not claimed by a same-index
+  frame.
+- Copy fallback: a page's own `copy` handler can no longer replace the copied text.
+- A failure to generate locators is reported, never replaced by a silent,
+  non-unique `page.locator('<tag>')`.
+
+### Security
+
+- A password, one-time-code or card field's value is no longer copied into a
+  "has value" assertion; the test reads it from the environment like a sensitive
+  fill.
+- Exported code: numeric target fields (`level`, frame indexes, viewport size) are
+  emitted only as validated integers, closing a code-injection path from imported
+  files.
+- More credential parameters are redacted from recorded URLs: OAuth `code`, `token`,
+  `auth`, signatures (including pre-signed S3 URLs), `key`, `session`.
+- Inspect mode ignores synthetic (untrusted) keyboard and mouse events, so a page
+  cannot stop inspection or steer the pick.
+- A sensitive value typed for a replay is no longer sent to every frame of the tab.
+  The frame that owns the step asks for it, and only the first request for that step
+  gets an answer.
+- Messages that only the side panel may send (buffer acknowledgement, heartbeat,
+  open/close panel) are ignored when they come from a web page's content script.
+- The build fails on a manifest that loosens the extension pages' Content Security
+  Policy or declares `externally_connectable`.
+- The retired `RECORDED_ACTION_SUPERSEDE` message is gone; a double-click's
+  supersession travels inside its step.
+
+### Accessibility
+
+- New recorded steps are announced on their own, instead of the whole timeline
+  being read again on every step.
+- The Selector Lab input and its icon buttons have labels, and its status line is a
+  live region.
 
 ### Tests
 

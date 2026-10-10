@@ -7,7 +7,7 @@
 
 **Locatra** is a browser extension for end-to-end test authoring: inspect any element to get **ranked, uniqueness-checked locators**, validate selectors, and **record a flow into a runnable test** — all from the side panel. Output targets **Playwright, Selenium, Cypress or WebdriverIO** in **TypeScript, JavaScript, Python, Java or C#** — 14 framework × language combinations, each run for real in CI.
 
-Extension version is defined in `manifest.json` (currently **1.3.0**) and kept in step
+Extension version is defined in `manifest.json` (currently **1.5.0**) and kept in step
 with `package.json` and both browser manifests by `node scripts/version.mjs`.
 
 ---

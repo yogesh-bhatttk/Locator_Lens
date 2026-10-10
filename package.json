@@ -1,6 +1,6 @@
 {
   "name": "locatra",
-  "version": "1.4.0",
+  "version": "1.5.0",
   "private": true,
   "description": "Browser extension that inspects elements for ranked, uniqueness-checked locators and records flows into runnable Playwright / Selenium / Cypress tests.",
   "license": "MIT",
