@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-/* global chrome, document, window, indexedDB, recordedActions */
+/* global chrome, document, window, location, indexedDB, recordedActions */
 // Real-browser smoke test for step screenshots (F4).
 //
 // The unit suites mock chrome.tabs.captureVisibleTab, IndexedDB and layout, so
@@ -70,8 +70,54 @@ function check(name, condition, detail = '') {
 
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
-function launch(executablePath) {
-  return chromium.launchPersistentContext(PROFILE, {
+// The window is a real, headed one on the desktop this runs on, so the real mouse
+// and keyboard reach it as well: Chromium reports the desktop cursor over the page
+// as soon as the tab is activated, and a click someone makes there (on what they
+// took for their editor, as the window pops up) is a trusted pointerdown the
+// recorder rightly records — an extra click step with its own thumbnail, which
+// fails the one-record-per-step check. So in the demo page, trusted input is
+// dropped before it reaches anything else unless this script is acting itself
+// (recordStep opens the gate around each act). The guard is registered at
+// document start, ahead of the recorder's listeners (armed at START_RECORDING),
+// and stopImmediatePropagation on the same target and phase keeps it from them.
+function guardDesktopInput() {
+  if (!/^https?:$/.test(location.protocol)) return;
+  const EVENTS = [
+    'pointerdown',
+    'mousedown',
+    'pointerup',
+    'mouseup',
+    'click',
+    'auxclick',
+    'dblclick',
+    'contextmenu',
+    'keydown',
+    'keypress',
+    'keyup',
+    'wheel',
+    'touchstart',
+  ];
+  const guard = { open: 0, blocked: [] };
+  Object.defineProperty(window, '__locatraSmokeInput', { value: guard });
+  for (const type of EVENTS) {
+    window.addEventListener(
+      type,
+      (e) => {
+        if (!e.isTrusted || guard.open > 0) return;
+        const t = e.target;
+        guard.blocked.push(
+          `${type}@${t && t.nodeType === 1 ? t.tagName.toLowerCase() + (t.id ? `#${t.id}` : '') : 'window'}`
+        );
+        if (e.cancelable) e.preventDefault();
+        e.stopImmediatePropagation();
+      },
+      { capture: true, passive: false }
+    );
+  }
+}
+
+async function launch(executablePath) {
+  const context = await chromium.launchPersistentContext(PROFILE, {
     executablePath,
     headless: false,
     viewport: null,
@@ -81,6 +127,22 @@ function launch(executablePath) {
       `--load-extension=${EXTENSION}`,
     ],
   });
+  await context.addInitScript(guardDesktopInput);
+  return context;
+}
+
+/** Run `act` (Playwright input on the demo page) with the desktop-input guard open. */
+async function withScriptInput(page, act) {
+  const gate = (delta) =>
+    page.evaluate((d) => {
+      if (window.__locatraSmokeInput) window.__locatraSmokeInput.open += d;
+    }, delta);
+  await gate(1);
+  try {
+    return await act();
+  } finally {
+    await gate(-1).catch(() => {});
+  }
 }
 
 /**
@@ -141,6 +203,8 @@ async function openSession(context, extensionId, base) {
       recordedActions.map((a) => ({
         eventId: a.eventId,
         action: a.action,
+        code: a.code || '',
+        timestamp: a.timestamp,
         suggested: !!a.suggested,
         assertType: a.assertType || null,
         rect: a.rect || null,
@@ -195,7 +259,7 @@ async function openSession(context, extensionId, base) {
    */
   const recordStep = async (what, act, { action, selector, timeout = 6000 } = {}) => {
     const before = new Set((await steps()).map((s) => s.eventId));
-    await act();
+    await withScriptInput(page, act);
     let step = null;
     await until(
       async () => {
@@ -222,6 +286,16 @@ async function openSession(context, extensionId, base) {
       }, selector);
     }
     return step && { ...step, live, what };
+  };
+
+  /** Desktop input the guard kept from the demo page (see guardDesktopInput). */
+  const strayInput = () => page.evaluate(() => window.__locatraSmokeInput?.blocked ?? []).catch(() => []);
+  const reportStrayInput = async () => {
+    const blocked = await strayInput();
+    if (blocked.length)
+      console.log(
+        `  (kept ${blocked.length} desktop input event(s) from the demo page: ${blocked.slice(0, 8).join(', ')})`
+      );
   };
 
   const waitForRecord = (eventId, timeout = 6000) =>
@@ -286,6 +360,8 @@ async function openSession(context, extensionId, base) {
     thumbRecords,
     recordIds,
     recordStep,
+    strayInput,
+    reportStrayInput,
     waitForRecord,
     openRecorder,
     openSettings,
@@ -398,6 +474,7 @@ async function phaseA(context, extensionId, base) {
     what: 'the timeline to clear',
   }).catch(() => {});
 
+  await s.reportStrayInput();
   check(
     'no errors in the page, panel or worker console',
     s.errors.length === 0,
@@ -464,7 +541,18 @@ async function phaseB(context, extensionId, base) {
   // The viewport step arrives with the goto. Were it queued, the next step would
   // replace it in the one-per-tab queue before its slot came up, so give it that
   // slot before doing anything else.
+  // Meanwhile, a click from outside this script — what a desktop click on the
+  // window looks like to the page — must not reach the recorder (guardDesktopInput).
+  const stray = await s.page.locator('label[for="first-name"]').boundingBox();
+  if (stray) await s.page.mouse.click(stray.x + stray.width / 2, stray.y + stray.height / 2);
   await sleep(NO_THUMB_SETTLE_MS);
+  check(
+    'a click from outside the script is kept from the recorder',
+    stray &&
+      (await s.strayInput()).includes('pointerdown@label') &&
+      (await s.steps()).every((x) => x.action === 'goto' || x.action === 'viewport'),
+    JSON.stringify({ blocked: await s.strayInput(), steps: (await s.steps()).map((x) => x.action) })
+  );
   const firstViewport = opening.find((x) => x.action === 'viewport');
   check(
     'the viewport step gets no stored thumbnail',
@@ -792,6 +880,7 @@ async function phaseB(context, extensionId, base) {
     (await s.panel.locator('#recorderTimeline .ll-thumb-btn').count()) === 0
   );
 
+  await s.reportStrayInput();
   check(
     'no errors in the page, panel or worker console',
     s.errors.length === 0,
