@@ -138,10 +138,20 @@ All notable changes to Locatra (formerly LocatorLens). Versions follow [semantic
 - Selenium, WebdriverIO and Cypress enter such a frame by element (the same
   shadow-piercing `<iframe>` count Playwright uses), not by a bare frame number,
   which ChromeDriver and geckodriver count differently.
-- Selenium role locators follow the browser's role rules exactly (`role="none"` on
-  a focusable element, unknown role tokens, `list=` pointing at a `<datalist>`,
-  headers inside sectioning elements, lone `<th>`s); Cypress checks the role with a
-  small helper ported from the extension's engine.
+- **Readable locators in every framework and language.** A role, label or text
+  locator used to become a multi-kilobyte XPath in Selenium (4.5 KB for one
+  textbox). Now:
+  - every recorded step, pick and Page Object element carries up to three verified
+    simpler equivalents (test id, id, name, short CSS, short XPath), and Selenium,
+    WebdriverIO, Java, C# and Cypress exports use them: `By.id('username')`;
+  - with no simpler equivalent, they call a small helper emitted once per file
+    (`locatraFind(driver, 'role', 'textbox', 'Username or Email')`) that matches
+    elements the way Playwright does, waits, and requires exactly one match;
+  - a test keeps every locator line in every framework × language under a fixed
+    length budget;
+  - in the side panel, non-Playwright output lists the shortest unique locator
+    first, collapses any long one behind "Show full locator", and Copy includes a
+    helper when one is needed (as does right-click "Copy Best Locator").
 - Re-injecting the content script (a new iframe while inspecting, a health check)
   no longer makes Locatra's own overlay buttons and toast count as page elements.
 - URL redaction keeps ordinary parameters (`?key=shoes`, `?code=SUMMER`); generic
