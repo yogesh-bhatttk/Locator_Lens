@@ -812,6 +812,25 @@ describe('codegen failures', () => {
   });
 });
 
+describe('accessibility', () => {
+  it('announces each new step on its own instead of re-reading the whole timeline', () => {
+    boot();
+    expect($('recorderTimeline').hasAttribute('aria-live')).toBe(false);
+    record(step({ action: 'click' }));
+    record(step({ action: 'fill', value: 'x' }));
+    expect($('recAnnounce').getAttribute('aria-live')).toBe('polite');
+    expect($('recAnnounce').textContent).toBe('Step 2 recorded: fill');
+  });
+
+  it('labels the Selector Lab controls and makes its status a live region', () => {
+    boot();
+    expect($('lab-input').getAttribute('aria-label')).toMatch(/selector/i);
+    expect($('lab-validate-btn').getAttribute('aria-label')).toBe('Validate selector');
+    expect($('lab-clear-btn').getAttribute('aria-label')).toBe('Clear highlights');
+    expect($('lab-status').getAttribute('role')).toBe('status');
+  });
+});
+
 describe('persistence limits', () => {
   it('keeps the newest 500 steps and the newest 2000 keys', () => {
     boot();
@@ -824,6 +843,26 @@ describe('persistence limits', () => {
     vi.advanceTimersByTime(250);
     expect(persisted().actions).toHaveLength(500);
     expect(persisted().actions[0].eventId).toBe('k1505');
+  });
+
+  it('keeps the opening goto through the cut, and says once that steps were dropped', () => {
+    boot();
+    vm.runInThisContext('_persistTrimNoted = false;'); // the test above already tripped it
+    $('recorderTimeline').remove();
+    $('codePreview').remove();
+    appendToRecorder(step({ eventId: 'start', action: 'goto', value: 'https://shop.example/' }));
+    for (let i = 0; i < 600; i++) appendToRecorder(step({ eventId: 'g' + i }));
+    vi.advanceTimersByTime(250);
+    const kept = persisted().actions;
+    expect(kept).toHaveLength(500);
+    expect(kept[0].eventId).toBe('start');
+    expect(kept[1].eventId).toBe('g101');
+    expect(kept[499].eventId).toBe('g599');
+    expect($('panelStatus').textContent).toMatch(/601 steps; only the last 500 are kept/);
+    $('panelStatus').textContent = '';
+    appendToRecorder(step({ eventId: 'g600' }));
+    vi.advanceTimersByTime(250);
+    expect($('panelStatus').textContent).toBe('');
   });
 
   it('drops the editor text and trims when the quota is exceeded', () => {
@@ -904,7 +943,7 @@ describe('restore edge cases', () => {
     expect(h.store['llRecorderState:4']).toBeDefined();
   });
 
-  it('a supersede that arrives before the restore is applied after it', () => {
+  it('a dblclick that arrives before the restore supersedes its clicks after it', () => {
     h.store[`llRecorderState:${WIN}`] = {
       actions: [step({ eventId: 'c1' }), step({ eventId: 'keep' })],
       updatedAt: Date.now(),
@@ -915,12 +954,15 @@ describe('restore edge cases', () => {
       keys === null ? parked.push(() => cb(pick(null))) : realGet(keys, cb);
     try {
       boot();
-      port({ type: 'RECORDED_ACTION_SUPERSEDE', windowId: WIN, supersedes: ['c1'] });
-      port({ type: 'RECORDED_ACTION_SUPERSEDE', windowId: WIN, supersedes: [] });
+      port({
+        type: 'RECORDED_ACTION',
+        windowId: WIN,
+        data: step({ eventId: 'dbl', action: 'dblclick', supersedes: ['c1'] }),
+      });
       parked.forEach((fn) => fn());
     } finally {
       chrome.storage.local.get = realGet;
     }
-    expect(recordedActions.map((a) => a.eventId)).toEqual(['keep']);
+    expect(recordedActions.map((a) => a.eventId)).toEqual(['keep', 'dbl']);
   });
 });

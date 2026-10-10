@@ -742,6 +742,25 @@ describe('replay', () => {
     expect($('replayBtn').disabled).toBe(false);
   });
 
+  it('a heartbeat keeps a long step alive without redrawing it', () => {
+    boot();
+    record(step());
+    $('replayBtn').click();
+    progress({ index: 0, status: 'running' });
+    const before = $('recorderTimeline').innerHTML;
+    for (let i = 0; i < 8; i++) {
+      vi.advanceTimersByTime(5000);
+      progress({ index: 0, status: 'running', heartbeat: true });
+    }
+    expect($('replaySummary').textContent).not.toContain('interrupted');
+    expect($('recorderTimeline').innerHTML).toBe(before);
+    expect(sentOf('REPLAY_STOP')).toHaveLength(0);
+    // A heartbeat for a step that does not exist is ignored like any bad progress.
+    progress({ index: 99, status: 'running', heartbeat: true });
+    vi.advanceTimersByTime(30000);
+    expect($('replaySummary').textContent).toContain('Replay interrupted');
+  });
+
   it('treats a lost port as an interrupted run', () => {
     boot();
     record(step());

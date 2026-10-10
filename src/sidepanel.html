@@ -857,7 +857,9 @@
       .brand-sub, .fw-playwright-badge { display: none; }
       .match-attr { max-width: 100%; }
     }
-  </style>
+    /* Read by screen readers, not shown. */
+  .ll-sr-only { position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; border: 0; }
+</style>
 </head>
 
 <body>
@@ -919,11 +921,11 @@
             <span id="lab-count" style="text-transform: none; display:none;"></span>
           </div>
           <div class="lab-input-container">
-            <input type="text" id="lab-input" placeholder="Type CSS or XPath..." autocomplete="off">
-            <button class="lab-btn" id="lab-validate-btn" title="Validate Selector">🔍</button>
-            <button class="lab-btn" id="lab-clear-btn" title="Clear Highlights">❌</button>
+            <input type="text" id="lab-input" placeholder="Type CSS or XPath..." autocomplete="off" aria-label="Selector to validate (CSS or XPath)">
+            <button class="lab-btn" id="lab-validate-btn" title="Validate Selector" aria-label="Validate selector">🔍</button>
+            <button class="lab-btn" id="lab-clear-btn" title="Clear Highlights" aria-label="Clear highlights">❌</button>
           </div>
-          <div id="lab-status" class="lab-status">Ready to validate...</div>
+          <div id="lab-status" class="lab-status" role="status" aria-live="polite">Ready to validate...</div>
         </div>
 
         <div class="hint-row" id="hintRow">
@@ -1073,7 +1075,8 @@
           <input type="text" id="recFilterInput" class="ll-rec-filter-input" placeholder="Filter actions…" autocomplete="off" spellcheck="false" aria-label="Filter recorded actions">
           <button type="button" id="recFilterClear" class="ll-rec-filter-clear" title="Clear filter" aria-label="Clear filter" style="display: none;">✕</button>
         </div>
-        <div class="cards ll-rec-timeline" id="recorderTimeline" aria-live="polite" tabindex="-1" style="display: none;">
+        <div id="recAnnounce" class="ll-sr-only" role="status" aria-live="polite"></div>
+        <div class="cards ll-rec-timeline" id="recorderTimeline" tabindex="-1" style="display: none;">
           <div class="ll-rec-empty">🎬 Hit <strong>Start Recording</strong> then use the page. Clicks, typing, hovers (Alt+click), and assertions are captured.</div>
         </div>
 

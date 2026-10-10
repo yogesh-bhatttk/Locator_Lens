@@ -457,12 +457,11 @@ describe('dblclick supersedes', () => {
     expect(recordedActions.map((a) => a.eventId)).toEqual(['d1']);
   });
 
-  it('honours a separate RECORDED_ACTION_SUPERSEDE relay', () => {
+  it('ignores the retired separate RECORDED_ACTION_SUPERSEDE message', () => {
     boot();
     port({ type: 'RECORDED_ACTION', windowId: WIN, data: step({ eventId: 'c1' }) });
-    port({ type: 'RECORDED_ACTION', windowId: WIN, data: step({ eventId: 'keep' }) });
     port({ type: 'RECORDED_ACTION_SUPERSEDE', windowId: WIN, data: { supersedes: ['c1'] } });
-    expect(recordedActions.map((a) => a.eventId)).toEqual(['keep']);
+    expect(recordedActions.map((a) => a.eventId)).toEqual(['c1']);
   });
 
   it('undo, redo and remove still work afterwards', () => {

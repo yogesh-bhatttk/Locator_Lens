@@ -358,6 +358,27 @@ describe('renderResults resilience', () => {
     expect(document.getElementById('resultsState').style.display).toBe('');
   });
 
+  it('escapes an unknown stability and a non-numeric rank instead of rendering them as markup', () => {
+    renderResults({
+      elementData: { tag: 'button' },
+      locators: [
+        {
+          rank: '<img src="https://evil.test/r">',
+          method: 'getByRole()',
+          stability: '<img src="https://evil.test/s">',
+          code: "page.getByRole('button')",
+          target: { kind: 'role', role: 'button' },
+        },
+      ],
+      avoidList: [],
+      a11y: [],
+    });
+    const cards = document.getElementById('cardsContainer');
+    expect(cards.querySelector('img')).toBeNull();
+    expect(cards.textContent).toContain('<img src="https://evil.test/s">');
+    expect(cards.textContent).toContain('<img src="https://evil.test/r">');
+  });
+
   it('does not throw on a payload missing every optional array', () => {
     // A result restored from storage can predate the current shape. One missing
     // array used to throw out of the render, leaving the panel unusable.

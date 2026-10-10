@@ -260,7 +260,7 @@ function pillClass(s) {
 }
 function pillLabel(s) {
   const m = { BEST: '★ BEST', GOOD: '✓ GOOD', OK: '~ OK', AVOID: '✗ AVOID' };
-  return m[String(s).toUpperCase()] || s;
+  return m[String(s).toUpperCase()] || esc(s);
 }
 
 function rankClass(r) {
@@ -912,7 +912,7 @@ function renderResults(data) {
       <div class="card ${rc}" style="${delayStyle}">
         <div class="card-head">
           <div class="card-left">
-            <div class="rank-num">${loc.rank}</div>
+            <div class="rank-num">${esc(loc.rank)}</div>
             <div>
               <div class="method-name">${esc(strategyLabel(loc))}</div>
               <div class="match-attr" title="${esc(loc.matchedAttr)}">${esc(loc.matchedAttr)}</div>
@@ -1047,12 +1047,6 @@ function runStressTest() {
   sendToBackground({ type: 'RUN_STRESS_TEST' });
 }
 
-function supersedeIdsOf(msg) {
-  const d = msg.data || {};
-  const ids = msg.supersedes || msg.eventIds || d.supersedes || d.eventIds;
-  return Array.isArray(ids) ? ids : [];
-}
-
 function handleRuntimeMessage(msg) {
   if (!msg || isForeignWindowMessage(msg)) return;
   if (msg.type === 'ELEMENT_PICKED' && msg.data) {
@@ -1098,9 +1092,6 @@ function handleRuntimeMessage(msg) {
   }
   if (msg.type === 'RECORDED_ACTION' && msg.data) {
     receiveRecordedAction(msg.data);
-  }
-  if (msg.type === 'RECORDED_ACTION_SUPERSEDE') {
-    receiveSupersede(supersedeIdsOf(msg));
   }
   if (msg.type === 'REPLAY_PROGRESS') handleReplayProgress(msg);
   if (msg.type === 'REPLAY_DONE') handleReplayDone(msg);
@@ -1153,19 +1144,6 @@ function receiveRecordedAction(data) {
   appendToRecorder(data);
   // A navigation re-arms the page; re-read assert/pause so the controls match.
   if (data && data.action === 'goto') refreshRecordingState();
-}
-
-function receiveSupersede(ids) {
-  if (!ids.length) return;
-  if (!_recorderRestored) {
-    _pendingRecorded.push({ supersedes: ids });
-    return;
-  }
-  if (removeSupersededSteps(ids) > 0) {
-    renderTimeline();
-    updateCodePreview();
-    scheduleRecorderPersist();
-  }
 }
 
 // Content scripts carry sender.tab — but so does this extension's own page when it
@@ -2083,6 +2061,30 @@ function flushRecorderPersist() {
 // silently stopped surviving a panel reopen. Trim the oldest entries instead.
 const LL_MAX_PERSISTED_ACTIONS = 500;
 const LL_MAX_SEEN_KEYS = 2000;
+let _persistTrimNoted = false;
+
+/**
+ * The newest `max` steps — but the opening goto survives the cut, because without
+ * it the saved test no longer says where it starts. The user hears about the cut
+ * once per panel session instead of finding it after a reopen.
+ */
+function trimForPersist(list, max) {
+  if (list.length <= max) {
+    if (max === LL_MAX_PERSISTED_ACTIONS) _persistTrimNoted = false; // a fresh, short recording
+    return list;
+  }
+  if (!_persistTrimNoted) {
+    _persistTrimNoted = true;
+    showPanelStatus(
+      `This recording has ${list.length} steps; only the last ${max} are kept when the panel is closed. ` +
+        'Export the test now to keep all of them.',
+      'warn'
+    );
+  }
+  const first = list[0];
+  if (first && first.action === 'goto') return [first].concat(list.slice(-(max - 1)));
+  return list.slice(-max);
+}
 
 function removePersistedRecorderState() {
   if (!chrome.storage || !chrome.storage.local) return;
@@ -2110,9 +2112,7 @@ function persistRecorderState() {
     const edited = editorHasUserEdits();
     const ta = document.getElementById('codePreview');
     const codePreview = edited && ta ? getPreviewText(ta) : '';
-    const actions = (recordedActions.length > LL_MAX_PERSISTED_ACTIONS
-      ? recordedActions.slice(-LL_MAX_PERSISTED_ACTIONS)
-      : recordedActions).map(sanitizeStep);
+    const actions = trimForPersist(recordedActions, LL_MAX_PERSISTED_ACTIONS).map(sanitizeStep);
     const seenKeys = Array.from(seenActionKeys).slice(-LL_MAX_SEEN_KEYS);
     const state = {
       actions: actions,
@@ -2137,7 +2137,7 @@ function persistRecorderState() {
       // timeline, which is what the user actually can't reproduce.
       chrome.storage.local.set({
         [key]: Object.assign({}, state, {
-          actions: actions.slice(-100),
+          actions: trimForPersist(actions, 100),
           seenKeys: seenKeys.slice(-500),
           codePreview: '',
           codeEdited: false,
@@ -2269,10 +2269,7 @@ function applyRestoredState(s) {
 function finishRecorderRestore() {
   _recorderRestored = true;
   const queued = _pendingRecorded.splice(0);
-  queued.forEach((q) => {
-    if (q.supersedes) receiveSupersede(q.supersedes);
-    else receiveRecordedAction(q.action);
-  });
+  queued.forEach((q) => receiveRecordedAction(q.action));
   updateRecPageUrlUI();
   renderTimeline();
   updateCodePreview();
@@ -2377,6 +2374,9 @@ function appendToRecorder(actionData) {
   renderTimeline();
   updateCodePreview();
   scheduleRecorderPersist();
+  // The timeline is redrawn whole, so it is not a live region: announce just the new step.
+  const announce = document.getElementById('recAnnounce');
+  if (announce) announce.textContent = `Step ${recordedActions.length} recorded: ${act.action}`;
 
   // Auto-scroll timeline to bottom
   const timelineList = document.getElementById('recorderTimeline');
@@ -2914,6 +2914,11 @@ function handleReplayProgress(msg) {
   const idx = msg.index;
   if (typeof idx !== 'number' || idx < 0 || idx >= run.steps.length || Math.floor(idx) !== idx) return;
   if (REPLAY_STATUSES.indexOf(msg.status) === -1) return;
+  // A heartbeat only says the step is still running: nothing to redraw.
+  if (msg.heartbeat) {
+    armReplayWatchdog(run);
+    return;
+  }
   const stepObj = run.steps[idx];
   replayStatuses.set(stepObj, {
     status: msg.status,
@@ -4107,10 +4112,27 @@ function sanitizeJsonValue(v, depth) {
   return undefined;
 }
 
+// Fields codegen writes into a script as bare numbers. A target from an imported
+// file could carry "1 }); evil(); ({" here, so each is a plain integer or gone.
+const TARGET_INT_FIELDS = { level: [1, 6], index: [0, 9999], framesIndex: [0, 9999], nth: [-9999, 9999] };
+
+function sanitizeTargetNumbers(t) {
+  for (let n = t, guard = 0; isPlainObject(n) && guard < 16; n = n.child, guard++) {
+    Object.keys(TARGET_INT_FIELDS).forEach((k) => {
+      if (!(k in n)) return;
+      const [min, max] = TARGET_INT_FIELDS[k];
+      const v = typeof n[k] === 'number' ? n[k] : NaN;
+      if (Number.isInteger(v) && v >= min && v <= max) return;
+      delete n[k];
+    });
+  }
+}
+
 function sanitizeTarget(t) {
   if (!isPlainObject(t)) return null;
   const c = sanitizeJsonValue(t, 0);
   if (!isPlainObject(c) || typeof c.kind !== 'string' || !c.kind) return null;
+  sanitizeTargetNumbers(c);
   let json = '';
   try { json = JSON.stringify(c); } catch (e) { return null; }
   return json.length <= 20000 ? c : null;
@@ -4133,7 +4155,7 @@ function sanitizeSuggestion(sg) {
   if (!isPlainObject(sg)) return null;
   const target = sanitizeTarget(sg.target);
   if (!target) return null;
-  return { target: target, code: cleanText(sg.code, 2000) || codeForTarget(target) };
+  return { target: target, code: codeFromTarget(target, sg.code) };
 }
 
 function sanitizeLastCheck(lc) {
@@ -4162,6 +4184,16 @@ function codeForTarget(target) {
   }
 }
 
+/**
+ * The stored code of an imported or saved locator. It ends up in exported scripts,
+ * so it is always rebuilt from the target; the file's own text is trusted only when
+ * no code generator is loaded (it never runs, it is only shown).
+ */
+function codeFromTarget(target, rawCode) {
+  if (typeof LLCodegen !== 'undefined') return codeForTarget(target);
+  return cleanText(rawCode, 2000);
+}
+
 function sanitizeWatchedItem(raw, takenIds) {
   if (!isPlainObject(raw)) return null;
   const target = sanitizeTarget(raw.target);
@@ -4169,7 +4201,7 @@ function sanitizeWatchedItem(raw, takenIds) {
   const id = typeof raw.id === 'string' && /^[A-Za-z0-9_-]{1,64}$/.test(raw.id) && !takenIds.has(raw.id)
     ? raw.id
     : newWatchId(takenIds);
-  const code = cleanText(raw.code, 2000) || codeForTarget(target);
+  const code = codeFromTarget(target, raw.code);
   const savedAt = Number(raw.savedAt);
   const item = {
     id: id,
@@ -4457,7 +4489,9 @@ function watchAllPom() {
       let already = 0;
       let over = 0;
       els.forEach((e) => {
-        const tk = canonicalJson(e.target);
+        // Compare in the shape that is stored: sanitizeTarget drops fields (an
+        // undefined, a non-integer index) the page's raw target may still carry.
+        const tk = canonicalJson(sanitizeTarget(e.target) || e.target);
         if (seen.has(tk)) { already++; return; }
         if (site.length >= WATCH_MAX_PER_SITE || total >= WATCH_MAX_TOTAL) { over++; return; }
         const fp = sanitizeFingerprint(isPlainObject(e.fingerprint) ? e.fingerprint : { role: e.role });
@@ -4679,7 +4713,7 @@ function healthMetaText(item) {
 
 /** The locator in the panel's current framework/language. */
 function watchedCodeForOutput(item) {
-  if (isPlaywrightJsTs() || typeof LLCodegen === 'undefined') return item.code;
+  if (typeof LLCodegen === 'undefined') return item.code;
   try {
     return String(LLCodegen.locatorExpr(item.target, outFramework, outLanguage) || item.code);
   } catch (e) {
@@ -4688,7 +4722,7 @@ function watchedCodeForOutput(item) {
 }
 
 function suggestionCodeForOutput(sg) {
-  if (isPlaywrightJsTs() || typeof LLCodegen === 'undefined') return sg.code;
+  if (typeof LLCodegen === 'undefined') return sg.code;
   try {
     return String(LLCodegen.locatorExpr(sg.target, outFramework, outLanguage) || sg.code);
   } catch (e) {

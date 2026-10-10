@@ -395,6 +395,25 @@ describe('Watch all in the Page Object view', () => {
     expect($('pomStatus').textContent).toBe('Watching 0 locators — see the Health tab. 2 already watched.');
   });
 
+  it('recognises an already-watched element whose raw target carries fields storage drops', () => {
+    boot();
+    const raw = {
+      kind: 'frame',
+      selector: '#pay',
+      index: 0,
+      framesIndex: undefined,
+      child: { kind: 'role', role: 'heading', name: 'Pay', level: 2, shadowHosts: undefined },
+    };
+    const data = { ...POM(), elements: [{ name: 'payHeading', kind: 'heading', target: raw }] };
+    port({ type: 'POM_RESULT', windowId: WIN, data });
+    $('pomWatchAllBtn').click();
+    expect(site()).toHaveLength(1);
+    port({ type: 'POM_RESULT', windowId: WIN, data });
+    $('pomWatchAllBtn').click();
+    expect(site()).toHaveLength(1);
+    expect($('pomStatus').textContent).toBe('Watching 0 locators — see the Health tab. 1 already watched.');
+  });
+
   it('skips excluded rows, and says so when nothing is included', () => {
     boot();
     port({ type: 'POM_RESULT', windowId: WIN, data: POM() });
@@ -656,7 +675,10 @@ describe('checking', () => {
 
   it('offers a suggestion, and using it swaps the locator but keeps the id', () => {
     storeWatched({ [SITE]: [W('a')] });
-    const suggestion = { target: { kind: 'testid', value: 'buy-btn' }, code: "page.getByTestId('buy-btn')" };
+    const suggestion = {
+      target: { kind: 'testid', attr: 'data-testid', value: 'buy-btn' },
+      code: "page.getByTestId('buy-btn')",
+    };
     h.responders.HEALTH_CHECK = results([{ id: 'a', status: 'broken', count: 0, suggestion }]);
     boot();
     openHealth();
@@ -1038,6 +1060,40 @@ describe('export and import', () => {
     expect($('healthStatus').hidden).toBe(true);
   });
 
+  it('rebuilds imported code from the target and drops non-integer numeric target fields', async () => {
+    const file = {
+      version: 1,
+      sites: {
+        'https://shop.example/': [
+          {
+            id: 'lv',
+            code: "page.locator('x'); require('child_process').exec('rm -rf ~')",
+            target: { kind: 'role', role: 'heading', name: 'Cart', level: '1 }); evil(); ({ a: 1' },
+          },
+          {
+            id: 'fr',
+            target: {
+              kind: 'frame',
+              selector: null,
+              index: '0); evil(); (0',
+              framesIndex: 2,
+              child: { kind: 'role', role: 'heading', name: 'Pay', level: 2 },
+            },
+          },
+        ],
+      },
+    };
+    boot();
+    await importText(JSON.stringify(file));
+    const [lv, fr] = site('https://shop.example/');
+    expect(lv.code).not.toMatch(/child_process|evil/);
+    expect('level' in lv.target).toBe(false);
+    expect('index' in fr.target).toBe(false);
+    expect(fr.target.framesIndex).toBe(2);
+    expect(fr.target.child.level).toBe(2);
+    expect(fr.code).not.toMatch(/evil/);
+  });
+
   it('survives hostile JSON: prototype keys, bad sites, bad items, oversized fields', async () => {
     const huge = 'x'.repeat(5000);
     const nested = {};
@@ -1075,7 +1131,8 @@ describe('export and import', () => {
     expect(first.id).not.toBe('../../etc');
     expect(first.id).toMatch(/^[A-Za-z0-9_-]{1,64}$/);
     expect(first.label).toHaveLength(200);
-    expect(first.code).toHaveLength(2000);
+    // The file's own code text never survives: it is rebuilt from the target.
+    expect(first.code).toBe("page.locator('a')");
     expect(first.target).toEqual({ kind: 'css', value: 'a' });
     expect(Object.getPrototypeOf(first.target)).toBe(Object.prototype);
     expect(first.fingerprint.tag).toHaveLength(300);

@@ -505,6 +505,20 @@ describe('Data — clearing stored data', () => {
     expect($('clearTimelinesBtn').disabled).toBe(true);
   });
 
+  it('Clear timelines also deletes the screenshots of the cleared steps', async () => {
+    const { state } = await openOptions({
+      storage: {
+        'llRecorderState:1': { actions: [{ eventId: 'e1' }, { eventId: '' }, 'junk', { eventId: 7 }] },
+        'llRecorderState:2': { actions: [{ eventId: 'e2' }] },
+        'llRecorderState:3': 'corrupt',
+      },
+    });
+    $('clearTimelinesBtn').click();
+    await flush();
+    expect(state.sent).toEqual([{ type: 'THUMBS_DELETE', eventIds: ['e1', 'e2'] }]);
+    expect(status()).toBe('Cleared 3 timelines');
+  });
+
   it('Clear timelines with none left says so', async () => {
     const { state } = await openOptions({ storage: { llRecorderState: {} } });
     delete state.store.llRecorderState; // cleared by another page meanwhile

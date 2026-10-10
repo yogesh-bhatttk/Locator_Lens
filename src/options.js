@@ -1103,12 +1103,42 @@
     }, () => null);
   }
 
+  /** Event ids of every step in the given saved timelines (their screenshots are keyed by them). */
+  function timelineEventIds(all, keys) {
+    const ids = [];
+    keys.forEach((k) => {
+      const actions = isPlainObject(all[k]) && Array.isArray(all[k].actions) ? all[k].actions : [];
+      actions.forEach((a) => {
+        if (isPlainObject(a) && typeof a.eventId === 'string' && a.eventId) ids.push(a.eventId);
+      });
+    });
+    return ids;
+  }
+
+  /** The cleared steps' screenshots go too; a failure there is not worth failing the clear over. */
+  function deleteThumbs(eventIds) {
+    if (!eventIds.length) return Promise.resolve();
+    return new Promise((resolve) => {
+      try {
+        api.runtime.sendMessage({ type: 'THUMBS_DELETE', eventIds }, () => {
+          void lastErrorMessage();
+          resolve();
+        });
+      } catch (err) {
+        resolve();
+      }
+    });
+  }
+
   function clearTimelines() {
-    if (!confirmAction('Delete every saved recorder timeline? Side panels that are open keep what they show until they close.')) return Promise.resolve(false);
+    if (!confirmAction('Delete every saved recorder timeline and its step screenshots? Side panels that are open keep the steps they show until they close.')) return Promise.resolve(false);
     return storageGet(null)
       .then((all) => {
         const keys = Object.keys(all).filter((k) => RECORDER_KEY_RE.test(k));
-        return (keys.length ? storageRemove(keys) : Promise.resolve()).then(() => keys.length);
+        const ids = timelineEventIds(all, keys);
+        return (keys.length ? storageRemove(keys) : Promise.resolve())
+          .then(() => deleteThumbs(ids))
+          .then(() => keys.length);
       })
       .then((n) => {
         showStatus(n ? `Cleared ${plural(n, 'timeline', 'timelines')}` : 'No timelines to clear', n ? 'ok' : 'info');
