@@ -408,7 +408,8 @@ const CSP_SCRIPT_DIRECTIVES = new Set([
   'object-src',
   'worker-src',
 ]);
-const CSP_SAFE_SOURCES = new Set(["'self'", "'none'", "'wasm-unsafe-eval'"]);
+// 'report-sample' only adds a code sample to violation reports; it allows nothing.
+const CSP_SAFE_SOURCES = new Set(["'self'", "'none'", "'wasm-unsafe-eval'", "'report-sample'"]);
 
 /**
  * The extension pages' CSP may only tighten the default. The sandbox policy is

@@ -170,6 +170,7 @@ describe('permission checks', () => {
       []
     );
     expect(verifyCsp({ extension_pages: "default-src 'self'; style-src 'unsafe-inline'" })).toEqual([]);
+    expect(verifyCsp({ extension_pages: "script-src 'self' 'report-sample'" })).toEqual([]);
     expect(verifyCsp({ extension_pages: "script-src 'self' 'unsafe-eval'" }).join()).toMatch(/unsafe-eval/);
     expect(verifyCsp({ extension_pages: "script-src 'self' https://cdn.example.com" }).join()).toMatch(/cdn/);
     expect(verifyCsp({ extension_pages: 'default-src *' }).join()).toMatch(/\*/);

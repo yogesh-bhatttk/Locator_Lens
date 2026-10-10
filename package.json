@@ -12,7 +12,7 @@
   },
   "type": "module",
   "engines": {
-    "node": ">=22"
+    "node": ">=22.22.1"
   },
   "scripts": {
     "lint": "eslint . --max-warnings 0",
@@ -37,7 +37,9 @@
     "smoke:screenshots": "node scripts/e2e/smoke-screenshots.mjs",
     "smoke:settings": "node scripts/e2e/smoke-settings.mjs",
     "smoke:data-health": "node scripts/e2e/smoke-panel-data-health.mjs",
-    "smoke:all": "npm run smoke && npm run smoke:pom && npm run smoke:screenshots && npm run smoke:settings && npm run smoke:data-health",
+    "smoke:frames": "node scripts/e2e/smoke-frames.mjs",
+    "smoke:firefox": "node scripts/e2e/smoke-firefox.mjs",
+    "smoke:all": "npm run smoke && npm run smoke:pom && npm run smoke:screenshots && npm run smoke:settings && npm run smoke:data-health && npm run smoke:frames && npm run smoke:firefox",
     "test:exports": "node scripts/e2e/run-exports.mjs",
     "test:exports:setup-python": "python3 -m pip install --target node_modules/.cache/locatra-e2e/pylib -r tests/e2e/requirements.txt",
     "test:exports:setup-java": "node scripts/e2e/setup-java.mjs",
@@ -48,16 +50,16 @@
   "devDependencies": {
     "@eslint/js": "^9.39.5",
     "@playwright/test": "1.59.1",
-    "@vitest/coverage-v8": "^4.1.5",
+    "@vitest/coverage-v8": "^4.1.11",
     "eslint": "^9.39.5",
     "globals": "^17.13.0",
     "husky": "^9.1.7",
     "jsdom": "^29.1.1",
-    "lint-staged": "^15.5.2",
+    "lint-staged": "^17.6.0",
     "playwright": "1.59.1",
     "prettier": "^3.6.2",
     "selenium-webdriver": "4.50.0",
-    "vitest": "^4.1.5"
+    "vitest": "^4.1.11"
   },
   "lint-staged": {
     "*.{js,mjs}": [
