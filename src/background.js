@@ -36,6 +36,54 @@ const CONTENT_SCRIPT_FILES = [
 const RESTRICTED_PAGE_ERROR =
   "Locatra can't run on this page (browser pages, the Web Store, PDFs and some file:// pages are off-limits).";
 
+/**
+ * Shown instead when the browser refused the script for want of a permission: the
+ * user set site access to "on click" (or revoked it), and a side-panel button is no
+ * gesture that grants activeTab.
+ */
+const SITE_ACCESS_ERROR =
+  "Locatra may not have access to this page. If it is a website, allow Locatra site access from the browser's " +
+  'extensions menu, then try again. (Browser pages, the Web Store and PDFs stay off-limits.)';
+
+/** tabId -> the browser's message from the last failed injection into that tab. */
+const injectErrors = new Map();
+const PERMISSION_REFUSAL = /must request permission|missing host permission|permission to access/i;
+
+// Chrome refuses about:blank with the very words it uses for a site whose access
+// the user withheld, so the message alone cannot tell the two apart. What can: is
+// the http/https host access the manifest asks for actually granted right now?
+const WEB_ORIGINS = { origins: ['http://*/*', 'https://*/*'] };
+let hostAccessWithheld = false;
+
+function checkHostAccess() {
+  const perms = chrome.permissions;
+  if (!perms || typeof perms.contains !== 'function') return;
+  try {
+    perms.contains(WEB_ORIGINS, (granted) => {
+      hostAccessWithheld = !chrome.runtime.lastError && granted === false;
+    });
+  } catch (e) {
+    hostAccessWithheld = false;
+  }
+}
+checkHostAccess();
+
+/** Why a tab's page has no live content script, in words the user can act on. */
+function unreachableError(tabId) {
+  const refusedForPermission = PERMISSION_REFUSAL.test(injectErrors.get(tabId) || '');
+  return refusedForPermission && hostAccessWithheld ? SITE_ACCESS_ERROR : RESTRICTED_PAGE_ERROR;
+}
+
+function noteInjection(tabId) {
+  const err = chrome.runtime.lastError;
+  if (err) {
+    injectErrors.set(tabId, String(err.message || err));
+    // Site access can change from the browser's menu at any moment; the ping that
+    // follows this injection gives the answer time to land before it is used.
+    checkHostAccess();
+  } else injectErrors.delete(tabId);
+}
+
 // The manifest injects only the top frame, deliberately: a content script declared
 // with all_frames runs in every ad and tracking iframe of every page the user
 // visits, and parsing it there costs them something for nothing. Frames that
@@ -48,8 +96,9 @@ function injectAllFrames(tabId, done) {
       // Restricted page, or a frame that vanished. Swallowed here on purpose: the
       // caller that needs to know whether the page is usable asks it directly
       // (pingTopFrame), which also catches an orphaned script from a previous
-      // install that injection could not replace.
-      void chrome.runtime.lastError;
+      // install that injection could not replace. The reason is kept for the
+      // message the user sees if that check fails.
+      noteInjection(tabId);
       if (done) done();
     }
   );
@@ -547,33 +596,24 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
     return;
   }
 
-  // Selector Lab results and dblclick supersession come straight from a page; the
-  // panel ignores page broadcasts (it cannot tell which window they came from), so
-  // they reach it through here, tagged.
+  // Selector Lab results come straight from a page; the panel ignores page
+  // broadcasts (it cannot tell which window they came from), so they reach it
+  // through here, tagged. (A dblclick's supersession rides inside its
+  // RECORDED_ACTION, so it stays in order with the steps it replaces.)
   // Page Object results (POM_RESULT / POM_PICK_CANCELLED) travel the same way.
   if (
     msg.type === 'LAB_STATUS_UPDATE' ||
     msg.type === 'LAB_ERROR' ||
-    msg.type === 'RECORDED_ACTION_SUPERSEDE' ||
     msg.type === 'POM_RESULT' ||
     msg.type === 'POM_PICK_CANCELLED'
   ) {
     if (!fromTab) return;
-    if (msg.type !== 'RECORDED_ACTION_SUPERSEDE') {
-      relayToSidePanel(Object.assign({}, msg, { windowId: fromTab.windowId, tabId: fromTab.id }));
-      // Region picking runs in every frame, but only the frame that got the click
-      // (or Esc) ends by itself: take the others out of pick mode too.
-      if (msg.type === 'POM_RESULT' || msg.type === 'POM_PICK_CANCELLED') {
-        sendToFrame(fromTab.id, { type: 'POM_PICK_STOP' });
-      }
-      return;
+    relayToSidePanel(Object.assign({}, msg, { windowId: fromTab.windowId, tabId: fromTab.id }));
+    // Region picking runs in every frame, but only the frame that got the click
+    // (or Esc) ends by itself: take the others out of pick mode too.
+    if (msg.type === 'POM_RESULT' || msg.type === 'POM_PICK_CANCELLED') {
+      sendToFrame(fromTab.id, { type: 'POM_PICK_STOP' });
     }
-    // A supersede belongs with its steps, which go to the session's window — and
-    // through the same ready() queue, so it can never overtake them.
-    ready().then(() => {
-      const s = sessionForTab(fromTab.id);
-      relayToSidePanel(Object.assign({}, msg, { windowId: s ? s.windowId : fromTab.windowId, tabId: fromTab.id }));
-    });
     return;
   }
 
@@ -613,6 +653,7 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
   // opens/closes the panel itself; from here open() only works when the message
   // still carries the user's gesture, so the outcome is reported, not assumed.
   if (msg.type === 'OPEN_SIDE_PANEL') {
+    if (fromTab) return; // panel control belongs to the extension's own pages
     const settle = (p) => {
       if (!p) {
         sendResponse({ ok: false, error: 'Side panel API unavailable.' });
@@ -629,6 +670,7 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
   }
 
   if (msg.type === 'CLOSE_SIDE_PANEL') {
+    if (fromTab) return;
     const sidePanel = chrome['sidePanel'];
     let p = null;
     if (typeof browser !== 'undefined' && browser.sidebarAction && browser.sidebarAction.close) {
@@ -649,6 +691,7 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
 
   // Track panel open/close per window.
   if (msg.type === 'PANEL_HEARTBEAT') {
+    if (fromTab) return; // only the panel itself can say it is open
     const key = isWindowId(msg.windowId) ? msg.windowId : 'any';
     ready().then(() => {
       // The panel pings every 4s. Only write when the stored stamp is drifting far
@@ -667,6 +710,7 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
   }
 
   if (msg.type === 'PANEL_BUFFER_ACK') {
+    if (fromTab) return; // a page must not be able to drop another window's steps
     clearRecordBuffer(msg.windowId);
     return;
   }
@@ -797,7 +841,7 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
       const tabId = tab.id;
       const go = (alive) => {
         if (!alive) {
-          respond({ ok: false, error: RESTRICTED_PAGE_ERROR });
+          respond({ ok: false, error: unreachableError(tabId) });
           return;
         }
         if (msg.type === 'POM_PICK_START') sendToFrame(tabId, { type: 'POM_PICK_START' });
@@ -815,6 +859,15 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
     if (fromTab) return;
     startReplay(msg, respondOnce(sendResponse));
     return true;
+  }
+
+  // The frame that owns a sensitive replay step asks for its value. Only that step's
+  // value, only to a frame of the tab being replayed, and only to the first frame
+  // that asks — the step itself goes to every frame, the secret does not.
+  if (msg.type === 'REPLAY_SECRET_REQUEST') {
+    if (!fromTab) return;
+    sendResponse(takeReplaySecret(fromTab.id, msg.runId, msg.index));
+    return;
   }
 
   if (msg.type === 'REPLAY_STOP') {
@@ -934,7 +987,7 @@ function startInspect(tab, respond) {
             if (inspectTabs.delete(tabId)) persistState();
           });
           relayToSidePanel({ type: 'STOP_INSPECT', windowId, tabId });
-          respond({ ok: false, error: RESTRICTED_PAGE_ERROR });
+          respond({ ok: false, error: unreachableError(tabId) });
           return;
         }
         sendToFrame(tabId, { type: 'START_INSPECT' });
@@ -993,8 +1046,9 @@ function startRecording(tab, requestedWindowId, respond) {
     if (!s) {
       s = { windowId, tabIds: new Set(), paused: false, assertMode: false, assertType: null };
       sessions.set(windowId, s);
-      // A fresh recording: anything still buffered belongs to the last one.
-      clearRecordBuffer(windowId);
+      // Steps still buffered here were recorded while no panel was open and have
+      // not reached one yet. They stay: the panel takes them, in order, ahead of
+      // this recording's steps when it next connects, and acknowledges them.
     }
     // Pressing Start means "capture now", whatever the previous pause said.
     s.paused = false;
@@ -1015,7 +1069,7 @@ function startRecording(tab, requestedWindowId, respond) {
             persistState();
             relayRecordingState(windowId);
           });
-          respond({ ok: false, error: RESTRICTED_PAGE_ERROR });
+          respond({ ok: false, error: unreachableError(tabId) });
           return;
         }
         // Stopped while the page was being checked: do not arm it after all.
@@ -1359,7 +1413,7 @@ function runHealthCheck(msg, respond) {
     injectAllFrames(tabId, () => {
       pingTopFrame(tabId, (alive) => {
         if (!alive) {
-          done({ ok: false, error: RESTRICTED_PAGE_ERROR });
+          done({ ok: false, error: unreachableError(tabId) });
           return;
         }
         try {
@@ -1432,6 +1486,7 @@ chrome.tabs.onRemoved.addListener((tabId) => {
   tabLoadSeq.delete(tabId);
   pendingCaptures.delete(tabId);
   captureBlockedTabs.delete(tabId);
+  injectErrors.delete(tabId);
   for (const run of Array.from(replayRuns.values())) {
     if (run.tabId === tabId) abortReplay(run, 'error', 'The tab being replayed was closed.');
   }
@@ -1541,7 +1596,7 @@ function ensureTopFrame(tabId, cb) {
       return;
     }
     chrome.scripting.executeScript({ target: { tabId }, files: CONTENT_SCRIPT_FILES }, () => {
-      void chrome.runtime.lastError;
+      noteInjection(tabId);
       pingTopFrame(tabId, cb);
     });
   });
@@ -1715,6 +1770,7 @@ function screenshotPermission() {
 
 if (chrome.permissions) {
   const recheck = () => {
+    checkHostAccess();
     permissionCheck = checkAllUrlsPermission();
     permissionCheck.then((granted) => {
       if (granted === true) captureBlockedTabs.clear();
@@ -1726,8 +1782,12 @@ if (chrome.permissions) {
 
 function maybeCaptureStep(fromTab, data) {
   // Suggestions are not steps the user took; a viewport step is the same moment
-  // as the goto before it, and would take that step's capture slot.
-  if (!data || data.suggested || data.action === 'viewport' || !isEventId(data.eventId)) return;
+  // as the goto before it, and would take that step's capture slot. A sensitive
+  // step (password, one-time code, card) gets no picture, nor does any step taken
+  // while such a value shows in a field: the privacy policy promises it never
+  // reaches extension storage.
+  if (!data || data.suggested || data.sensitive || data.sensitiveOnScreen) return;
+  if (data.action === 'viewport' || !isEventId(data.eventId)) return;
   if (!fromTab || fromTab.active === false || !isWindowId(fromTab.windowId)) return;
   if (typeof chrome.tabs.captureVisibleTab !== 'function' || !thumbStore()) return;
   const job = {
@@ -1888,6 +1948,8 @@ try {
 const REPLAY_DEFAULT_STEP_TIMEOUT_MS = 5000;
 const REPLAY_LOAD_TIMEOUT_MS = 15000;
 const REPLAY_POLL_MS = 100;
+/** While a step runs, how often the panel hears it is still alive (its watchdog is 30 s). */
+const REPLAY_HEARTBEAT_MS = 5000;
 /** How long a goto waits for its navigation to show up before assuming none (a same-page hash change). */
 const REPLAY_NAV_START_GRACE_MS = 1000;
 /** Extra time over the step's own timeout before giving up on the frame's answer. */
@@ -1966,6 +2028,7 @@ function replayProgress(run, index, status, extra) {
     if (extra.error) msg.error = String(extra.error);
     if (typeof extra.matchCount === 'number') msg.matchCount = extra.matchCount;
     if (typeof extra.durationMs === 'number') msg.durationMs = extra.durationMs;
+    if (extra.heartbeat) msg.heartbeat = true;
   }
   relayToSidePanel(msg);
 }
@@ -2055,6 +2118,7 @@ function finishReplay(run, outcome) {
   for (const w of run.resume) resumeAfterReplay(w);
   run.resume.clear();
   run.secrets = {};
+  run.secretGate = null;
   persistState();
   const msg = { type: 'REPLAY_DONE', windowId: run.windowId, runId: run.runId, result: outcome.result };
   if (typeof outcome.failedIndex === 'number') msg.failedIndex = outcome.failedIndex;
@@ -2147,7 +2211,7 @@ function startReplay(msg, respond) {
           if (run.aborted || (!alive && !startsWithGoto)) {
             if (replayRuns.get(windowId) === run) replayRuns.delete(windowId);
             run.done = true;
-            respond({ ok: false, error: run.aborted ? 'Replay was stopped.' : RESTRICTED_PAGE_ERROR });
+            respond({ ok: false, error: run.aborted ? 'Replay was stopped.' : unreachableError(tabId) });
             return;
           }
           run.started = true;
@@ -2173,7 +2237,15 @@ async function runReplay(run) {
       if (run.aborted) return;
       replayProgress(run, i, 'running');
       const t0 = Date.now();
-      const out = await replayStep(run, i, run.steps[i]);
+      // One step can legitimately outlast the panel's watchdog (a page load, the
+      // step's own wait, then a redirect chain), so keep telling it we are alive.
+      const beat = setInterval(() => replayProgress(run, i, 'running', { heartbeat: true }), REPLAY_HEARTBEAT_MS);
+      let out;
+      try {
+        out = await replayStep(run, i, run.steps[i]);
+      } finally {
+        clearInterval(beat);
+      }
       if (run.aborted) return;
       if (out.fatal) {
         finishReplay(run, { result: 'error', failedIndex: i, error: out.error });
@@ -2205,9 +2277,9 @@ const failed = (error, extra) => Object.assign({ status: 'failed', error }, extr
 const TAB_GONE = { status: 'failed', error: 'The tab being replayed was closed.', fatal: true };
 
 /** Map a waitForTabReady outcome that is not 'ready' to a step result. */
-function loadFailure(state) {
+function loadFailure(state, tabId) {
   if (state === 'gone') return TAB_GONE;
-  if (state === 'unreachable') return failed(RESTRICTED_PAGE_ERROR);
+  if (state === 'unreachable') return failed(unreachableError(tabId));
   if (state === 'aborted') return { status: 'aborted' };
   return failed('page did not finish loading');
 }
@@ -2257,7 +2329,7 @@ async function replayStep(run, index, step) {
   if (!tab) return TAB_GONE;
   if (tab.status === 'loading' || loadSeqOf(run.tabId) !== run.readySeq) {
     const state = await waitForTabReady(run);
-    if (state !== 'ready') return loadFailure(state);
+    if (state !== 'ready') return loadFailure(state, run.tabId);
   }
   return replayInPage(run, index, step, 0);
 }
@@ -2273,7 +2345,7 @@ async function replayGoto(run, step) {
     return failed(`navigation failed: ${res.error || 'unknown error'}`);
   }
   const state = await waitForTabReady(run, { expectNavigation: true, navSeq });
-  return state === 'ready' ? { status: 'passed' } : loadFailure(state);
+  return state === 'ready' ? { status: 'passed' } : loadFailure(state, run.tabId);
 }
 
 /** Send one REPLAY_STEP to every frame of the tab. Resolves {res} | {noAnswer} | {timedOut} | {aborted}. */
@@ -2300,6 +2372,21 @@ function sendReplayStep(run, msg) {
   });
 }
 
+/** REPLAY_SECRET_REQUEST from a frame of `tabId`: {ok, value} once per step attempt, else {ok:false}. */
+function takeReplaySecret(tabId, runId, index) {
+  for (const run of replayRuns.values()) {
+    if (run.done || run.tabId !== tabId || run.runId !== runId) continue;
+    const gate = run.secretGate;
+    if (!gate || gate.served || gate.index !== index) return { ok: false };
+    const step = run.steps[index];
+    const name = step && step.sensitive ? step.secretName : null;
+    if (typeof name !== 'string' || typeof run.secrets[name] !== 'string') return { ok: false };
+    gate.served = true;
+    return { ok: true, value: run.secrets[name] };
+  }
+  return { ok: false };
+}
+
 async function replayInPage(run, index, step, attempt) {
   const msg = {
     type: 'REPLAY_STEP',
@@ -2309,12 +2396,12 @@ async function replayInPage(run, index, step, attempt) {
     timeoutMs: run.stepTimeoutMs,
     highlight: true
   };
-  // Only the one value this step needs, and only to the tab being replayed.
-  if (step.sensitive && typeof step.secretName === 'string' && run.secrets[step.secretName] !== undefined) {
-    msg.secrets = { [step.secretName]: run.secrets[step.secretName] };
-  }
+  // A sensitive step's value is not sent with it: the frame that owns the step
+  // fetches it with REPLAY_SECRET_REQUEST, and this attempt opens one such fetch.
+  run.secretGate = step.sensitive ? { index, attempt, served: false } : null;
   const seqBefore = loadSeqOf(run.tabId);
   const reply = await sendReplayStep(run, msg);
+  run.secretGate = null; // answered or gave up: a late request gets nothing
   if (run.aborted || reply.aborted) return { status: 'aborted' };
 
   if (reply.res) {
@@ -2345,7 +2432,7 @@ async function replayInPage(run, index, step, attempt) {
   }
   if (nav) {
     const state = await waitForTabReady(run);
-    if (state !== 'ready') return loadFailure(state);
+    if (state !== 'ready') return loadFailure(state, run.tabId);
     // An action that navigated did its job. Anything else is idempotent and never
     // got to run on the old page, so it gets one go on the new one.
     if (REPLAY_ACTIONS.has(step.action)) return { status: 'passed' };

@@ -237,6 +237,31 @@ describe('replay: failures', () => {
   });
 });
 
+describe('replay: heartbeat', () => {
+  it('tells the panel a long step is still running every 5 s, and stops once it ends', async () => {
+    vi.useFakeTimers();
+    let finish;
+    const w = startWorker({ respond: () => new Promise((r) => (finish = r)) });
+    const r = w.send({
+      type: 'REPLAY_START',
+      windowId: WINDOW,
+      steps: [click()],
+      options: { stepTimeoutMs: 60000 },
+    });
+    await vi.advanceTimersByTimeAsync(10);
+    expect(r.response.ok).toBe(true);
+    const beats = () => replayMsgs(w).filter((m) => m.type === 'REPLAY_PROGRESS' && m.heartbeat);
+    await vi.advanceTimersByTimeAsync(16000);
+    expect(beats()).toHaveLength(3);
+    expect(beats()[0]).toMatchObject({ index: 0, status: 'running', heartbeat: true });
+    finish({ ok: true });
+    await vi.advanceTimersByTimeAsync(500); // the click's settle time
+    expect(done(w)).toMatchObject({ result: 'passed' });
+    await vi.advanceTimersByTimeAsync(20000);
+    expect(beats()).toHaveLength(3);
+  });
+});
+
 describe('replay: step kinds handled by the worker', () => {
   it('skips suggested steps, and reports content-side skips (uploads) as skipped', async () => {
     const respond = (tabId, msg) =>
@@ -438,11 +463,20 @@ describe('replay: navigation between and during steps', () => {
 });
 
 describe('replay: sensitive values', () => {
-  it('sends only the one secret a sensitive step needs, and never persists it', async () => {
+  it('never puts a secret on REPLAY_STEP: the owning frame asks for it, once', async () => {
     const seen = [];
-    const w = startWorker({
+    const answers = [];
+    let w;
+    w = startWorker({
       respond: (tabId, msg) => {
+        if (msg.type !== 'REPLAY_STEP') return NO_ANSWER;
         seen.push(msg);
+        if (msg.step.sensitive) {
+          const ask = { type: 'REPLAY_SECRET_REQUEST', runId: msg.runId, index: msg.index };
+          answers.push(w.fromTab(ask).response);
+          // A second frame (or a compromised one) asking for the same attempt gets nothing.
+          answers.push(w.fromTab(ask, TAB, { frameId: 3 }).response);
+        }
         return { ok: true };
       },
     });
@@ -452,19 +486,53 @@ describe('replay: sensitive values', () => {
       fill('', { sensitive: true, secretName: 'pin' }),
     ];
     await runToEnd(w, { steps, secrets: { password: 's3cret', otp: '123456', pin: '', junk: 42 } });
-    expect(seen[0].secrets).toEqual({ password: 's3cret' });
-    expect('secrets' in seen[1]).toBe(false);
-    // An empty value is "not provided": nothing to send, the page reports the skip.
-    expect('secrets' in seen[2]).toBe(false);
+    expect(seen.map((m) => 'secrets' in m)).toEqual([false, false, false]);
+    // An empty value is "not provided": nothing to hand out, the page reports the skip.
+    expect(answers).toEqual([{ ok: true, value: 's3cret' }, { ok: false }, { ok: false }, { ok: false }]);
     expect(JSON.stringify(w.session)).not.toContain('s3cret');
+  });
+
+  it('refuses a secret request from another tab, an extension page, a stale run or a non-current step', async () => {
+    let w;
+    const answers = {};
+    w = startWorker({
+      tabs: [
+        { id: TAB, windowId: WINDOW, active: true, status: 'complete' },
+        { id: TAB + 1, windowId: WINDOW, active: false, status: 'complete' },
+      ],
+      respond: (tabId, msg) => {
+        if (msg.type !== 'REPLAY_STEP' || !msg.step.sensitive)
+          return msg.type === 'REPLAY_STEP' ? { ok: true } : NO_ANSWER;
+        const ask = { type: 'REPLAY_SECRET_REQUEST', runId: msg.runId, index: msg.index };
+        answers.otherTab = w.fromTab(ask, TAB + 1).response;
+        answers.page = w.send(ask).responded;
+        answers.staleRun = w.fromTab({ ...ask, runId: 'other-run' }).response;
+        answers.otherStep = w.fromTab({ ...ask, index: msg.index + 1 }).response;
+        answers.owner = w.fromTab(ask).response;
+        return { ok: true };
+      },
+    });
+    await runToEnd(w, {
+      steps: [fill('', { sensitive: true, secretName: 'password' })],
+      secrets: { password: 'pw' },
+    });
+    expect(answers).toEqual({
+      otherTab: { ok: false },
+      page: false,
+      staleRun: { ok: false },
+      otherStep: { ok: false },
+      owner: { ok: true, value: 'pw' },
+    });
+    // After the run, nothing is left to ask for.
+    expect(w.fromTab({ type: 'REPLAY_SECRET_REQUEST', runId: 'x', index: 0 }).response).toEqual({
+      ok: false,
+    });
   });
 
   it('propagates the page’s "no value provided" as a skipped step without failing the run', async () => {
     const w = startWorker({
       respond: (tabId, msg) =>
-        msg.step.sensitive && !msg.secrets
-          ? { ok: false, skipped: true, error: 'no value provided' }
-          : { ok: true },
+        msg.step.sensitive ? { ok: false, skipped: true, error: 'no value provided' } : { ok: true },
     });
     const { done: end } = await runToEnd(w, {
       steps: [fill('', { sensitive: true, secretName: 'password' }), click()],

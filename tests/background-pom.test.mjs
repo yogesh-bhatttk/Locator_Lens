@@ -42,6 +42,22 @@ describe('POM_PICK_START', () => {
     expect(toTab(w, 'POM_PICK_START')).toEqual([]);
   });
 
+  it('points at site access when the user withheld it and the browser refused for want of permission', async () => {
+    const w = startWorker({ noAccessTabs: [TAB], hostAccess: false });
+    for (const type of ['POM_PICK_START', 'START_INSPECT', 'START_RECORDING']) {
+      const res = await w.ask({ type, windowId: WINDOW });
+      expect(res.ok).toBe(false);
+      expect(res.error).toMatch(/allow Locatra site access/);
+      expect(res.error).not.toMatch(RESTRICTED);
+    }
+  });
+
+  it('keeps the restricted-page message for a permission refusal while site access is granted (about:blank)', async () => {
+    const w = startWorker({ noAccessTabs: [TAB] });
+    const res = await w.ask({ type: 'START_INSPECT', windowId: WINDOW });
+    expect(res.error).toMatch(RESTRICTED);
+  });
+
   it('with no active tab it says so', async () => {
     const w = startWorker({ tabs: [] });
     expect(await w.ask({ type: 'POM_PICK_START', windowId: WINDOW })).toEqual({

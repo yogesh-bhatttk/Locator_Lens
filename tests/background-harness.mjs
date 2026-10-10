@@ -141,6 +141,9 @@ export function imageApis({
  *   respond(tabId, msg, frameId): content answer for non-PING messages. May return
  *     a value, a Promise of one, or NO_ANSWER. Default: NO_ANSWER.
  *   restrictedTabs: tab ids that refuse injection and never answer
+ *   noAccessTabs: tab ids Chrome refuses with its "must request permission" message —
+ *     a site whose access the user withheld, or about:blank (Chrome words both alike)
+ *   hostAccess: are the manifest's http/https host permissions granted? (default true)
  *   unreachableTabs: tab ids with no content script until injected
  *   capture(windowId, opts): returns a data URL, or throws to simulate lastError
  *   navigate(tabId, url): 'normal' (default) | 'hang' (stays loading) | 'error' | 'same-document'
@@ -228,7 +231,8 @@ export function startWorker(options = {}) {
   for (const t of options.tabs ?? [{ id: TAB, windowId: WINDOW, active: true }]) {
     tabs.set(t.id, { status: 'complete', active: true, ...t });
   }
-  const restricted = new Set(options.restrictedTabs ?? []);
+  const noAccess = new Set(options.noAccessTabs ?? []);
+  const restricted = new Set([...(options.restrictedTabs ?? []), ...noAccess]);
   const unreachable = new Set([...(options.unreachableTabs ?? []), ...restricted]);
   const respond = options.respond ?? (() => NO_ANSWER);
   const navDelay = options.navDelay ?? 5;
@@ -379,6 +383,12 @@ export function startWorker(options = {}) {
         }
         injected.push(opts);
         const tabId = opts.target?.tabId;
+        if (noAccess.has(tabId)) {
+          const message =
+            'Cannot access contents of the page. Extension manifest must request permission to access the respective host.';
+          withError({ message }, () => cb && cb());
+          return;
+        }
         if (restricted.has(tabId) || !tabs.has(tabId)) {
           withError({ message: 'Cannot access contents of the page.' }, () => cb && cb());
           return;
@@ -417,6 +427,10 @@ export function startWorker(options = {}) {
         ? undefined
         : {
             contains: (query, cb) => {
+              if (!(query.origins || []).includes('<all_urls>')) {
+                ok(() => cb(options.hostAccess !== false));
+                return;
+              }
               permissionChecks.push(query);
               if (allUrls === 'throw') throw new Error('permissions unavailable');
               if (allUrls === 'error') withError({ message: 'nope' }, () => cb(undefined));
@@ -460,6 +474,8 @@ export function startWorker(options = {}) {
     chrome,
     setTimeout: (...a) => globalThis.setTimeout(...a),
     clearTimeout: (...a) => globalThis.clearTimeout(...a),
+    setInterval: (...a) => globalThis.setInterval(...a),
+    clearInterval: (...a) => globalThis.clearInterval(...a),
     console,
     Blob,
     atob,

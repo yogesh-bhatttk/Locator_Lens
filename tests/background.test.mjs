@@ -1090,7 +1090,7 @@ describe('window-scoped relays (C1)', () => {
 });
 
 describe('steps recorded while the panel is closed (C7)', () => {
-  it('relays a dblclick supersession after the steps it refers to, to the session window', async () => {
+  it('carries a dblclick supersession inside its step, and ignores the retired separate message', async () => {
     const w = startWorker();
     const panel = w.connectPanel(WINDOW);
     w.send({ type: 'START_RECORDING', windowId: WINDOW });
@@ -1102,14 +1102,49 @@ describe('steps recorded while the panel is closed (C7)', () => {
     w.sendFrom({ type: 'RECORDED_ACTION_SUPERSEDE', eventIds: ['a', 'b'] }, pageSender());
     await flush();
     const relays = panel.posted.filter((m) => m.type.startsWith('RECORDED_ACTION'));
-    expect(relays.map((m) => m.type)).toEqual(['RECORDED_ACTION', 'RECORDED_ACTION_SUPERSEDE']);
+    expect(relays.map((m) => m.type)).toEqual(['RECORDED_ACTION']);
     expect(relays[0].data.supersedes).toEqual(['a', 'b']);
-    expect(relays[1]).toEqual({
-      type: 'RECORDED_ACTION_SUPERSEDE',
-      eventIds: ['a', 'b'],
-      windowId: WINDOW,
-      tabId: TAB,
-    });
+  });
+
+  it('keeps steps buffered from an earlier recording when a new one starts (no panel open)', async () => {
+    const w = startWorker();
+    w.send({ type: 'START_RECORDING', windowId: WINDOW });
+    await flush();
+    w.sendFrom({ type: 'RECORDED_ACTION', data: { action: 'click', eventId: 'a1' } }, pageSender());
+    w.sendFrom({ type: 'RECORDED_ACTION', data: { action: 'click', eventId: 'a2' } }, pageSender());
+    await flush();
+    w.send({ type: 'STOP_RECORDING', windowId: WINDOW });
+    await flush();
+    w.send({ type: 'START_RECORDING', windowId: WINDOW });
+    await flush();
+    w.sendFrom({ type: 'RECORDED_ACTION', data: { action: 'click', eventId: 'b1' } }, pageSender());
+    await flush();
+    const panel = w.connectPanel(WINDOW);
+    await flush();
+    const replayed = panel.posted.filter((m) => m.type === 'RECORDED_ACTION' && m.replayed);
+    expect(replayed.map((m) => m.data.eventId)).toEqual(['a1', 'a2', 'b1']);
+  });
+
+  it('ignores panel-only messages that come from a page', async () => {
+    const w = startWorker();
+    w.send({ type: 'START_RECORDING', windowId: WINDOW });
+    await flush();
+    w.sendFrom({ type: 'RECORDED_ACTION', data: { action: 'click', eventId: 'k' } }, pageSender());
+    await flush();
+    for (const type of ['PANEL_BUFFER_ACK', 'PANEL_HEARTBEAT', 'OPEN_SIDE_PANEL', 'CLOSE_SIDE_PANEL']) {
+      const r = w.sendFrom({ type, windowId: WINDOW }, pageSender());
+      expect(r.keptOpen).toBeFalsy();
+      expect(r.responded).toBeFalsy();
+    }
+    await flush();
+    // The page's heartbeat did not make a panel look open...
+    const state = w.send({ type: 'GET_PANEL_STATE', windowId: WINDOW });
+    await flush();
+    expect(state.response).toEqual({ active: false });
+    // ...and its ACK did not drop the buffered step.
+    const panel = w.connectPanel(WINDOW);
+    await flush();
+    expect(panel.posted.filter((m) => m.replayed).map((m) => m.data.eventId)).toEqual(['k']);
   });
 
   it('buffers steps per window and replays them to the panel when it says hello', async () => {

@@ -101,6 +101,15 @@ describe('step screenshots: capture', () => {
     expect(thumbsOf(w)).toEqual([]);
   });
 
+  it('never captures a sensitive step, or a step taken while a secret shows in a field', async () => {
+    const w = startWorker();
+    record(w, step({ action: 'fill', value: '', sensitive: true, secretName: 'LOCATRA_SECRET' }));
+    record(w, step({ action: 'click', sensitiveOnScreen: true }));
+    await flush(30);
+    expect(w.captures).toEqual([]);
+    expect(thumbsOf(w)).toEqual([]);
+  });
+
   it('only captures when the step’s tab is the active tab of its window', async () => {
     const w = startWorker({
       tabs: [
