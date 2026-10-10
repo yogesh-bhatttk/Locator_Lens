@@ -4114,7 +4114,7 @@ function sanitizeJsonValue(v, depth) {
 
 // Fields codegen writes into a script as bare numbers. A target from an imported
 // file could carry "1 }); evil(); ({" here, so each is a plain integer or gone.
-const TARGET_INT_FIELDS = { level: [1, 6], index: [0, 9999], framesIndex: [0, 9999], nth: [-9999, 9999] };
+const TARGET_INT_FIELDS = { level: [1, 99], index: [0, 9999], framesIndex: [0, 9999], nth: [-9999, 9999] };
 
 function sanitizeTargetNumbers(t) {
   for (let n = t, guard = 0; isPlainObject(n) && guard < 16; n = n.child, guard++) {

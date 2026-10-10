@@ -1091,6 +1091,20 @@ describe('export and import', () => {
     expect('index' in fr.target).toBe(false);
     expect(fr.target.framesIndex).toBe(2);
     expect(fr.target.child.level).toBe(2);
+    // aria-level goes past 6 (role="heading" aria-level="7"); only nonsense is dropped.
+    const deep = {
+      version: 1,
+      sites: {
+        'https://shop.example/': [
+          { id: 'l7', target: { kind: 'role', role: 'heading', name: 'Summary', level: 7 } },
+          { id: 'l0', target: { kind: 'role', role: 'heading', name: 'Zero', level: 0 } },
+        ],
+      },
+    };
+    await importText(JSON.stringify(deep));
+    const byId = Object.fromEntries(site('https://shop.example/').map((i) => [i.id, i]));
+    expect(byId.l7.target.level).toBe(7);
+    expect('level' in byId.l0.target).toBe(false);
     expect(fr.code).not.toMatch(/evil/);
   });
 
