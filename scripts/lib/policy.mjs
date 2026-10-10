@@ -397,6 +397,43 @@ function checkHostPatterns(list, kind, problems, extra = new Set()) {
   }
 }
 
+// Script sources an extension page may keep. Anything else — 'unsafe-eval',
+// 'unsafe-inline', a host, a scheme, a hash allowance for inline code — loosens the
+// browser's default policy, which is exactly what the store reviews reject.
+const CSP_SCRIPT_DIRECTIVES = new Set([
+  'default-src',
+  'script-src',
+  'script-src-elem',
+  'script-src-attr',
+  'object-src',
+  'worker-src',
+]);
+const CSP_SAFE_SOURCES = new Set(["'self'", "'none'", "'wasm-unsafe-eval'"]);
+
+/**
+ * The extension pages' CSP may only tighten the default. The sandbox policy is
+ * left alone: sandboxed pages have no extension API access by design.
+ * @param {string|object|undefined} csp manifest.content_security_policy
+ * @returns {string[]} problems
+ */
+export function verifyCsp(csp) {
+  if (csp === undefined) return [];
+  const policy = typeof csp === 'string' ? csp : csp && csp.extension_pages;
+  if (policy === undefined) return [];
+  if (typeof policy !== 'string') return ['content_security_policy.extension_pages is not a string'];
+  const problems = [];
+  for (const directive of policy.split(';')) {
+    const [name, ...sources] = directive.trim().split(/\s+/);
+    if (!name || !CSP_SCRIPT_DIRECTIVES.has(name.toLowerCase())) continue;
+    for (const src of sources) {
+      if (!CSP_SAFE_SOURCES.has(src.toLowerCase())) {
+        problems.push(`content_security_policy ${name} allows ${src}; extension pages may only use 'self'`);
+      }
+    }
+  }
+  return problems;
+}
+
 /**
  * Check a manifest's permission-like keys against the (comment-stripped) code.
  * @param {object} manifest parsed manifest.json
@@ -434,6 +471,13 @@ export function verifyPermissions(manifest, code) {
   if (hasOptional && !PERMISSIONS_REQUEST.test(code)) {
     problems.push('manifest declares optional permissions but no packaged file calls permissions.request()');
   }
+
+  // Nothing outside the extension may message it: no web page and no other
+  // extension has a reason to, and every handler assumes its sender is our own code.
+  if (manifest.externally_connectable !== undefined) {
+    problems.push('manifest declares externally_connectable; the extension must not accept outside messages');
+  }
+  problems.push(...verifyCsp(manifest.content_security_policy));
 
   if (manifest.minimum_chrome_version !== undefined) {
     const v = String(manifest.minimum_chrome_version);

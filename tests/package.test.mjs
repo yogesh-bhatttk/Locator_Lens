@@ -32,6 +32,7 @@ import {
   stripJsComments,
   verifyPackage,
   verifyPermissions,
+  verifyCsp,
 } from '../scripts/lib/policy.mjs';
 import { createZip, crc32, readZip } from '../scripts/lib/zip.mjs';
 
@@ -153,6 +154,29 @@ describe('permission checks', () => {
     expect(verifyPermissions({ permissions: ['bookmarks'] }, 'chrome.bookmarks.get()').join()).toMatch(
       /no entry in PERMISSION_EVIDENCE/
     );
+  });
+
+  it('rejects externally_connectable in any form', () => {
+    expect(verifyPermissions({ externally_connectable: { matches: ['https://*/*'] } }, '').join()).toMatch(
+      /externally_connectable/
+    );
+    expect(verifyPermissions({ externally_connectable: {} }, '').join()).toMatch(/externally_connectable/);
+  });
+
+  it('rejects a CSP that loosens script sources, and accepts one that only tightens', () => {
+    expect(verifyCsp(undefined)).toEqual([]);
+    expect(verifyCsp({ sandbox: "sandbox allow-scripts; script-src 'self' 'unsafe-eval'" })).toEqual([]);
+    expect(verifyCsp({ extension_pages: "script-src 'self' 'wasm-unsafe-eval'; object-src 'none'" })).toEqual(
+      []
+    );
+    expect(verifyCsp({ extension_pages: "default-src 'self'; style-src 'unsafe-inline'" })).toEqual([]);
+    expect(verifyCsp({ extension_pages: "script-src 'self' 'unsafe-eval'" }).join()).toMatch(/unsafe-eval/);
+    expect(verifyCsp({ extension_pages: "script-src 'self' https://cdn.example.com" }).join()).toMatch(/cdn/);
+    expect(verifyCsp({ extension_pages: 'default-src *' }).join()).toMatch(/\*/);
+    expect(verifyCsp("script-src 'self' 'unsafe-inline'").join()).toMatch(/unsafe-inline/);
+    expect(verifyCsp({ extension_pages: 42 }).join()).toMatch(/not a string/);
+    const loose = { content_security_policy: { extension_pages: "script-src 'self' 'unsafe-eval'" } };
+    expect(verifyPermissions(loose, '').join()).toMatch(/unsafe-eval/);
   });
 
   it('bans tabs in permissions and optional_permissions alike', () => {

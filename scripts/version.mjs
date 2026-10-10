@@ -75,7 +75,15 @@ if (!arg) {
     console.error('  Fix with: node scripts/version.mjs <version>');
     process.exit(1);
   }
-  console.log(`\n✓ All files agree on ${versions[0]}`);
+  // A store upload is reviewed against its release notes, and a version with no
+  // CHANGELOG entry is usually one that was never meant to ship under that number.
+  const changelog = readFileSync(join(ROOT, 'CHANGELOG.md'), 'utf8');
+  if (!changelog.includes(`## [${versions[0]}]`)) {
+    console.error(`\n✗ CHANGELOG.md has no "## [${versions[0]}]" heading for the manifest version`);
+    console.error('  Rename [Unreleased] to the new version when cutting a release.');
+    process.exit(1);
+  }
+  console.log(`\n✓ All files agree on ${versions[0]}, and CHANGELOG.md has its entry`);
   process.exit(0);
 }
 
