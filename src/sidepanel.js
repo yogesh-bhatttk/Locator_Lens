@@ -404,6 +404,32 @@ function toggleLongCode(btn) {
   btn.textContent = open ? 'Show less' : 'Show full locator';
 }
 
+const STABILITY_ORDER = ['BEST', 'GOOD', 'OK', 'AVOID'];
+const SIMPLE_KINDS = ['testid', 'id', 'name'];
+
+/** The innermost (non-frame, non-chain-parent) target: what the lookup is "by". */
+function innermostTarget(t) {
+  let x = t;
+  for (let guard = 0; x && guard < 16 && (x.kind === 'frame' || x.kind === 'chain'); guard++) x = x.child;
+  return x || {};
+}
+
+/**
+ * The badge for the current output. Playwright keeps the engine's rating (it was
+ * made for Playwright's getBy* API). Elsewhere what matters is what the framework
+ * can do natively: a unique test id / id / name is a plain lookup (BEST), short
+ * CSS / XPath is fine (GOOD), a role / label / text lookup needs the emitted
+ * helper (OK), and anything ambiguous or that the engine found unstable — a
+ * generated id, say — stays AVOID.
+ */
+function outputStability(loc, formatted) {
+  const engine = String(loc.stability || '').toUpperCase();
+  if (outFramework === 'playwright') return loc.stability;
+  if (loc.unique === false || engine === 'AVOID') return 'AVOID';
+  if (formatted && formatted.helpers) return 'OK';
+  return SIMPLE_KINDS.indexOf(innermostTarget(loc.target).kind) !== -1 ? 'BEST' : 'GOOD';
+}
+
 // Above this many characters a locator's code is collapsed behind "Show full
 // locator": a card must stay readable whatever a framework makes of a target.
 const LONG_LOCATOR_CHARS = 300;
@@ -420,8 +446,8 @@ function orderLocatorsForOutput(locators, suggestedAction) {
   if (outFramework === 'playwright') return rows;
   const scored = rows.map((row) => {
     const f = formatLocator(row.loc, suggestedAction);
-    const unique = row.loc.unique !== false;
-    return { row, key: [unique ? 0 : 1, f.helpers ? 1 : 0, String(f.code || '').length, row.index] };
+    const rating = STABILITY_ORDER.indexOf(outputStability(row.loc, f)); // never -1 off Playwright
+    return { row, key: [rating, String(f.code || '').length, row.index] };
   });
   scored.sort((a, b) => {
     for (let i = 0; i < a.key.length; i++) if (a.key[i] !== b.key[i]) return a.key[i] - b.key[i];
@@ -947,14 +973,21 @@ function renderResults(data) {
     const rc = rankClass(outFramework === 'playwright' ? loc.rank : pos + 1);
     const delayStyle = `animation-delay:${pos * 0.06}s`;
     
-    const { code, fullCode, helpers } = formatLocator(loc, el.suggestedAction);
+    const formatted = formatLocator(loc, el.suggestedAction);
+    const { code, fullCode, helpers } = formatted;
     const longCode = String(code || '').length > LONG_LOCATOR_CHARS;
     const copyText = helpers ? `${helpers}\n\n${fullCode}` : fullCode;
 
+    // One match that is not unique means the locator finds a different element
+    // (a child holding the text, say) — not "1 matches … ambiguous".
     const uniqChip = (typeof loc.matchCount === 'number')
       ? (loc.unique
           ? '<span class="uniq uniq-ok" title="Matches exactly one element on the page">✓ unique</span>'
-          : `<span class="uniq uniq-warn" title="Matches multiple elements — may be ambiguous">⚠ ${loc.matchCount >= 10 ? '10+' : loc.matchCount} matches</span>`)
+          : loc.matchCount === 1
+            ? '<span class="uniq uniq-warn" title="Matches one element, but not the one you picked">⚠ other element</span>'
+            : loc.matchCount === 0
+              ? '<span class="uniq uniq-warn" title="Matches nothing on the page right now">⚠ no match</span>'
+              : `<span class="uniq uniq-warn" title="Matches multiple elements — may be ambiguous">⚠ ${loc.matchCount >= 10 ? '10+' : loc.matchCount} matches</span>`)
       : '';
 
     return `
@@ -968,7 +1001,7 @@ function renderResults(data) {
             </div>
           </div>
           <div class="card-badges">
-            <span class="pill ${pillClass(loc.stability)}">${pillLabel(loc.stability)}</span>
+            <span class="pill ${pillClass(outputStability(loc, formatted))}">${pillLabel(outputStability(loc, formatted))}</span>
             ${uniqChip}
           </div>
         </div>

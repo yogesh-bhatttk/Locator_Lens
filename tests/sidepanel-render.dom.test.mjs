@@ -359,6 +359,27 @@ describe('renderResults resilience', () => {
     expect(document.getElementById('resultsState').style.display).toBe('');
   });
 
+  it('says "other element" or "no match" rather than "1 matches" / "0 matches"', () => {
+    const base = {
+      method: 'getByText()',
+      stability: 'OK',
+      code: "page.getByText('x')",
+      target: { kind: 'text', value: 'x' },
+    };
+    renderResults({
+      elementData: { tag: 'div' },
+      locators: [
+        { ...base, rank: 1, matchCount: 1, unique: false },
+        { ...base, rank: 2, matchCount: 0, unique: false },
+        { ...base, rank: 3, matchCount: 4, unique: false },
+      ],
+      avoidList: [],
+      a11y: [],
+    });
+    const chips = [...document.querySelectorAll('#cardsContainer .uniq')].map((n) => n.textContent);
+    expect(chips).toEqual(['⚠ other element', '⚠ no match', '⚠ 4 matches']);
+  });
+
   describe('per-framework order and long code (C9)', () => {
     const setOut = (fw, lang) =>
       vm.runInThisContext(`outFramework = ${JSON.stringify(fw)}; outLanguage = ${JSON.stringify(lang)};`);
@@ -399,6 +420,27 @@ describe('renderResults resilience', () => {
       ]);
       // Watch still acts on the locator the card shows.
       expect(document.querySelector('#cardsContainer .watch-btn').getAttribute('data-index')).toBe('1');
+    });
+
+    it('rates badges by what the framework can do natively, and orders cards by that rating', () => {
+      setOut('selenium', 'python');
+      const css = { ...id, rank: 3, stability: 'BEST', target: { kind: 'css', value: 'form input.user' } };
+      const flaky = { ...id, rank: 4, stability: 'AVOID', target: { kind: 'id', value: 'ember123' } };
+      const many = { ...id, rank: 5, unique: false, matchCount: 3, target: { kind: 'name', value: 'q' } };
+      renderResults({
+        elementData: { tag: 'input' },
+        locators: [role, css, flaky, many, id],
+        avoidList: [],
+        a11y: [],
+      });
+      const pills = [...document.querySelectorAll('#cardsContainer .pill')].map((n) => n.textContent);
+      const codes = cardCodes();
+      expect(codes[0]).toContain('By.ID, "username"');
+      expect(pills[0]).toBe('★ BEST'); // a plain id lookup, though the engine rated it GOOD
+      expect(pills[1]).toBe('✓ GOOD'); // short css
+      expect(codes[2]).toMatch(/locatra_find/);
+      expect(pills[2]).toBe('~ OK'); // needs the helper
+      expect(pills.slice(3)).toEqual(['✗ AVOID', '✗ AVOID']); // unstable id, ambiguous name
     });
 
     it('collapses a long locator behind "Show full locator", and copy includes any helper', () => {
