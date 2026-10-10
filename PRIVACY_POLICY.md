@@ -56,16 +56,19 @@ Specifically, we do **not**:
   `LOCATRA_SECRET` for the others (both names can be changed on the Settings page) —
   so the secret never leaves the page, never reaches extension storage and never
   appears in a script. A "has value" assertion on such a field is recorded the same
-  way, and no step screenshot is taken of such a step or while such a value is
-  visible in a field on the page. When a recorded flow is replayed, the value you
+  way, and no step screenshot is taken of such a step, or while such a value is
+  filled in anywhere on the page, payment iframes included. When a recorded flow is replayed, the value you
   type for it is handed only to the page frame that owns that step, and only for
   the length of the run.
 - **Secrets in URLs.** Before a page address is stored or written into a test, the
-  values of query/fragment parameters that commonly carry credentials (`password`,
-  `passwd`, `pwd`, `secret`, `client_secret`, `code`, `token`, `access_token`,
-  `id_token`, `refresh_token`, `auth`, `sig`, `signature`, `X-Amz-Signature`,
-  `X-Amz-Credential`, `X-Amz-Security-Token`, `key`, `apikey`, `api_key`, `session`,
-  `sessionid`; names matched case-insensitively) are replaced with `REDACTED`.
+  values of query/fragment parameters that carry credentials are replaced with
+  `REDACTED` (names matched case-insensitively):
+  - always: `password`, `passwd`, `pwd`, `secret`, `client_secret`, `access_token`,
+    `id_token`, `refresh_token`, `api_key`, `apikey`, `signature`, `X-Amz-Signature`,
+    `X-Amz-Credential`, `X-Amz-Security-Token`, `sessionid`;
+  - when the value looks like a credential (a JWT, or a long random-looking token):
+    `code`, `token`, `key`, `auth`, `sig`, `session` — so `?key=shoes` or
+    `?code=SUMMER` stays as it is and the test still opens the right page.
 - **File contents.** An upload step records only the selected file **names**, never
   the files.
 

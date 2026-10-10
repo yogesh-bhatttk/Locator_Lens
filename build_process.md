@@ -303,11 +303,35 @@ profile, so they can run alongside the main one.
   - the Edge package is byte-identical to Chrome's and loads.
 - `npm run smoke:data-health`, **test-data variables and the Health tab** through the
   real side panel.
+- `npm run smoke:frames`, **frames behind a cross-origin parent**: real clicks in a
+  payment frame, a frame nested two cross-origin levels deep and a shadow-hosted
+  frame, on pages where `<iframe>` order and `window.frames` order differ (an
+  `<object>`, a late-inserted iframe). Each recorded frame `index` must equal what
+  Playwright counts, and each exported Playwright locator must find exactly one
+  element.
+- `npm run smoke:firefox`, **the Firefox package in a real Firefox**: it is installed
+  as a temporary add-on through Selenium and geckodriver, and
+  - the background page answers, and http/https access is granted;
+  - Inspect injects the content script;
+  - a recording of real WebDriver input lands in the sidebar Firefox opens by itself,
+    with the password step empty and the password nowhere in extension storage;
+  - the export reads the password from the environment;
+  - a replay re-fills the page, its secret fetched by the owning frame;
+  - the health check works inside the payment iframe;
+  - `about:robots` is refused.
 
-`npm run smoke:all` runs all five.
+  It needs Firefox and geckodriver 0.36 or later (`LOCATRA_FIREFOX` /
+  `LOCATRA_GECKODRIVER`, else `PATH`). Without them it says so and passes. WebDriver
+  will not open a `moz-extension://` page, so the panel tab is opened from Firefox's
+  privileged context, which is why geckodriver is started with
+  `--allow-system-access`.
 
-They need a display, so they are not part of `npm run verify`. CI runs them under
-`xvfb` in their own job. Run them locally before submitting too:
+`npm run smoke:all` runs all seven.
+
+They need a browser, so they are not part of `npm run verify`. CI runs them in their
+own job, the Chromium ones under `xvfb` and the Firefox one headless (there it must
+run: `LOCATRA_REQUIRE_FIREFOX=1` makes a missing Firefox or geckodriver a failure).
+Run them locally before submitting too:
 
 ```bash
 npm run build && npm run smoke:all
@@ -354,16 +378,31 @@ shims in `tests/e2e/support/`.
 
 Two flows are run. **canonical** is `tests/e2e/fixtures/checkout-flow.json`, steps in
 the exact shape the side panel stores: fills (one a password, read from
-`LOCATRA_PASSWORD`), a select, check/uncheck, hover, viewport, clicks and an
-assertion inside the payment iframe, Tab / Shift+Tab / Enter, and `toBeVisible`,
-`toHaveText`, `toContainText`, `toBeChecked`, `toHaveValue` and `toHaveURL`.
+`LOCATRA_PASSWORD`), a value check on that password field (also read from the
+environment, and never printed when it fails), a select, a multi-select, a field
+inside an open shadow root, check/uncheck, hover, viewport, clicks and an assertion
+inside the payment iframe (one addressed only by position), Tab / Shift+Tab / Enter,
+and `toBeVisible`, `toHaveText`, `toContainText`, `toBeChecked`, `toHaveValue` and
+`toHaveURL`.
+
+For this run only (`startDemoServer({ exportExtras: true })`; the store screenshots
+and the other smokes see the plain page), the server adds three things to the demo
+page (`scripts/e2e/demo-server.mjs`): the Interests multi-select, whose option text
+has stray whitespace; the Promo code field inside `<promo-code>`'s shadow root; and
+a hidden `<object>` before the payment iframe. The `<object>` is a browsing context
+that is not an `<iframe>`: a frame addressed only by position (as one behind a
+cross-origin parent is) must still be the first `<iframe>` in every framework. The
+recorded flow must contain the sensitive value check, a two-value multi-select step
+and the shadow-root fill, and no click on an `<option>`, or it fails before any
+runner starts.
 **recorded** is the same checkout recorded through the built extension in a real
 browser (suggested assertions accepted with the panel's own button) and read back
 from the panel's storage — recorder, storage, codegen and framework end to end.
 
 A run passes only if it exits cleanly **and** the demo server received exactly one
 order matching `tests/e2e/fixtures/checkout-flow.expect.json` — names, country, gift
-wrap, card number from the iframe, the password from the environment, and the field
+wrap, card number from the iframe, the password from the environment, both chosen
+interests, the promo code typed into the shadow root, and the field
 that had focus when Enter submitted (which proves the Tab and Shift+Tab steps). A
 runner that is not installed is skipped with the command that installs it;
 `--require all` (used in CI) turns such a skip into a failure. Generated scripts and

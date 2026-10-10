@@ -131,8 +131,36 @@ All notable changes to Locatra (formerly LocatorLens). Versions follow [semantic
 - A failure to generate locators is reported, never replaced by a silent,
   non-unique `page.locator('<tag>')`.
 
+- Frames behind a cross-origin parent are addressed exactly: the frame's content
+  script asks the parent's (through the worker) for its position among the
+  parent's `<iframe>` elements, so an `<object>`, a late-inserted ad iframe or a
+  shadow-hosted iframe before it no longer shifts the exported index.
+- Selenium, WebdriverIO and Cypress enter such a frame by element (the same
+  shadow-piercing `<iframe>` count Playwright uses), not by a bare frame number,
+  which ChromeDriver and geckodriver count differently.
+- Selenium role locators follow the browser's role rules exactly (`role="none"` on
+  a focusable element, unknown role tokens, `list=` pointing at a `<datalist>`,
+  headers inside sectioning elements, lone `<th>`s); Cypress checks the role with a
+  small helper ported from the extension's engine.
+- Re-injecting the content script (a new iframe while inspecting, a health check)
+  no longer makes Locatra's own overlay buttons and toast count as page elements.
+- URL redaction keeps ordinary parameters (`?key=shoes`, `?code=SUMMER`); generic
+  names like `code`, `token` and `key` are redacted only when the value looks like a
+  credential.
+- A click on a checkbox's label is still recorded when the page handles it in
+  script (no `change` event); clicks on an `<option>` are not recorded (the
+  selection is).
+- A replayed step from an older recording without a secret name gets the
+  `LOCATRA_PASSWORD` value the panel asked for.
+- Headings with `aria-level` above 6 keep their level in exports and imports.
+
 ### Security
 
+- A failing Playwright value check on a password field no longer prints the
+  password: every framework reports only the environment variable's name.
+- No step screenshot is taken while a password, one-time-code or card value is
+  filled in anywhere on the page, payment iframes included, and a capture already
+  queued is cancelled when such a value appears.
 - A password, one-time-code or card field's value is no longer copied into a
   "has value" assertion; the test reads it from the environment like a sensitive
   fill.
@@ -162,6 +190,17 @@ All notable changes to Locatra (formerly LocatorLens). Versions follow [semantic
 
 ### Tests
 
+- `npm run smoke:firefox` installs the Firefox package in a real Firefox (Selenium +
+  geckodriver) and records, exports, replays and health-checks through it; CI runs
+  it.
+- `npm run smoke:frames` records real clicks behind cross-origin parents (two levels
+  deep and shadow-hosted) and checks every recorded index against Playwright's own
+  count.
+- The export run covers a multi-select, a field inside a shadow root, a sensitive
+  value check and a frame addressed only by position, in every framework, and fails
+  if the recorded flow lacks any of them.
+- Dev dependencies upgraded (vitest 4.1.11, lint-staged 17): `npm audit` reports no
+  vulnerabilities.
 - Every exported script runs for real in CI, against a demo checkout:
   - Playwright TypeScript/JavaScript/Python/Java/C#, Selenium
     TypeScript/JavaScript/Python/Java/C#, Cypress TypeScript/JavaScript and
