@@ -991,7 +991,10 @@ describe('F6/F20 · parent/child traversal', () => {
     send({ type: 'START_INSPECT' });
     pointAt(buy);
     buy.dispatchEvent(new window.MouseEvent('mouseover', { bubbles: true }));
-    expect(document.getElementById('ll-traversal-bar').style.top).toBe('140px');
+    // Flush above it, right edges aligned — never under it, where the next field is.
+    const bar = document.getElementById('ll-traversal-bar');
+    expect(bar.style.top).toBe('66px');
+    expect(bar.style.left).toBe('40px');
   });
 
   it('▼ skips a shadow root <style> and lands on the first rendered child', () => {

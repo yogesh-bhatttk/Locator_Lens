@@ -954,6 +954,26 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
     return true;
   }
 
+  // INSPECT_HOVERED: a frame started showing its hover UI. Every frame of that tab
+  // hears HIDE_HOVER_UI; all but the announcer (its token) hide theirs — moving into
+  // a cross-origin iframe gives the parent document no mouse event to do it by.
+  if (msg.type === 'INSPECT_HOVERED') {
+    if (!fromTab || typeof msg.token !== 'string') return;
+    sendToFrame(fromTab.id, { type: 'HIDE_HOVER_UI', token: msg.token });
+    return;
+  }
+
+  // COPY_VIA_TOP: a quick copy in a subframe whose permissions policy blocks the
+  // clipboard. The tab's top frame copies it instead; only content scripts in a
+  // subframe ask, and only their own tab's top frame is told.
+  if (msg.type === 'COPY_VIA_TOP') {
+    if (!fromTab || !(sender.frameId > 0) || typeof msg.text !== 'string') return;
+    sendToFrame(fromTab.id, { type: 'COPY_TEXT', text: msg.text }, 0, (res) => {
+      sendResponse({ ok: !chrome.runtime.lastError && !!res && res.ok === true });
+    });
+    return true;
+  }
+
   // 🧩 PAGE OBJECT: region pick in every frame of the active tab (each frame
   // hit-tests its own document, as inspect does); whole-page scan in the top frame.
   if (msg.type === 'POM_PICK_START' || msg.type === 'POM_SCAN') {

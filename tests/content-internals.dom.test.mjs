@@ -637,15 +637,17 @@ describe('inspect overlay positioning and traversal', () => {
     send({ type: 'STOP_INSPECT' });
   });
 
-  it('moves the tooltip above the element when the bar covers it and there is no room below', () => {
+  it('moves a flipped tooltip above the bar when both sit above the element', () => {
     document.body.innerHTML = '<button id="b">B</button>';
     const b = document.getElementById('b');
-    rect(b, { x: 300, y: window.innerHeight - 110, w: 200, h: 30 });
+    rect(b, { x: 300, y: window.innerHeight - 50, w: 200, h: 30 });
     send({ type: 'START_INSPECT' });
     pointAt(b);
     b.dispatchEvent(new window.MouseEvent('mouseover', { bubbles: true }));
     const tip = document.getElementById('ll-tooltip');
-    expect(parseFloat(tip.style.top)).toBeLessThan(window.innerHeight - 110);
+    const bar = document.getElementById('ll-traversal-bar');
+    expect(parseFloat(bar.style.top)).toBe(window.innerHeight - 50 - 34);
+    expect(parseFloat(tip.style.top) + 64).toBeLessThanOrEqual(parseFloat(bar.style.top));
     send({ type: 'STOP_INSPECT' });
   });
 
@@ -933,6 +935,9 @@ describe('instance lifecycle', () => {
     const inspectPageParent = () => {
       document.body.innerHTML = '<button id="b">Parent</button>';
       send({ type: 'START_INSPECT' });
+      // A hover shows the toolbar (it starts hidden, out of the accessibility tree).
+      pointAt(document.getElementById('b'));
+      document.getElementById('b').dispatchEvent(new window.MouseEvent('mouseover', { bubbles: true }));
       expect(document.getElementById('ll-traversal-bar')).not.toBeNull(); // ▲ Parent / ▼ Child
       expect(globalThis.__LocatorLensEngine.countTargetMatches(parentRole)).toBe(1);
     };

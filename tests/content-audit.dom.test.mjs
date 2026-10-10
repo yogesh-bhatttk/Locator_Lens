@@ -248,7 +248,7 @@ describe('M3 · clicks on icons go to the control', () => {
     expect(out[3][1]).toMatch(/getByText\('Docs'\)$/); // the <span>, not the link around it
   });
 
-  it('inspect and the context menu promote icon parts only', () => {
+  it('inspect promotes like the recorder; the context menu promotes icon parts only', () => {
     document.body.innerHTML = ICONS;
     send({ type: 'START_INSPECT' });
     pointAt(document.getElementById('close-path'));
@@ -257,7 +257,8 @@ describe('M3 · clicks on icons go to the control', () => {
     document.getElementById('close-path').dispatchEvent(new window.MouseEvent('click', { bubbles: true }));
     pointAt(document.getElementById('docs-text'));
     document.getElementById('docs-text').dispatchEvent(new window.MouseEvent('click', { bubbles: true }));
-    expect(picks().map((p) => p.elementData.tag)).toEqual(['button', 'span']);
+    // The link's text <span> is anonymous inside an interactive <a>: the link is picked.
+    expect(picks().map((p) => p.elementData.tag)).toEqual(['button', 'a']);
     send({ type: 'STOP_INSPECT' });
 
     const use = document.getElementById('home-use');
@@ -406,9 +407,9 @@ describe('C3 · targets inside open shadow DOM carry shadowHosts / shadowCss', (
       kind: 'role',
       name: 'Two',
       shadowHosts: ['#app', '[data-testid="form"]'],
-      shadowCss: 'div > button:nth-of-type(2)',
+      shadowCss: 'button:nth-of-type(2)',
     });
-    expect(outerBtn.target).toMatchObject({ shadowHosts: ['#app'], shadowCss: 'button[name="b1"]' });
+    expect(outerBtn.target).toMatchObject({ shadowHosts: ['#app'], shadowCss: 'button' });
     // The engine still resolves the target (it pierces and ignores the extra fields).
     expect(globalThis.__LocatorLensEngine.resolveTarget(two.target)).toEqual([
       inner.querySelectorAll('button')[1],
@@ -429,7 +430,7 @@ describe('C3 · targets inside open shadow DOM carry shadowHosts / shadowCss', (
     expect(shadowPick.locators.length).toBeGreaterThan(1);
     for (const l of shadowPick.locators) {
       expect(l.target.shadowHosts).toEqual(['#app', '[data-testid="form"]']);
-      expect(l.target.shadowCss).toBe('input[placeholder="Email"]');
+      expect(l.target.shadowCss).toBe('input');
     }
     for (const l of lightPick.locators) expect(l.target.shadowHosts).toBeUndefined();
   });
@@ -445,7 +446,7 @@ describe('C3 · targets inside open shadow DOM carry shadowHosts / shadowCss', (
     pointer(closed.querySelector('button'));
     const [a, b] = steps();
     expect(a.target).toMatchObject({
-      shadowHosts: ['html > body > x-a:nth-of-type(2)'],
+      shadowHosts: ['x-a:nth-of-type(2)'],
       shadowCss: 'button',
     });
     expect(b.target.shadowHosts).toBeUndefined();

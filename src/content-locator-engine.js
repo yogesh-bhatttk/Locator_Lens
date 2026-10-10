@@ -1041,6 +1041,24 @@
     return c.split(/[-_:/]+/).some(looksLikeHash);
   }
 
+  // A class that says what state the element is in rather than what it is: the
+  // page adds and removes it as the user interacts. A locator built from it
+  // describes the DOM *after* the click that set it (TodoMVC's li.completed) and
+  // misses on replay. Stable in the sense above, but never part of a CSS selector.
+  const STATE_CLASS_WORDS = 'completed|active|selected|checked|open|opened|expanded|collapsed|disabled|' +
+    'focus|focused|focus-visible|hover|hovered|current|pressed|visited|loading|dragging|highlighted|invalid';
+  const STATE_CLASS_PATTERNS = [
+    new RegExp('^(' + STATE_CLASS_WORDS + ')$', 'i'),
+    /^(is|has)-[\w-]+$/,                                        // is-active, has-error
+    /^ng-[\w-]+$/,                                              // every Angular runtime class
+    new RegExp('(--|__)(' + STATE_CLASS_WORDS + ')$', 'i'),     // BEM modifiers: tab--active, item__selected
+    new RegExp('^[\\w-]+-(' + STATE_CLASS_WORDS + ')$', 'i')    // nav-item-active, btn-selected
+  ];
+  function isStateClass(cls) {
+    const c = String(cls || '');
+    return !!c && STATE_CLASS_PATTERNS.some(re => re.test(c));
+  }
+
   function hasUnstableClasses(el) {
     if (!el.className || typeof el.className !== 'string') return false;
     return el.className.trim().split(/\s+/).some(c => !isOwnArtifactClass(c) && isUnstableClass(c));
@@ -1108,7 +1126,7 @@
         }
         let part = cssEscape(current.tagName.toLowerCase());
         const stableClasses = current.className && typeof current.className === 'string'
-          ? current.className.trim().split(/\s+/).filter(c => c && !isOwnArtifactClass(c) && !isUnstableClass(c))
+          ? current.className.trim().split(/\s+/).filter(c => c && !isOwnArtifactClass(c) && !isUnstableClass(c) && !isStateClass(c))
           : [];
         if (stableClasses.length) {
           // Utility-class frameworks (Tailwind's sm:flex, w-1/2, …) are common and
@@ -1116,9 +1134,12 @@
           // selector invalid without this, exactly like the unescaped id case above.
           part += '.' + stableClasses.slice(0, 2).map(cssEscape).join('.');
         }
-        // Nth-of-type disambiguation among same-tag siblings
-        const siblings = current.parentElement
-          ? Array.from(current.parentElement.children).filter(c => c.tagName === current.tagName)
+        // Nth-of-type disambiguation among same-tag siblings — a shadow root's
+        // top-level elements included: they have a parentNode (the root) but no
+        // parentElement, and went without one (`div.item` matching all three items).
+        const tree = current.parentElement || current.parentNode;
+        const siblings = tree && tree.children
+          ? Array.from(tree.children).filter(c => c.tagName === current.tagName)
           : [];
         if (siblings.length > 1) {
           part += `:nth-of-type(${siblings.indexOf(current) + 1})`;
@@ -2143,6 +2164,7 @@
     elementKind,
     isOwnArtifactClass,
     isUnstableClass,
+    isStateClass,
     isUnstableId
   };
 })(typeof globalThis !== 'undefined' ? globalThis : window);

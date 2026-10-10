@@ -604,6 +604,127 @@
     return svg;
   }
 
+  // ── The toggle behind a click ─────────────────────────────────────────────
+  // Web components draw a checkbox from parts: <sl-checkbox> holds, in its shadow
+  // root, a <label> wrapping a hidden native <input type=checkbox> and an <sl-icon>
+  // whose own shadow root holds the check-mark <svg>. A click on that svg toggles
+  // the input — whose change records the check — but `el.closest('label')` never
+  // left the icon's shadow root, so the svg click was recorded too (matching every
+  // icon on the page). The walk below crosses shadow boundaries.
+  const TOGGLE_ROLES = ['checkbox', 'radio', 'switch', 'menuitemcheckbox', 'menuitemradio'];
+  const CONTROL_CANDIDATES = 'input, button, select, textarea, summary, a[href], area[href], [role]';
+
+  function isToggleInput(n) {
+    return !!n && n.nodeType === Node.ELEMENT_NODE && n.tagName.toLowerCase() === 'input' &&
+      ['checkbox', 'radio'].indexOf((n.getAttribute('type') || '').toLowerCase()) !== -1;
+  }
+
+  /** The interactive elements in n's light DOM and its own open shadow root. */
+  function controlsWithin(n) {
+    const out = [];
+    const scan = (root) => {
+      Array.prototype.forEach.call(root.querySelectorAll(CONTROL_CANDIDATES), (c) => {
+        if (isInteractiveEl(c)) out.push(c);
+      });
+    };
+    try {
+      scan(n);
+      if (n.shadowRoot) scan(n.shadowRoot);
+    } catch (err) { return []; }
+    return out;
+  }
+
+  /**
+   * The native checkbox / radio a click on `el` toggles, or null. Climbing the
+   * composed tree: a <label> answers with its control; an element (or shadow host)
+   * whose only control is one checkbox / radio wraps it; a role=checkbox|radio|
+   * switch host answers with the one native toggle inside it. Anything else that
+   * is interactive (a link, a button) — or holds several controls — is a control
+   * of its own, and the walk stops.
+   */
+  function toggleControlFor(el) {
+    let n = el;
+    for (let g = 0; n && g < 16 && n !== document.body && n !== document.documentElement; g++, n = composedParent(n)) {
+      if (n.nodeType !== Node.ELEMENT_NODE) return null;
+      if (isToggleInput(n)) return n;
+      if (n.tagName.toLowerCase() === 'label') return isToggleInput(n.control) ? n.control : null;
+      const controls = controlsWithin(n);
+      if (isInteractiveEl(n)) {
+        if (TOGGLE_ROLES.indexOf(explicitRoleOf(n)) === -1) return null;
+        const inner = controls.filter(isToggleInput);
+        return inner.length === 1 ? inner[0] : null;
+      }
+      if (controls.length === 1 && isToggleInput(controls[0])) return controls[0];
+      if (controls.length) return null;
+    }
+    return null;
+  }
+
+  /** The best locator found still matches more than this element. */
+  function isAmbiguous(best) {
+    if (!best) return false;
+    if (best.unique === false) return true;
+    return !!best.target && best.target.unique === false;
+  }
+
+  /**
+   * A click whose best locator is ambiguous: the nearest element around it a test
+   * can name uniquely — an interactive ancestor, the toggle it operates, or a
+   * custom-element host — across shadow boundaries (svg → sl-icon → the
+   * sl-checkbox's input). null when none is unique.
+   */
+  function uniqueClickTarget(el, control) {
+    const seen = [];
+    const candidates = [];
+    const add = (n) => { if (n && n !== el && seen.indexOf(n) === -1) { seen.push(n); candidates.push(n); } };
+    let n = composedParent(el);
+    for (let g = 0; n && g < 24 && n !== document.body && n !== document.documentElement; g++, n = composedParent(n)) {
+      if (isInteractiveEl(n)) { add(n); break; }
+      if (n.tagName.toLowerCase() === 'label' && control && n.control === control) { add(control); break; }
+      if (n.tagName.indexOf('-') !== -1) add(n);
+      if (control && n.shadowRoot && composedContainsNode(n, control)) { add(control); break; }
+    }
+    if (control) add(control);
+    for (let i = 0; i < candidates.length && i < 6; i++) {
+      const best = bestLocatorFor(candidates[i], 'click()');
+      if (!isAmbiguous(best)) return { el: candidates[i], best };
+    }
+    return null;
+  }
+
+  // ── Locators taken before the gesture changed the page ────────────────────
+  // A check / uncheck / selectOption is recorded from `change`, after the click
+  // has run the page's handlers — TodoMVC has added `completed` to the row by then,
+  // and a locator built from that DOM (li.completed > … > input.toggle) never
+  // matches on replay. The control's locator is taken at pointerdown instead and
+  // used by its change; a keyboard toggle (no pointerdown) still generates afresh.
+  const PRE_GESTURE_MAX_MS = 10000;
+  let _preGesture = null; // { el, best, t }
+
+  /** The engine's best for a control's change step (null if the engine failed). */
+  function changeLocatorFor(el) {
+    try {
+      const result = generateLocators(el);
+      const best = result.locators && result.locators[0];
+      return best ? withAltTargets(best, result) : null;
+    } catch (err) {
+      debugWarn('generateLocators failed during recording:', err);
+      return null;
+    }
+  }
+
+  function rememberPreGesture(el) {
+    _preGesture = el ? { el, best: changeLocatorFor(el), t: Date.now() } : null;
+  }
+
+  /** The locator taken at this control's pointerdown, once. */
+  function takePreGesture(el) {
+    const m = _preGesture;
+    if (!m || m.el !== el) return null;
+    _preGesture = null;
+    return Date.now() - m.t <= PRE_GESTURE_MAX_MS ? m.best : null;
+  }
+
   /** Locatra's own overlay / tooltip / toolbar / toast — never recorded or picked. */
   function isOwnUi(el) {
     return isOwnArtifact(el);
@@ -726,13 +847,17 @@
     const el = actionTargetFor(hit, false);
     const tag = el.tagName.toLowerCase();
     const type = (el.getAttribute('type') || '').toLowerCase();
+    _preGesture = null; // a new gesture: whatever the last one remembered is stale
 
     // An <option> (or <optgroup>) of a <select>, listbox or dropdown, is recorded by
     // the select's change: selectOption with every selected value. A click step
     // loses the Ctrl/Shift that extended the selection, so replaying it deselected
     // the earlier choices. (An optgroup or an empty option promotes to the select
     // itself: what was hit decides.)
-    if (isSelectPart(hit) || isSelectPart(el)) return;
+    if (isSelectPart(hit) || isSelectPart(el)) {
+      rememberPreGesture(el.closest('select'));
+      return;
+    }
 
     // A click on a checkbox's / radio's <label> (wrapping it, or for=) normally makes
     // the browser toggle the control, and that change records the check. Recording
@@ -740,12 +865,11 @@
     // But a page may cancel the click and toggle its own state in script: then no
     // trusted change comes and the click is the only record. So the click is held
     // until the gesture is over (see holdLabelClick) and dropped only if the
-    // control's change arrived meanwhile.
+    // control's change arrived meanwhile. The same goes for any part of a component
+    // that wraps one toggle — the check-mark <svg> inside an <sl-icon> inside an
+    // <sl-checkbox>'s shadow root (see toggleControlFor).
     // (A link inside the label is its own control: clicking it toggles nothing.)
-    const label = isInteractiveEl(el) ? null : el.closest('label');
-    const control = label && label.control;
-    const labelOfToggle = !!control && control.tagName.toLowerCase() === 'input' &&
-      ['checkbox', 'radio'].indexOf((control.getAttribute('type') || '').toLowerCase()) !== -1;
+    const control = toggleControlFor(el);
 
     // File, colour and range inputs are recorded from their change (upload / fill
     // with the settled value). A click on them opens a native chooser in a replay.
@@ -754,18 +878,34 @@
     // Checkboxes and radios are recorded by onRecordChange, not here. Recording on
     // pointerdown as well emitted the step twice, and this early it could only
     // guess `check` — the element has not toggled yet, so unchecking a box also
-    // produced `.check()`. The change handler sees the settled state and is right.
-    if (type === 'checkbox' || type === 'radio') return;
+    // produced `.check()`. The change handler sees the settled state and is right —
+    // but the locator is taken now, before the click restyles the row around it.
+    if (type === 'checkbox' || type === 'radio') {
+      rememberPreGesture(el);
+      return;
+    }
+    if (tag === 'select') rememberPreGesture(el);
+    if (control) rememberPreGesture(control);
 
     // Text inputs & textarea: we used to ignore pointer here and rely only on "change".
     // A click that only focuses the field never fires "change", so getByRole('textbox'…)
     // interactions looked "missing". Record a .click() for focus; actual typing still
     // comes from the input/change handlers (fill) when the value is committed.
     let best;
+    let clicked = el;
     if ((tag === 'input' && !['submit', 'button', 'reset'].includes(type)) || tag === 'textarea') {
       best = bestWithChain(el, 'click()');
     } else {
       best = bestLocatorFor(el, 'click()');
+      // `svg` matching 102 icons replays on the wrong one: try the elements around
+      // it that a test could name before settling for that.
+      if (isAmbiguous(best)) {
+        const better = uniqueClickTarget(el, control);
+        if (better) {
+          clicked = better.el;
+          best = better.best;
+        }
+      }
     }
 
     const click = {
@@ -775,9 +915,9 @@
       fullCode: best.fullCode,
       target: best && best.target,
       altTargets: best.altTargets,
-      el: el
+      el: clicked
     };
-    if (labelOfToggle) {
+    if (control) {
       holdLabelClick(click, control);
       return;
     }
@@ -995,14 +1135,8 @@
     if (tag === 'input' && (type === 'range' || type === 'color')) { sendFill(el, false); return; }
 
     if (tag === 'select' || type === 'checkbox' || type === 'radio') {
-      let best;
-      try {
-        const result = generateLocators(el);
-        best = result.locators && result.locators[0];
-        if (best) best = withAltTargets(best, result);
-      } catch (err) {
-        debugWarn('generateLocators failed during recording:', err);
-      }
+      // Taken at this gesture's pointerdown, before the page reacted to it.
+      let best = takePreGesture(el) || changeLocatorFor(el);
 
       let actionType;
       let value = '';
@@ -1583,6 +1717,7 @@
     isPaused = false;
     assertMode = false;
     _recentClicks = [];
+    _preGesture = null;
     _swallowGestureUntil = 0;
     window.removeEventListener('pointerdown', onRecordPrimaryPointer, _recordPointerOptions);
     window.removeEventListener('mousedown', onRecordPrimaryPointer, true);
@@ -2080,6 +2215,9 @@
       e.preventDefault(); e.stopPropagation();
       if (isUserEvent(e)) navigateChild();
     });
+    // Nothing is hovered yet: unplaced, the bar sat in the page's flow — in every
+    // frame inspect runs in, so an iframe showed a stray second NAVIGATE bar.
+    hideHoverUi();
   }
 
   function removeOverlay() {
@@ -2135,16 +2273,16 @@
     tx = Math.max(4, tx);
     ty = Math.max(4, ty);
 
-    // The traversal bar hangs flush under the element's right edge, and the tooltip
-    // sits under its left edge — on any element narrower than both combined they
-    // overlapped, and the bar covered the tooltip's "Esc to stop" hint. Move the
-    // tooltip clear of the bar: below it if there is room, otherwise above the element.
+    // The bar covered the tooltip's "Esc to stop" hint wherever the two met (a
+    // flipped tooltip above the element, a bar beside a short one). Move the tooltip
+    // clear of the bar: above the bar, else below it.
     const bar = traversalBar ? traversalBarPosition(r) : null;
-    if (bar && tx < bar.x + bar.w && tx + TW > bar.x && ty < bar.y + bar.h && ty + TH > bar.y) {
+    const hitsBar = (y) => tx < bar.x + bar.w && tx + TW > bar.x && y < bar.y + bar.h && y + TH > bar.y;
+    if (bar && hitsBar(ty)) {
+      const aboveBar = bar.y - TH - 6;
       const belowBar = bar.y + bar.h + 6;
-      const aboveEl = r.top - TH - 8;
-      if (belowBar + TH <= window.innerHeight) ty = belowBar;
-      else if (aboveEl >= 4) ty = aboveEl;
+      if (aboveBar >= 4) ty = aboveBar;
+      else if (belowBar + TH <= window.innerHeight) ty = belowBar;
     }
 
     tooltip.style.cssText = `
@@ -2186,17 +2324,41 @@
     }
   }
 
-  /** Where the traversal bar goes for an element rect: flush under its right edge. */
+  /**
+   * Where the traversal bar goes for an element rect. Never over the element, and
+   * never on the side the pointer is heading to: hung below the element (as it once
+   * always was), it covered the next field of a form — moving from Username down to
+   * Password kept Username selected and the click landed on the bar; hung above it,
+   * a pointer moving up through a card's field row onto its heading met the bar
+   * instead of the heading. So it goes behind the pointer, where it came from: above
+   * the element when the pointer moves down (or across), below it when it moves up.
+   * Still flush against the element (no gap to cross on the way to it, which would
+   * re-target the selection), right edges aligned; else beside it, level with its
+   * top; else — an element that fills the viewport — docked in the bottom corner
+   * away from the pointer.
+   */
   function traversalBarPosition(r) {
-    const BW = 260, BH = 34;
-    let bx = r.right - BW;
-    let by = r.bottom;
-    if (by + BH > window.innerHeight) by = r.top - BH;
-    if (by < 4) by = Math.min(Math.max(4, r.bottom - BH), Math.max(4, window.innerHeight - BH - 4));
-    if (bx < 4) bx = 4;
-    if (bx + BW > window.innerWidth) bx = window.innerWidth - BW - 4;
-    return { x: bx, y: by, w: BW, h: BH };
+    // Its real size once it has been drawn (the hint can wrap it to two lines).
+    const drawn = traversalBar && traversalBar.getBoundingClientRect();
+    if (drawn && drawn.width > 0 && drawn.height > 0) _barSize = { w: drawn.width, h: drawn.height };
+    const BW = _barSize ? _barSize.w : 260, BH = _barSize ? _barSize.h : 34, M = 4;
+    const vw = window.innerWidth, vh = window.innerHeight;
+    const clampX = (x) => Math.min(Math.max(M, x), Math.max(M, vw - BW - M));
+    const clampY = (y) => Math.min(Math.max(M, y), Math.max(M, vh - BH - M));
+    if (_pointerRising && r.bottom + BH <= vh - M) return { x: clampX(r.right - BW), y: r.bottom, w: BW, h: BH };
+    if (r.top - BH >= M) return { x: clampX(r.right - BW), y: r.top - BH, w: BW, h: BH };
+    if (r.right + BW <= vw - M) return { x: r.right, y: clampY(r.top), w: BW, h: BH };
+    if (r.left - BW >= M) return { x: r.left - BW, y: clampY(r.top), w: BW, h: BH };
+    const right = { x: clampX(vw - BW - M), y: clampY(vh - BH - M), w: BW, h: BH };
+    const nearRight = _lastPointer && _lastPointer.x >= right.x - 40 && _lastPointer.y >= right.y - 40;
+    return nearRight ? Object.assign(right, { x: M }) : right;
   }
+
+  /** The pointer's last position over this document (inspect), for docking the bar away from it. */
+  let _lastPointer = null;
+  /** The pointer last moved up the page (from one hovered element to the next). */
+  let _pointerRising = false;
+  let _barSize = null; // { w, h } as last measured
 
   // ── Traversal helpers ──────────────────────────────────────────────────────
   // After ▲/▼ the selection is locked to the traversed element: hit-testing would
@@ -2343,9 +2505,32 @@
     }
   }
 
+  /**
+   * False in a frame whose permissions policy withholds clipboard-write (a
+   * cross-origin iframe without allow="clipboard-write"): every attempt there only
+   * logs "Permissions policy violation: The Clipboard API has been blocked…".
+   * Feature-detected; a browser that cannot tell is assumed to allow it.
+   */
+  function clipboardAllowedHere() {
+    try {
+      const policy = document.permissionsPolicy || document.featurePolicy;
+      if (policy && typeof policy.allowsFeature === 'function') return policy.allowsFeature('clipboard-write') !== false;
+    } catch (err) { /* no policy API */ }
+    return true;
+  }
+
+  /** The top frame copies for a frame that may not: background relays it there. */
+  function copyViaTopFrame(text) {
+    return new Promise((resolve) => {
+      const sent = safeSend({ type: 'COPY_VIA_TOP', text }, (res) => resolve(!!res && res.ok === true));
+      if (!sent) resolve(false);
+    });
+  }
+
   /** Resolves true only when the text really reached the clipboard. */
   function copyText(text) {
     if (!text) return Promise.resolve(false);
+    if (window !== window.top && !clipboardAllowedHere()) return copyViaTopFrame(text);
     if (navigator.clipboard && typeof navigator.clipboard.writeText === 'function') {
       return navigator.clipboard.writeText(text)
         .then(() => true)
@@ -2498,31 +2683,42 @@
    * query in, neither of which pierces shadow roots. null if none verifies.
    */
   function treeSelectorFor(el, tree) {
-    const unique = (sel) => {
+    const uniqueFor = (node, sel) => {
       try {
         const m = tree.querySelectorAll(sel);
-        return m.length === 1 && m[0] === el;
+        return m.length === 1 && m[0] === node;
       } catch (err) {
         return false;
       }
     };
-    const tag = el.tagName.toLowerCase();
-    const candidates = [];
-    if (el.id) candidates.push('#' + cssEscape(el.id));
-    customTestAttributes.forEach((attr) => {
-      const v = el.getAttribute(attr);
-      if (v) candidates.push(`[${cssEscape(attr)}="${attrQuote(v)}"]`);
-    });
-    ['name', 'aria-label', 'placeholder', 'title', 'src'].forEach((attr) => {
-      const v = el.getAttribute(attr);
-      if (v) candidates.push(`${tag}[${attr}="${attrQuote(v)}"]`);
-    });
-    candidates.push(tag); // custom-element hosts are usually one of a kind
-    for (const c of candidates) if (unique(c)) return c;
+    const unique = (sel) => uniqueFor(el, sel);
+    const E = globalThis.__LocatorLensEngine;
+    const own = ownTreeSelectors(el, E);
+    for (const c of own) if (unique(c)) return c;
+    // Anchored to the nearest ancestor (in this tree) with a stable id that is
+    // unique here: `#navigation__popup mdn-search-button`, not a path from <html>.
+    for (let a = el.parentElement; a; a = a.parentElement) {
+      if (!stableIdOf(a, E)) continue;
+      const anchor = '#' + cssEscape(a.id);
+      if (!uniqueFor(a, anchor)) continue;
+      for (const c of own) if (unique(`${anchor} ${c}`)) return `${anchor} ${c}`;
+      break;
+    }
+    // An id that looks generated still beats a position.
+    if (el.id && !stableIdOf(el, E) && unique('#' + cssEscape(el.id))) return '#' + cssEscape(el.id);
+    // A short positional path: one level at a time from the element up, stopping as
+    // soon as it is unique in this tree (an id-bearing ancestor anchors it). Every
+    // step is verified with tree.querySelectorAll, the scope a test tool runs it in —
+    // in a shadow root `:host` matches nothing there, so the chain of the root's own
+    // children is what keeps it unique. In a document it can end in `body > …`.
     const parts = [];
     let n = el;
     let guard = 0;
     while (n && n.nodeType === Node.ELEMENT_NODE && guard++ < 64) {
+      if (n !== el && n.id && uniqueFor(n, '#' + cssEscape(n.id))) {
+        const anchored = ['#' + cssEscape(n.id)].concat(parts).join(' > ');
+        if (unique(anchored)) return anchored;
+      }
       let part = n.tagName.toLowerCase();
       const siblings = n.parentNode && n.parentNode.children;
       if (siblings) {
@@ -2530,10 +2726,71 @@
         if (same.length > 1) part += `:nth-of-type(${same.indexOf(n) + 1})`;
       }
       parts.unshift(part);
+      const path = parts.join(' > ');
+      if (unique(path)) return path;
       n = n.parentElement; // stops at the top of this tree
     }
-    const path = parts.join(' > ');
-    return unique(path) ? path : null;
+    return null;
+  }
+
+  /** The element's id when it is hand-written (not a framework's generated one). */
+  function stableIdOf(el, E) {
+    if (!el.id) return null;
+    try {
+      if (E && E.isUnstableId && E.isUnstableId(el.id)) return null;
+    } catch (err) { /* treat as stable */ }
+    return el.id;
+  }
+
+  // Attribute values that change per render or per build are no anchor.
+  function volatileAttrValue(v, E) {
+    if (!v || v.length > 80 || /\d{4,}/.test(v)) return true;
+    try { return !!(E && E.isUnstableId && E.isUnstableId(v)); } catch (err) { return false; }
+  }
+
+  const TREE_SELECTOR_ATTRS = ['name', 'aria-label', 'title', 'type', 'role', 'placeholder', 'part', 'for', 'alt'];
+
+  /**
+   * The element's own selectors, best first: stable id, test attribute, bare tag
+   * (custom-element hosts are usually one of a kind), tag[attr] for stable
+   * attributes (an href/src by its file name), then stable classes — a state class
+   * (active, completed, is-open, tab--selected…) describes a moment, not the element.
+   */
+  function ownTreeSelectors(el, E) {
+    const tag = cssEscape(el.tagName.toLowerCase());
+    const out = [];
+    if (stableIdOf(el, E)) out.push('#' + cssEscape(el.id));
+    customTestAttributes.forEach((attr) => {
+      const v = el.getAttribute(attr);
+      if (v) out.push(`[${cssEscape(attr)}="${attrQuote(v)}"]`);
+    });
+    out.push(tag);
+    TREE_SELECTOR_ATTRS.forEach((attr) => {
+      const v = el.getAttribute(attr);
+      if (v && !volatileAttrValue(v, E)) out.push(`${tag}[${attr}="${attrQuote(v)}"]`);
+    });
+    ['href', 'src'].forEach((attr) => {
+      const v = el.getAttribute(attr);
+      const base = v ? v.split(/[?#]/)[0].split('/').filter(Boolean).pop() : '';
+      if (base && !volatileAttrValue(base, E)) out.push(`${tag}[${attr}$="${attrQuote(base)}"]`);
+    });
+    Array.prototype.forEach.call(el.attributes || [], (a) => {
+      if (!/^data-/.test(a.name) || /^data-(ll|locatra)-/.test(a.name) || customTestAttributes.indexOf(a.name) !== -1) return;
+      if (a.value && !volatileAttrValue(a.value, E)) out.push(`${tag}[${cssEscape(a.name)}="${attrQuote(a.value)}"]`);
+    });
+    const classes = typeof el.className === 'string'
+      ? el.className.trim().split(/\s+/).filter((c) => {
+        if (!c || /^(ll-|locatra-)/.test(c)) return false;
+        try {
+          return !(E && ((E.isUnstableClass && E.isUnstableClass(c)) || (E.isStateClass && E.isStateClass(c))));
+        } catch (err) { return true; }
+      }).slice(0, 4)
+      : [];
+    classes.forEach((c) => out.push(`${tag}.${cssEscape(c)}`));
+    for (let i = 0; i < classes.length; i++) {
+      for (let j = i + 1; j < classes.length; j++) out.push(`${tag}.${cssEscape(classes[i])}.${cssEscape(classes[j])}`);
+    }
+    return out;
   }
 
   /**
@@ -4512,10 +4769,22 @@
   }
 
   // ── Event handlers ─────────────────────────────────────────────────────────
+  // Hover and pick promote like the recorder does (actionTargetFor's full rule): the
+  // icon <span>, the <i class="fa…"> or the label <span> inside a button picks the
+  // button. The inner element is still one ▼ Child away.
   function onMouseOver(e) {
     // A page dispatching mouseover must not move the selection under the user.
     if (!isInspecting || !isUserEvent(e)) return;
-    const el = actionTargetFor(getDeepElementAt(e.clientX, e.clientY) || resolvePrimaryTarget(e), true);
+    if (_lastPointer && e.clientY !== _lastPointer.y) _pointerRising = e.clientY < _lastPointer.y;
+    _lastPointer = { x: e.clientX, y: e.clientY };
+    const hit = inspectHit(e);
+    // The pointer went into a child frame: that frame's own content script shows
+    // its hover UI from here on, so this one's goes (two NAVIGATE bars otherwise).
+    if (isFrameEl(hit) || isFrameEl(resolvePrimaryTarget(e))) {
+      hideHoverUi();
+      return;
+    }
+    const el = actionTargetFor(hit, false);
     if (!el) return;
 
     // Ignore our own UI elements
@@ -4530,6 +4799,7 @@
 
     hoveredEl = regionPick ? regionContainerFor(el) : el;
     updateOverlay(hoveredEl);
+    announceHover();
   }
 
   function isTraversalBarEvent(e) {
@@ -4605,6 +4875,65 @@
   function onInspectSwallow(e) {
     if (!isInspecting || !isUserEvent(e) || isTraversalBarEvent(e)) return;
     swallow(e);
+    if ((e.type === 'pointerup' || e.type === 'mouseup') && (typeof e.button !== 'number' || e.button === 0)) {
+      pickDisabledOnRelease(e);
+    }
+  }
+
+  // A disabled <button>/<input>/<select> gets no click — the browser drops it — so
+  // clicking one picked nothing (Enter did). Pointer events still reach it: the
+  // release of the gesture picks it instead, and the click, should one ever
+  // follow, does not pick it again.
+  let _releasePick = null; // { el, t }
+  const RELEASE_PICK_MS = 1000;
+
+  function isDisabledControl(el) {
+    if (!el || el.nodeType !== Node.ELEMENT_NODE) return false;
+    try {
+      return el.matches(':disabled') || !!el.closest('button:disabled');
+    } catch (err) {
+      return false;
+    }
+  }
+
+  function pickDisabledOnRelease(e) {
+    const el = inspectTargetAt(e);
+    if (!isDisabledControl(el)) return;
+    if (_releasePick && _releasePick.el === el && Date.now() - _releasePick.t < RELEASE_PICK_MS) return;
+    _releasePick = { el, t: Date.now() };
+    completeInspectPick(el);
+  }
+
+  /** What a click at this event's point picks. */
+  function inspectTargetAt(e) {
+    // After ▲/▼ the traversed element is the selection — re-hit-testing here used
+    // to pick the leaf under the pointer and silently discard the traversal.
+    if (traversalLock && hoveredEl && hoveredEl.isConnected && inTraversalLockZone(e.clientX, e.clientY)) {
+      return hoveredEl;
+    }
+    let el = actionTargetFor(inspectHit(e), false);
+    if (el && regionPick && !isOwnUi(el)) el = regionContainerFor(el);
+    return el;
+  }
+
+  /**
+   * The element under the pointer. Hit-testing the event's whole-pixel clientX/Y
+   * missed an element whose edge lies on a fraction of a pixel: entering
+   * the-internet's Password field from above reported its wrapper <div>, and no
+   * further mouseover came while the pointer stayed on the field. When the event's
+   * own target lies inside what the hit-test found, it is the more precise answer.
+   */
+  function inspectHit(e) {
+    const fromPoint = getDeepElementAt(e.clientX, e.clientY);
+    const fromEvent = resolvePrimaryTarget(e);
+    if (fromPoint && fromEvent && fromPoint !== fromEvent && composedContainsNode(fromPoint, fromEvent)) return fromEvent;
+    return fromPoint || fromEvent;
+  }
+
+  function completeInspectPick(el) {
+    if (!el || isOwnUi(el)) return;
+    if (regionPick) { pickRegion(el); return; }
+    pickElement(el);
   }
 
   function onClick(e) {
@@ -4618,18 +4947,45 @@
     swallow(e);
     if (typeof e.button === 'number' && e.button !== 0) return;
 
-    // After ▲/▼ the traversed element is the selection — re-hit-testing here used
-    // to pick the leaf under the pointer and silently discard the traversal.
-    let el = null;
-    if (traversalLock && hoveredEl && hoveredEl.isConnected && inTraversalLockZone(e.clientX, e.clientY)) {
-      el = hoveredEl;
-    } else {
-      el = actionTargetFor(getDeepElementAt(e.clientX, e.clientY) || resolvePrimaryTarget(e), true);
-      if (el && regionPick && !isOwnUi(el)) el = regionContainerFor(el);
+    const el = inspectTargetAt(e);
+    if (_releasePick && _releasePick.el === el && Date.now() - _releasePick.t < RELEASE_PICK_MS) {
+      _releasePick = null; // its release already picked it
+      return;
     }
-    if (!el || isOwnUi(el)) return;
-    if (regionPick) { pickRegion(el); return; }
-    pickElement(el);
+    completeInspectPick(el);
+  }
+
+  /**
+   * The pointer left this document — into a child frame (whose content script
+   * takes over), or out of the window. The top frame's overlay, tooltip and bar
+   * stayed up meanwhile: two NAVIGATE bars at once on a page with an iframe.
+   */
+  function hideHoverUi() {
+    // visibility, not display: the bar keeps the size it is placed by.
+    [overlay, tooltip, traversalBar].forEach((n) => {
+      if (n) n.style.setProperty('visibility', 'hidden', 'important');
+    });
+    hoveredEl = null;
+    traversalLock = null;
+    _hoverShown = false;
+  }
+
+  // Entering a cross-origin (out-of-process) iframe gives the parent document no
+  // mouseout or mouseover at all, so the frame that starts showing a hover says so
+  // — once per stretch of hovering — and BACKGROUND tells every other frame of the
+  // tab to hide theirs (HIDE_HOVER_UI). The token tells this frame's own echo apart.
+  const _hoverToken = Math.random().toString(36).slice(2) + Date.now().toString(36);
+  let _hoverShown = false;
+  function announceHover() {
+    if (_hoverShown) return;
+    _hoverShown = true;
+    safeSend({ type: 'INSPECT_HOVERED', token: _hoverToken });
+  }
+
+  function onInspectMouseOut(e) {
+    if (!isInspecting || !isUserEvent(e)) return;
+    const to = e.relatedTarget;
+    if (!to || isFrameEl(to)) hideHoverUi();
   }
 
   function onKeyDown(e) {
@@ -4679,6 +5035,7 @@
     createOverlay();
     document.body.classList.add('ll-inspecting');
     document.addEventListener('mouseover', onMouseOver, true);
+    document.addEventListener('mouseout', onInspectMouseOut, true);
     // Window capture runs before any listener the page registers on document.
     window.addEventListener('click', onClick, true);
     INSPECT_SWALLOWED_EVENTS.forEach((t) => window.addEventListener(t, onInspectSwallow, true));
@@ -4694,6 +5051,7 @@
 
     // Total Decommission: Remove all tracking listeners
     document.removeEventListener('mouseover', onMouseOver, true);
+    document.removeEventListener('mouseout', onInspectMouseOut, true);
     window.removeEventListener('click', onClick, true);
     INSPECT_SWALLOWED_EVENTS.forEach((t) => window.removeEventListener(t, onInspectSwallow, true));
     document.removeEventListener('keydown', onKeyDown, true);
@@ -4701,6 +5059,10 @@
     removeOverlay();
     hoveredEl = null;
     traversalLock = null;
+    _lastPointer = null;
+    _pointerRising = false;
+    _releasePick = null;
+    _hoverShown = false;
     lastRightClickedEl = null;
     updateFrameWatcher();
 
@@ -4902,9 +5264,22 @@
       }
     }
 
+    else if (msg.type === 'HIDE_HOVER_UI') {
+      if (isInspecting && msg.token !== _hoverToken) hideHoverUi();
+      return false;
+    }
+
     else if (msg.type === 'LAB_CLEAR') {
       clearLabHighlights();
       sendResponse({ ok: true });
+    }
+
+    // A quick copy from a frame the clipboard is blocked in (see copyViaTopFrame),
+    // relayed by BACKGROUND to the top frame only.
+    else if (msg.type === 'COPY_TEXT') {
+      if (window !== window.top || typeof msg.text !== 'string') return false;
+      copyText(msg.text).then((ok) => sendResponse({ ok: !!ok }), () => sendResponse({ ok: false }));
+      return true;
     }
 
     // C4: BACKGROUND asks a parent where one of its child frames sits among its
