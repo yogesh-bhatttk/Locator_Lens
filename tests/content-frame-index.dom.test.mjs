@@ -277,6 +277,9 @@ describe('C4 · a cross-origin frame records its exact index', () => {
     expect(first.sequence).toBeLessThan(second.sequence);
     for (const s of [first, second]) {
       expect(s.target).toMatchObject({ index: 1, framesIndex: 3 });
+      // C9.1: the alternatives are re-indexed with it.
+      expect(s.altTargets.length).toBeGreaterThan(0);
+      for (const alt of s.altTargets) expect(alt).toMatchObject({ kind: 'frame', index: 1, framesIndex: 3 });
       expect(s.code).toBe(code(frame.win, s.target));
       expect(s.code).not.toContain('nth(3)');
       expect(s.fullCode).toBe(`await ${s.code}.click();`);
@@ -286,6 +289,22 @@ describe('C4 · a cross-origin frame records its exact index', () => {
     expect(steps(frame)).toHaveLength(3);
     expect(steps(frame)[2].target.index).toBe(1);
     expect(pending).toHaveLength(1);
+  });
+
+  it('a held step without alternatives stays without them', async () => {
+    const { pay } = buildTop();
+    const pending = [];
+    const frame = loadPayFrame(pay, (msg, cb) => {
+      if (msg.type === 'FRAME_INDEX_LOOKUP') pending.push(() => cb(route(msg)));
+    });
+    frame.win.document.body.innerHTML = '<button data-testid="buy">Pay now</button>';
+    frame.deliver({ type: 'START_RECORDING' });
+    pointer(frame.win, frame.win.document.querySelector('button'));
+    pending.shift()();
+    await tick();
+    const [step] = steps(frame);
+    expect(step.target).toMatchObject({ index: 1, child: { kind: 'testid' } });
+    expect('altTargets' in step).toBe(false);
   });
 
   it('a parent that changes its frames is asked again before the next step', async () => {

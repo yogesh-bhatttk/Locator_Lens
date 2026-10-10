@@ -1465,6 +1465,9 @@ function normalizeHealthResult(id, r) {
   const sug = r.suggestion;
   if (sug && typeof sug === 'object' && sug.target && typeof sug.target === 'object' && typeof sug.code === 'string') {
     out.suggestion = { target: sug.target, code: sug.code };
+    // C9.1: the suggestion's simple alternatives (same frames), at most three.
+    const alts = Array.isArray(sug.altTargets) ? sug.altTargets.filter((t) => t && typeof t === 'object').slice(0, 3) : [];
+    if (alts.length) out.suggestion.altTargets = alts;
   }
   if (typeof r.error === 'string' && r.error) out.error = r.error;
   return out;

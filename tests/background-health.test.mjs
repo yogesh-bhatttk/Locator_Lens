@@ -248,6 +248,42 @@ describe('HEALTH_CHECK', () => {
     ]);
   });
 
+  it('keeps a suggestion’s altTargets (objects only, at most three) — C9.1', async () => {
+    const alt = (v) => ({ kind: 'frame', selector: '#f', index: 0, child: { kind: 'id', value: v } });
+    const sug = (altTargets) => ({
+      target: { kind: 'role', role: 'button', name: 'Buy' },
+      code: 'c',
+      altTargets,
+    });
+    const top = frame(0, () => [
+      {
+        id: 'x',
+        owned: true,
+        count: 0,
+        suggestion: sug([alt('a'), null, 'css', alt('b'), alt('c'), alt('d')]),
+      },
+      { id: 'y', owned: true, count: 0, suggestion: sug([null]) },
+      { id: 'z', owned: true, count: 0, suggestion: sug('nope') },
+    ]);
+    const w = startWorker({ frames: { [TAB]: [top] } });
+    const res = await w.ask({
+      type: 'HEALTH_CHECK',
+      windowId: WINDOW,
+      items: [item('x'), item('y'), item('z')],
+    });
+    const plain = { target: { kind: 'role', role: 'button', name: 'Buy' }, code: 'c' };
+    expect(res.results).toEqual([
+      {
+        id: 'x',
+        status: 'broken',
+        count: 0,
+        suggestion: { ...plain, altTargets: [alt('a'), alt('b'), alt('c')] },
+      },
+      { id: 'y', status: 'broken', count: 0, suggestion: plain },
+      { id: 'z', status: 'broken', count: 0, suggestion: plain },
+    ]);
+  });
+
   it('two frames claiming one item: the lower frame id wins, whatever order the browser lists them in', async () => {
     const a = frame(5, () => [{ id: 'x', owned: true, count: 2 }], 'https://f.test/');
     const b = frame(2, () => [{ id: 'x', owned: true, count: 1 }], 'https://f.test/');

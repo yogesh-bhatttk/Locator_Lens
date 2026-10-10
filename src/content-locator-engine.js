@@ -143,7 +143,7 @@
       roots: new Map(), query: new Map(), style: new Map(), hidden: new Map(),
       hiddenTree: new Map(), role: new Map(), name: new Map(), text: new Map(),
       before: new Map(), after: new Map(), content: new Map(), nodes: new Map(),
-      labelMap: null
+      xpath: new Map(), labelMap: null
     };
   }
   function endCaches() {
@@ -1215,6 +1215,24 @@
     });
   }
 
+  // A `kind: 'xpath'` target (C9.1): what Playwright's xpath= engine returns —
+  // element results only, in document order. XPath never pierces shadow roots, in
+  // Playwright or anywhere else, so nothing here does either. null for an invalid
+  // expression (or a document without XPath), like an invalid CSS selector.
+  const ORDERED_NODE_SNAPSHOT_TYPE = 7;
+  function nodesByXPath(expr) {
+    const d = curDoc();
+    if (typeof d.evaluate !== 'function') return null;
+    let r;
+    try { r = d.evaluate(String(expr), d, null, ORDERED_NODE_SNAPSHOT_TYPE, null); } catch (e) { return null; }
+    const out = [];
+    for (let i = 0; i < r.snapshotLength; i++) {
+      const n = r.snapshotItem(i);
+      if (n && n.nodeType === 1) out.push(n);
+    }
+    return out;
+  }
+
   function targetNodes(t) {
     if (!t) return null;
     if (!ctx) return withCaches(() => targetNodes(t));
@@ -1241,6 +1259,7 @@
       case 'altText': return nodesByAttr('alt', t.value, t.exact);
       case 'title': return nodesByAttr('title', t.value, t.exact);
       case 'css': return nodesBySelector(t.value);
+      case 'xpath': return nodesByXPath(t.value);
       case 'text': return nodesByText(t.value, t.exact);
       case 'role': return applyNth(withoutOwnUi(nodesByRole(t)), t);
       case 'label': return nodesByLabel(t.value, t.exact);
@@ -1371,6 +1390,7 @@
       case 'text': return `page.getByText(${jsStr(t.value)}${exactOpt})`;
       case 'id': return `page.locator(${jsStr('#' + cssEscape(t.value))})`;
       case 'name': return `page.locator(${jsStr('[name="' + attrSelectorValue(t.value) + '"]')})`;
+      case 'xpath': return `page.locator(${jsStr('xpath=' + t.value)})`;
       case 'chain': return `${codeFor(t.parent)}.${codeFor(t.child).replace(/^page\./, '')}`;
       case 'css': default: return `page.locator(${jsStr(t.value)})`;
     }
@@ -1418,6 +1438,122 @@
   // Kinds whose default matching is a case-insensitive substring and which accept
   // { exact: true } (C5).
   const EXACTABLE = new Set(['role', 'text', 'label', 'placeholder', 'altText', 'title']);
+
+  // ── Simple alternatives (C9.1) ─────────────────────────────────────────────
+  // getByRole / getByLabel / getByText have no native equivalent outside
+  // Playwright: Selenium, WebdriverIO, Java and C# would have to spell the whole
+  // accessible-name computation out. When the best locator is one of those, the
+  // result also carries `altTargets` — at most three plain targets (test id, id,
+  // name, short CSS, short XPath; best first), each already measured to match this
+  // element alone, for codegen to use where it cannot use the primary. They come
+  // from the candidates generated above; only the XPath costs extra evaluations,
+  // and none at all when the primary is itself one of the simple kinds.
+  const SIMPLE_KINDS = new Set(['testid', 'id', 'name', 'css']);
+  const ALT_MAX = 3;
+  const ALT_CSS_MAX = 80;
+  const ALT_XPATH_MAX = 120;
+  const XHTML_NS = 'http://www.w3.org/1999/xhtml';
+
+  // An XPath 1.0 string literal. XPath has no escapes: a value holding both quote
+  // kinds is spelled as concat() of pieces split at the double quotes.
+  function xpathLiteral(value) {
+    const s = String(value);
+    if (s.indexOf('"') === -1) return '"' + s + '"';
+    if (s.indexOf("'") === -1) return "'" + s + "'";
+    return 'concat(' + s.split('"').map(p => '"' + p + '"').join(', \'"\', ') + ')';
+  }
+
+  // XPath's normalize-space() collapses only space, tab, CR and LF, so a no-break
+  // space (&nbsp; — everywhere in button text) is first turned into a space.
+  const XPATH_NBSP_TEXT = 'normalize-space(translate(., "\u00a0", " "))';
+  function xpathText(raw) {
+    const nbsp = raw.indexOf('\u00a0') !== -1;
+    const text = (nbsp ? raw.replace(/\u00a0/g, ' ') : raw).replace(/[ \t\r\n]+/g, ' ').trim();
+    return { expr: nbsp ? XPATH_NBSP_TEXT : 'normalize-space(.)', text };
+  }
+
+  // A value an alternative may be built on: present, single-line, not generated.
+  function stableValue(v) {
+    return !!v && !!v.trim() && !/[\x00-\x1f\x7f]/.test(v) && !isUnstableId(v.trim()); // eslint-disable-line no-control-regex
+  }
+
+  // The element's own tag plus ONE stable attribute — or its own text — e.g.
+  // //button[normalize-space(.)="Save"], //input[@placeholder="Email"]: the first
+  // candidate (≤ 120 chars) that document.evaluate finds for this element alone.
+  // Never a field's value (only a button's, which is its caption), never in shadow
+  // DOM (XPath cannot reach it), never on an SVG/MathML element (namespaced names).
+  // `skip` names attributes another alternative already uses.
+  function altXPath(el, skip) {
+    return cached('xpath', el, () => {
+      const d = el.ownerDocument;
+      if (typeof d.evaluate !== 'function' || el.getRootNode() !== d || el.namespaceURI !== XHTML_NS) return null;
+      const tag = el.localName;
+      if (!/^[a-z][a-z0-9-]*$/.test(tag)) return null;
+      const T = tag.toUpperCase();
+      const cands = [];
+      const attr = (name, ok) => {
+        const v = el.getAttribute(name);
+        if (ok !== false && !skip.has(name) && stableValue(v)) cands.push(`//${tag}[@${name}=${xpathLiteral(v)}]`);
+      };
+      attr('aria-label');
+      attr('placeholder');
+      attr('alt', T === 'IMG' || T === 'AREA' || T === 'INPUT');
+      attr('title');
+      attr('name');
+      const type = (el.getAttribute('type') || '').toLowerCase();
+      if (T === 'INPUT' && ['submit', 'button', 'reset'].includes(type)) {
+        const v = el.getAttribute('value');
+        if (stableValue(v)) cands.push(`//input[@type=${xpathLiteral(el.getAttribute('type'))}][@value=${xpathLiteral(v)}]`);
+      }
+      // <label for=x>Email</label> addresses the control without spelling out its
+      // id — which is the point when the id is generated (a stable one is already
+      // an alternative of its own). Evaluating it compares every <label> for every
+      // control of that tag, so it is not tried when it would add nothing.
+      if (el.id && isUnstableId(el.id) && LABELABLE.has(T)) {
+        const lab = labelsFor(el).find(l => l.getAttribute('for') === el.id);
+        const lt = lab ? xpathText(lab.textContent) : null;
+        if (lt && stableValue(lt.text)) cands.push(`//${tag}[@id=//label[${lt.expr}=${xpathLiteral(lt.text)}]/@for]`);
+      }
+      // Own text. A field's text is its value (a <textarea>'s) or its options.
+      if (!['INPUT', 'TEXTAREA', 'SELECT', 'OPTION'].includes(T)) {
+        const own = xpathText(el.textContent || '');
+        if (stableValue(own.text)) cands.push(`//${tag}[${own.expr}=${xpathLiteral(own.text)}]`);
+      }
+      for (const xp of cands) {
+        if (xp.length > ALT_XPATH_MAX) continue;
+        const nodes = withoutOwnUi(inDocument(d, () => nodesByXPath(xp)));
+        if (nodes && nodes.length === 1 && nodes[0] === el) return xp;
+      }
+      return null;
+    });
+  }
+
+  // `locators` measured and ranked; [] when the best one is already simple.
+  function altTargetsFor(el, locators) {
+    const primary = locators[0];
+    if (!primary || !primary.target || SIMPLE_KINDS.has(primary.target.kind)) return [];
+    const unique = (kind, ok) => {
+      const l = locators.find(x => x.target && x.target.kind === kind && x.unique === true && (!ok || ok(x)));
+      return l ? Object.assign({}, l.target) : null;
+    };
+    const shortCss = (x) => x.stability !== 'AVOID' && String(x.target.value).length <= ALT_CSS_MAX;
+    const out = [
+      unique('testid'),
+      unique('id'),
+      unique('name', x => !isUnstableId(x.target.value)),
+      unique('css', x => shortCss(x) && !/:nth-/.test(x.target.value))
+    ].filter(Boolean);
+    // (Four simple ones never all exist: a unique test id is always the primary,
+    // and the CSS card is dropped when it would just repeat the #id one.)
+    const xp = altXPath(el, new Set(out.some(t => t.kind === 'name') ? ['name'] : []));
+    if (xp) out.push({ kind: 'xpath', value: xp });
+    // A positional CSS path only when nothing else exists.
+    if (!out.length) {
+      const nth = unique('css', shortCss);
+      if (nth) out.push(nth);
+    }
+    return out.slice(0, ALT_MAX);
+  }
 
   // ── Main locator generation engine ────────────────────────────────────────
   function generateLocators(el, customTestAttributes) {
@@ -1802,7 +1938,10 @@
 
     const a11y = analyzeA11y(el);
 
-    return { elementData, locators, avoidList, proTip, a11y };
+    const result = { elementData, locators, avoidList, proTip, a11y };
+    const altTargets = altTargetsFor(el, locators);
+    if (altTargets.length) result.altTargets = altTargets;
+    return result;
   }
 
   // ── Suggest a realistic Playwright action ─────────────────────────────────
@@ -1993,6 +2132,9 @@
     deepQueryAll,
     countTargetMatches: (t) => withCaches(() => countTargetMatches(t)),
     resolveTarget,
+    // The Playwright expression for a target, as the cards show it (C9.1: the
+    // xpath kind included).
+    codeForTarget: (t) => (t && typeof t === 'object' ? codeFor(t) : ''),
     markOwnUi,
     unmarkOwnUi,
     ownUiRoots, // read by the next evaluation of this file (see above)

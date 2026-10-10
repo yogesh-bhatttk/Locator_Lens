@@ -315,6 +315,49 @@ describe('settings from storage', () => {
     }
   });
 
+  it('quick copy for Selenium: a simpler equivalent when there is one, else the helper call with its helper', async () => {
+    load({ storage: { llFramework: 'selenium', llLanguage: 'typescript' } });
+    const copied = [];
+    Object.defineProperty(navigator, 'clipboard', {
+      configurable: true,
+      value: { writeText: (t) => (copied.push(t), Promise.resolve()) },
+    });
+    try {
+      // A button with an id: role is the primary, the id is the simpler equivalent.
+      document.body.innerHTML =
+        '<button id="go" aria-label="Go now">Go</button><button>Save</button><button>Cancel</button>';
+      send({ type: 'START_INSPECT' });
+      const go = document.getElementById('go');
+      pointAt(go);
+      go.dispatchEvent(new window.MouseEvent('click', { bubbles: true }));
+      await tick();
+      expect(copied.at(-1)).toBe("driver.findElement(By.id('go'))");
+      // Its own text gives a short XPath equivalent: no helper needed.
+      const save = [...document.querySelectorAll('button')].find((b) => b.textContent === 'Save');
+      pointAt(save);
+      save.dispatchEvent(new window.MouseEvent('click', { bubbles: true }));
+      await tick();
+      expect(copied.at(-1)).toBe('driver.findElement(By.xpath(\'//button[normalize-space(.)="Save"]\'))');
+      // A lookup only a helper can do: the clipboard gets helper + call, the toast the call.
+      const real = window.LLCodegen.locatorSnippet;
+      window.LLCodegen.locatorSnippet = () => ({
+        expr: 'locatraFind(driver, …)',
+        helpers: 'function locatraFind() {}',
+      });
+      try {
+        pointAt(go);
+        go.dispatchEvent(new window.MouseEvent('click', { bubbles: true }));
+        await tick();
+      } finally {
+        window.LLCodegen.locatorSnippet = real;
+      }
+      expect(copied.at(-1)).toBe('function locatraFind() {}\n\nlocatraFind(driver, …)');
+      expect(document.querySelector('#ll-toast .ll-toast-code').textContent).toBe('locatraFind(driver, …)');
+    } finally {
+      delete navigator.clipboard;
+    }
+  });
+
   it('a storage read error leaves the defaults', () => {
     const log = vi.spyOn(console, 'log').mockImplementation(() => {});
     stopAll();

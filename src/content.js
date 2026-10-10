@@ -353,9 +353,11 @@
     // — in this frame (the step says so) or any other (the frame flag, sent first).
     if (sensitiveValueOnScreen(data.el)) data = Object.assign({}, data, { sensitiveOnScreen: true });
     reportSecretShown(data.el);
-    ['sensitive', 'secretName', 'inputType', 'supersedes', 'suggested', 'reason', 'values', 'sensitiveOnScreen'].forEach((k) => {
+    ['sensitive', 'secretName', 'inputType', 'supersedes', 'suggested', 'reason', 'values', 'sensitiveOnScreen', 'altTargets'].forEach((k) => {
       if (data[k] != null) payload[k] = data[k];
     });
+    // C9.1: alternatives only ever accompany the target they stand in for.
+    if (!payload.target || !Array.isArray(payload.altTargets) || !payload.altTargets.length) delete payload.altTargets;
     // F4: where the step's element sat on screen, for the step thumbnail.
     if (payload.target && data.el) {
       const geo = stepGeometry(data.el);
@@ -430,6 +432,7 @@
     try {
       const result = generateLocators(el);
       best = result.locators && result.locators[0];
+      if (best) best = withAltTargets(best, result);
     } catch (err) {
       debugWarn('generateLocators failed during recording:', err);
     }
@@ -449,6 +452,7 @@
       code: best.code,
       fullCode: `await ${best.code}.hover();`,
       target: best.target,
+      altTargets: best.altTargets,
       el: el
     });
   }
@@ -518,6 +522,7 @@
       code: best.code,
       fullCode: `await expect(${best.code}).${call};`,
       target: best.target,
+      altTargets: best.altTargets,
       sensitive: secretName ? true : null,
       secretName: secretName,
       el: el
@@ -646,6 +651,7 @@
     try {
       const result = generateLocators(el);
       best = result.locators && result.locators[0];
+      if (best) best = withAltTargets(best, result);
     } catch (err) {
       debugWarn('generateLocators failed during recording:', err);
     }
@@ -768,6 +774,7 @@
       code: best.code,
       fullCode: best.fullCode,
       target: best && best.target,
+      altTargets: best.altTargets,
       el: el
     };
     if (labelOfToggle) {
@@ -912,6 +919,7 @@
       code: best.code,
       fullCode: best.fullCode,
       target: best && best.target,
+      altTargets: best.altTargets,
       sensitive: secretName ? true : null,
       secretName: secretName,
       inputType: inputType,
@@ -964,6 +972,7 @@
       code: best.code,
       fullCode: best.fullCode,
       target: best && best.target,
+      altTargets: best.altTargets,
       el: el
     });
   }
@@ -990,6 +999,7 @@
       try {
         const result = generateLocators(el);
         best = result.locators && result.locators[0];
+        if (best) best = withAltTargets(best, result);
       } catch (err) {
         debugWarn('generateLocators failed during recording:', err);
       }
@@ -1022,6 +1032,7 @@
         code: best.code,
         fullCode: best.fullCode,
         target: best.target,
+        altTargets: best.altTargets,
         el: el
       });
       return;
@@ -1061,6 +1072,7 @@
       code: best.code,
       fullCode: best.fullCode,
       target: best && best.target,
+      altTargets: best.altTargets,
       supersedes: supersedes.length ? supersedes : null,
       el: el
     });
@@ -1425,6 +1437,7 @@
         code: best.code,
         fullCode: `await expect(${best.code}).${call};`,
         target: best.target,
+        altTargets: best.altTargets,
         suggested: true,
         reason: reason,
         el: el
@@ -1437,10 +1450,17 @@
   function safeLocatorFor(el, secrets) {
     const leaks = (l) => secrets.some((v) => JSON.stringify(l.target || {}).includes(v) || String(l.code || '').includes(v));
     if (!secrets.length) return bestLocatorFor(el, 'click()');
-    let locs = [];
-    try { locs = generateLocators(el).locators || []; } catch (err) { locs = []; }
+    let result = { locators: [] };
+    try { result = generateLocators(el); } catch (err) { /* the fallback below */ }
+    const locs = result.locators || [];
     const ok = locs.find((l) => l && l.target && !leaks(l));
-    if (ok) return ok;
+    if (ok) {
+      const best = withAltTargets(ok, result);
+      const alts = (best.altTargets || []).filter((t) => !leaks({ target: t, code: '' }));
+      if (alts.length) best.altTargets = alts;
+      else delete best.altTargets;
+      return best;
+    }
     const fb = recordFallbackLocator(el, 'click()');
     return leaks(fb) ? null : fb;
   }
@@ -2853,8 +2873,11 @@
       return out;
     };
     const target = reindex(payload.target, 0);
+    // The alternatives sit in the same frames (C9.1).
+    const alts = Array.isArray(payload.altTargets) ? payload.altTargets.map((t) => reindex(t, 0)) : null;
     if (!changed) return payload;
     const out = Object.assign({}, payload, { target });
+    if (alts) out.altTargets = alts;
     let code = '';
     try { code = window.LLCodegen ? window.LLCodegen.locatorExpr(target, 'playwright', 'typescript') : ''; } catch (err) { code = ''; }
     if (code && payload.code) {
@@ -2931,6 +2954,8 @@
 
     const action = (result.elementData && result.elementData.suggestedAction) || 'click';
     const value = action === 'fill' ? 'your value' : (action === 'selectOption' ? 'option text' : '');
+    // C9.1: the alternatives are addressed through exactly the same frames.
+    if (Array.isArray(result.altTargets)) result.altTargets = result.altTargets.map((t) => wrapInFrames(chain, t));
     (result.locators || []).forEach((l) => {
       if (!l || !l.target) return;
       l.target = wrapInFrames(chain, l.target);
@@ -2973,8 +2998,33 @@
 
   function withShadowPaths(result, el) {
     const info = shadowInfoFor(el);
-    if (info) result.locators.forEach((l) => withShadowPath(l, el, Object.assign({}, info, { shadowHosts: info.shadowHosts.slice() })));
+    const copy = () => Object.assign({}, info, { shadowHosts: info.shadowHosts.slice() });
+    if (info) result.locators.forEach((l) => withShadowPath(l, el, copy()));
+    if (info && Array.isArray(result.altTargets)) result.altTargets.forEach((t) => Object.assign(t, copy()));
     return result;
+  }
+
+  /**
+   * C9.1: the engine's simple alternatives for the element, as they go with
+   * `primary` — none when the primary is itself one of the simple kinds (it is what
+   * every framework would use anyway), at most three.
+   */
+  const SIMPLE_TARGET_KINDS = ['testid', 'id', 'name', 'css'];
+  function altsFor(result, primary) {
+    const alts = Array.isArray(result.altTargets) ? result.altTargets : [];
+    if (!alts.length) return null;
+    const inner = innerTargetOf(primary);
+    if (!inner || SIMPLE_TARGET_KINDS.indexOf(inner.kind) !== -1) return null;
+    return alts.slice(0, 3);
+  }
+
+  /** A copy of locator `best` carrying its altTargets (when there are any). */
+  function withAltTargets(best, result) {
+    const out = Object.assign({}, best);
+    const alts = altsFor(result, best.target);
+    if (alts) out.altTargets = alts;
+    else delete out.altTargets;
+    return out;
   }
 
   // The engine reports uniqueness on the locator, but recorded steps keep only its
@@ -2991,13 +3041,31 @@
     return result;
   }
 
-  // Locator expression for quick-copy, honoring the side panel's framework/language.
-  function copyLocatorCode(loc) {
+  // Locator expression for quick-copy, honoring the side panel's framework/language
+  // — and, outside Playwright, the simple alternative codegen prefers over a role /
+  // label / text locator (C9.2), so the toast never shows a giant expression.
+  /**
+   * What the quick copy puts on the clipboard (`copy`) and shows in its toast
+   * (`display`). A lookup some frameworks can only do through a helper (role,
+   * label or text with no simpler equivalent) is copied with that helper, so the
+   * pasted code runs on its own; the toast shows just the one-line call.
+   */
+  function copyLocatorCode(loc, altTargets) {
     if (window.LLCodegen && loc && loc.target) {
-      const expr = window.LLCodegen.locatorExpr(loc.target, llFramework, llLanguage);
-      if (expr) return expr;
+      let target = loc.target;
+      if (altTargets) target = window.LLCodegen.preferredTarget(target, altTargets, llFramework);
+      if (typeof window.LLCodegen.locatorSnippet === 'function') {
+        const snip = window.LLCodegen.locatorSnippet(target, llFramework, llLanguage) || {};
+        if (snip.expr) {
+          const expr = String(snip.expr);
+          return { copy: snip.helpers ? `${snip.helpers}\n\n${expr}` : expr, display: expr };
+        }
+      }
+      const expr = window.LLCodegen.locatorExpr(target, llFramework, llLanguage);
+      if (expr) return { copy: expr, display: expr };
     }
-    return (loc && loc.code) || '';
+    const code = (loc && loc.code) || '';
+    return { copy: code, display: code };
   }
 
   // ── Element state (replay auto-wait, POM scan, feedback detection) ─────────
@@ -3214,6 +3282,9 @@
       case 'id': out = all('#' + cssEscape(String(t.value))); break;
       case 'name': out = all('[name="' + attrQuote(t.value) + '"]'); break;
       case 'css': out = all(t.value); break;
+      case 'xpath':
+        try { out = labXPath(String(t.value), document, null).filter((n) => n.nodeType === Node.ELEMENT_NODE); } catch (err) { return null; }
+        break;
       case 'placeholder': out = attrMatch('placeholder'); break;
       case 'altText': out = attrMatch('alt'); break;
       case 'title': out = attrMatch('title'); break;
@@ -3905,7 +3976,8 @@
       target: best.target,
       code: best.code,
       matchCount: typeof best.matchCount === 'number' ? best.matchCount : (unique ? 1 : 0),
-      unique
+      unique,
+      altTargets: altsFor(result, best.target)
     };
   }
 
@@ -3940,6 +4012,7 @@
       entry.code = loc.code;
       entry.matchCount = loc.matchCount;
       entry.unique = loc.unique;
+      if (loc.altTargets) entry.altTargets = loc.altTargets;
       try { entry.fingerprint = fingerprintOf(el); } catch (err) { entry.fingerprint = null; }
       elements.push(entry);
     }
@@ -4218,7 +4291,15 @@
       const target = rewrapInFrames(original, inner);
       let code = '';
       try { code = window.LLCodegen ? window.LLCodegen.locatorExpr(target, 'playwright', 'typescript') : ''; } catch (err) { code = ''; }
-      return { target, code: code || l.code || '' };
+      const suggestion = { target, code: code || l.code || '' };
+      // C9.1: its simple alternatives, checked here like the suggestion itself and
+      // framed (and shadow-pathed) the same way.
+      const alts = (altsFor(result, l.target) || []).filter((t) => {
+        const hits = resolveReplayTarget(t);
+        return !!hits && hits.length === 1 && hits[0] === el;
+      }).map((t) => rewrapInFrames(original, withShadowPath({ target: Object.assign({}, t) }, el).target));
+      if (alts.length) suggestion.altTargets = alts;
+      return suggestion;
     }
     return null;
   }
@@ -4482,10 +4563,14 @@
 
   function finishPick(el) {
     const result = withFingerprint(generateLocators(el), el);
+    // C9.1: the element's simple alternatives, for the framework expressions.
+    const alts = altsFor(result, result.locators[0] && result.locators[0].target);
+    if (alts) result.altTargets = alts;
+    else delete result.altTargets;
 
-    const bestCode = result.locators[0] ? copyLocatorCode(result.locators[0]) : '';
-    if (bestCode) {
-      copyText(bestCode).then((ok) => showToast(bestCode, ok));
+    const best = result.locators[0] ? copyLocatorCode(result.locators[0], alts) : null;
+    if (best && best.copy) {
+      copyText(best.copy).then((ok) => showToast(best.display, ok));
     }
 
     // Flash the overlay green
@@ -4747,16 +4832,21 @@
         return;
       }
 
-      const bestCode = result.locators[0] ? copyLocatorCode(result.locators[0]) : '';
-      if (bestCode) {
-        copyText(bestCode).then((ok) => {
+      const best = result.locators[0];
+      // C9.1: as on a pick, the alternatives that go with the best locator.
+      const alts = best ? altsFor(result, best.target) : null;
+      if (alts) result.altTargets = alts;
+      else delete result.altTargets;
+      const bestCode = best ? copyLocatorCode(best, alts) : null;
+      if (bestCode && bestCode.copy) {
+        copyText(bestCode.copy).then((ok) => {
           // No user gesture reaches the page for a context-menu click, so the
           // execCommand fallback cannot run here either: on a non-secure page this
           // genuinely cannot copy. Say so and show the locator, instead of leaving
           // the menu item looking like it silently did nothing.
           if (!ok) {
             injectStyles();
-            showToast(bestCode, false);
+            showToast(bestCode.display, false);
             return;
           }
           flashCopied(target);
