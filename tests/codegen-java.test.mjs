@@ -37,6 +37,8 @@ const role = (r, name, o = {}) => ({ kind: 'role', role: r, ...(name != null ? {
 const label = (value, o = {}) => ({ kind: 'label', value, ...o });
 const frame = (selector, child, o = {}) => ({ kind: 'frame', selector, index: 0, child, ...o });
 const chain = (parent, child) => ({ kind: 'chain', parent, child });
+// The role XPath every Selenium-family target uses (codegen.js roleNodeXpath).
+const roleXp = (r, level) => `//*[${C._internals.roleNodeXpath(r, level)}]`;
 
 /** Decode a Java string literal (as emitted: \\ \" \n \r \t \b \f, octal, \uXXXX). */
 function javaString(lit) {
@@ -428,9 +430,9 @@ describe('Selenium for Java locators', () => {
     expect(se(testid('go'))).toBe('driver.findElement(By.cssSelector("[data-testid=\\"go\\"]"))');
     expect(se({ kind: 'id', value: 'a:b' })).toBe('driver.findElement(By.id("a:b"))');
     expect(se({ kind: 'name', value: 'notes' })).toBe('driver.findElement(By.name("notes"))');
-    expect(se(role('row'))).toBe('driver.findElement(By.cssSelector("tr:not([role]), [role~=\\"row\\"]"))');
+    expect(se(role('row'))).toBe(`driver.findElement(By.xpath(${JSON.stringify(roleXp('row'))}))`);
     expect(se(role('link', null, { nth: 1 }))).toBe(
-      'driver.findElement(By.xpath("(//*[(self::a and not(@role) and @href) or (self::area and not(@role) and @href) or (contains(concat(\\" \\", normalize-space(@role), \\" \\"), \\" link \\"))])[2]"))'
+      `driver.findElement(By.xpath(${JSON.stringify(`(${roleXp('link')})[2]`)}))`
     );
     expect(se({ kind: 'placeholder', value: 'P' })).toBe(
       'driver.findElement(By.cssSelector("[placeholder*=\\"P\\"]"))'
@@ -723,7 +725,7 @@ describe('Selenium for Java statements', () => {
     ).toBe(
       [
         'driver.switchTo().frame(driver.findElement(By.cssSelector("#a")));',
-        'driver.switchTo().frame(2);',
+        `driver.switchTo().frame((WebElement) ((JavascriptExecutor) driver).executeScript(${JSON.stringify(C._internals.DEEP_IFRAME_JS)}, 2));`,
         `${loc}.click();`,
         'driver.switchTo().defaultContent();',
       ].join('\n')
@@ -734,7 +736,9 @@ describe('Selenium for Java statements', () => {
         value: 'x',
         target: { kind: 'frame', selector: null, index: 'junk', child: t },
       }).split('\n')[0]
-    ).toBe('driver.switchTo().frame(0);');
+    ).toBe(
+      `driver.switchTo().frame((WebElement) ((JavascriptExecutor) driver).executeScript(${JSON.stringify(C._internals.DEEP_IFRAME_JS)}, 0));`
+    );
   });
 
   it('walks shadow roots to an <iframe> inside shadow DOM', () => {
@@ -760,7 +764,7 @@ describe('Selenium for Java statements', () => {
     const note =
       '// NOTE: this role locator has no accessible name and may match several elements; the first match is used.';
     expect(seStep({ action: 'click', target: role('row') })).toBe(
-      `${note}\ndriver.findElement(By.cssSelector("tr:not([role]), [role~=\\"row\\"]")).click();`
+      `${note}\ndriver.findElement(By.xpath(${JSON.stringify(roleXp('row'))})).click();`
     );
     expect(seStep({ action: 'click', target: frame('#f', role('row')) }).split('\n')[1]).toBe(note);
     expect(seStep({ action: 'click', target: role('row', null, { matchCount: 1 }) })).not.toContain('NOTE');
@@ -1337,7 +1341,7 @@ describe('page objects: members and helpers', () => {
       '    public WebElement placeOrderButton() {\n        driver.switchTo().defaultContent();\n        return driver.findElement(By.cssSelector("[data-testid=\\"place-order\\"]"));\n    }'
     );
     expect(code).toContain(
-      '        driver.switchTo().frame(2);\n        return driver.findElement(By.xpath('
+      `        driver.switchTo().frame((WebElement) ((JavascriptExecutor) driver).executeScript(${JSON.stringify(C._internals.DEEP_IFRAME_JS)}, 2));\n        return driver.findElement(By.xpath(`
     );
   });
 

@@ -17,6 +17,8 @@ import { dotnetEnv, findDotnet } from '../scripts/e2e/setup-csharp.mjs';
 
 let C;
 let X;
+// The role XPath every Selenium-family target uses (codegen.js roleNodeXpath).
+const roleXp = (r, level) => `//*[${C._internals.roleNodeXpath(r, level)}]`;
 beforeAll(async () => {
   await import('../src/codegen.js');
   await import('../src/codegen-csharp.js');
@@ -210,11 +212,11 @@ describe('Playwright for .NET locators', () => {
   });
 
   it('falls back to the role selector for a role AriaRole lacks', () => {
-    expect(PW(role('mark'))).toBe('Page.Locator("mark:not([role]), [role~=\\"mark\\"]")');
+    expect(PW(role('mark'))).toBe(`Page.Locator(${JSON.stringify(`xpath=${roleXp('mark')}`)})`);
     expect(PW(role('x-widget', 'Go', { nth: 2 }))).toBe(
-      'Page.Locator("[role~=\\"x-widget\\"]").Filter(new() { HasText = "Go" }).Nth(2)'
+      `Page.Locator(${JSON.stringify(`xpath=${roleXp('x-widget')}`)}).Filter(new() { HasText = "Go" }).Nth(2)`
     );
-    expect(PW({ kind: 'role' })).toBe('Page.Locator("[role~=\\"\\"]")');
+    expect(PW({ kind: 'role' })).toBe('Page.Locator("xpath=//*[false()]")');
   });
 
   it('escapes hostile values in every literal', () => {
@@ -466,7 +468,7 @@ describe('Selenium for C# locators', () => {
     expect(SEL(testid('save'))).toBe('driver.FindElement(By.CssSelector("[data-testid=\\"save\\"]"))');
     expect(SEL(id('main'))).toBe('driver.FindElement(By.Id("main"))');
     expect(SEL({ kind: 'name', value: 'q' })).toBe('driver.FindElement(By.Name("q"))');
-    expect(SEL(role('row'))).toBe('driver.FindElement(By.CssSelector("tr:not([role]), [role~=\\"row\\"]"))');
+    expect(SEL(role('row'))).toBe(`driver.FindElement(By.XPath(${JSON.stringify(roleXp('row'))}))`);
     expect(SEL({ kind: 'text', value: 'Go', exact: true })).toBe(
       'driver.FindElement(By.XPath("//*[not(ancestor-or-self::head or self::script or self::style or self::noscript or self::template) and ' +
         'normalize-space(translate(., \\"\\u00A0\\u202F\\u00AD\\u200B\\", \\"  \\"))=\\"Go\\" and not(.//*[not(self::script or self::style or ' +
@@ -681,7 +683,7 @@ describe('Selenium for C# statements', () => {
   it('notes an unnamed role locator that may match several elements', () => {
     expect(sel({ action: 'click', target: role('button') })).toBe(
       '// NOTE: this role locator has no accessible name and may match several elements; the first match is used.\n' +
-        'driver.FindElement(By.CssSelector("button:not([role]), input[type=\\"button\\"]:not([role]), input[type=\\"submit\\"]:not([role]), input[type=\\"reset\\"]:not([role]), input[type=\\"image\\"]:not([role]), input[type=\\"file\\"]:not([role]), [role~=\\"button\\"]")).Click();'
+        `driver.FindElement(By.XPath(${JSON.stringify(roleXp('button'))})).Click();`
     );
     expect(sel({ action: 'click', target: role('button', null, { matchCount: 1 }) })).not.toContain('NOTE');
     expect(sel({ action: 'click', target: role('button', null, { unique: true }) })).not.toContain('NOTE');
@@ -717,9 +719,13 @@ describe('Selenium for C# frames', () => {
 
   it('addresses a cross-origin frame by index', () => {
     expect(fill({ kind: 'frame', selector: null, index: 2, child: inner })).toBe(
-      'driver.SwitchTo().Frame(2);\n' + FILL + '\ndriver.SwitchTo().DefaultContent();'
+      `driver.SwitchTo().Frame((IWebElement)((IJavaScriptExecutor)driver).ExecuteScript(${JSON.stringify(C._internals.DEEP_IFRAME_JS)}, 2)!);\n` +
+        FILL +
+        '\ndriver.SwitchTo().DefaultContent();'
     );
-    expect(fill({ kind: 'frame', child: inner }).split('\n')[0]).toBe('driver.SwitchTo().Frame(0);');
+    expect(fill({ kind: 'frame', child: inner }).split('\n')[0]).toBe(
+      `driver.SwitchTo().Frame((IWebElement)((IJavaScriptExecutor)driver).ExecuteScript(${JSON.stringify(C._internals.DEEP_IFRAME_JS)}, 0)!);`
+    );
   });
 
   it('walks each shadow root with GetShadowRoot() before switching', () => {
@@ -758,7 +764,9 @@ describe('Selenium for C# frames', () => {
     }
     expect(
       fill({ kind: 'frame', selector: null, index: 3, shadowPath: ['a-b', 'iframe'], child: inner })
-    ).toContain('driver.SwitchTo().Frame(3);');
+    ).toContain(
+      `driver.SwitchTo().Frame((IWebElement)((IJavaScriptExecutor)driver).ExecuteScript(${JSON.stringify(C._internals.DEEP_IFRAME_JS)}, 3)!);`
+    );
   });
 
   it('keeps notes and multi-line statements inside the frame', () => {
@@ -769,7 +777,7 @@ describe('Selenium for C# frames', () => {
     expect(out.split('\n')).toEqual([
       'driver.SwitchTo().Frame(driver.FindElement(By.CssSelector("#f")));',
       '// NOTE: this role locator has no accessible name and may match several elements; the first match is used.',
-      'driver.FindElement(By.CssSelector("tr:not([role]), [role~=\\"row\\"]")).Click();',
+      `driver.FindElement(By.XPath(${JSON.stringify(roleXp('row'))})).Click();`,
       'driver.SwitchTo().DefaultContent();',
     ]);
   });
@@ -1351,7 +1359,9 @@ describe('page objects: every element kind and target', () => {
       ].join('\n')
     );
     expect(code).toContain(
-      '            Driver.SwitchTo().DefaultContent();\n            Driver.SwitchTo().Frame(2);\n            return Driver.FindElement(By.XPath('
+      '            Driver.SwitchTo().DefaultContent();\n' +
+        `            Driver.SwitchTo().Frame((IWebElement)((IJavaScriptExecutor)Driver).ExecuteScript(${JSON.stringify(C._internals.DEEP_IFRAME_JS)}, 2)!);\n` +
+        '            return Driver.FindElement(By.XPath('
     );
     expect(code).toContain(
       '            Driver.SwitchTo().DefaultContent();\n            Driver.SwitchTo().Frame(Driver.FindElement(By.CssSelector("#pay")));\n'

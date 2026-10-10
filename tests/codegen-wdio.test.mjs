@@ -37,6 +37,12 @@ const FW = 'webdriverio';
 const LANGS = ['typescript', 'javascript'];
 const loc = (t, lang = 'typescript', rel) => C.locatorExpr(t, FW, lang, rel);
 const stmt = (step, lang = 'typescript') => C.actionStatement(step, FW, lang);
+// A selector-less frame: the index-th <iframe>, shadow roots included (codegen.js DEEP_IFRAME_JS).
+// execute() returns a bare element reference; $() turns it into the element
+// switchFrame() takes.
+const deepFrame = (i, lang = 'typescript') =>
+  `$(await browser.execute${lang === 'typescript' ? '<HTMLIFrameElement, [number]>' : ''}(` +
+  `${C.q(C._internals.DEEP_IFRAME_JS, lang)}, ${i}))`;
 
 /** The Selenium JS locator for a target, rewritten to the WDIO form ($ / .$). */
 function fromSelenium(t, rel) {
@@ -136,13 +142,10 @@ describe('locators', () => {
   it('renders every target kind exactly', () => {
     expect(loc(testid('place-order'))).toBe(`$('[data-testid="place-order"]')`);
     expect(loc(testid('v', 'data:qa'))).toBe(String.raw`$('[data\\:qa="v"]')`);
-    expect(loc(role('button'))).toBe(
-      `$('button:not([role]), input[type="button"]:not([role]), input[type="submit"]:not([role]), ` +
-        `input[type="reset"]:not([role]), input[type="image"]:not([role]), input[type="file"]:not([role]), [role~="button"]')`
-    );
-    expect(loc(role('heading', null, { level: 2 }))).toBe(
-      `$('h2:not([role]), [role~="heading"][aria-level="2"]')`
-    );
+    // Role locators are the role XPath, named or not (codegen.js roleNodeXpath).
+    const roleXp = (r, level) => `//*[${C._internals.roleNodeXpath(r, level)}]`;
+    expect(loc(role('button'))).toBe(`$('${roleXp('button')}')`);
+    expect(loc(role('heading', null, { level: 2 }))).toBe(`$('${roleXp('heading', 2)}')`);
     expect(loc({ kind: 'placeholder', value: 'Search' })).toBe(`$('[placeholder*="Search"]')`);
     expect(loc({ kind: 'placeholder', value: 'Search', exact: true })).toBe(`$('[placeholder="Search"]')`);
     expect(loc({ kind: 'altText', value: 'Logo' })).toBe(`$('[alt*="Logo"]')`);
@@ -555,11 +558,14 @@ describe('frames', () => {
   it('addresses a cross-origin frame by position', () => {
     const xo = { kind: 'frame', selector: null, index: 2, child: id('x') };
     expect(stmt({ action: 'click', target: xo }).split('\n')[0]).toBe(
-      `await browser.switchFrame($$('iframe')[2]);`
+      `await browser.switchFrame(${deepFrame(2)});`
+    );
+    expect(stmt({ action: 'click', target: xo }, 'javascript').split('\n')[0]).toBe(
+      `await browser.switchFrame(${deepFrame(2, 'javascript')});`
     );
     const noIndex = { kind: 'frame', selector: '', child: id('x') };
     expect(stmt({ action: 'click', target: noIndex }).split('\n')[0]).toBe(
-      `await browser.switchFrame($$('iframe')[0]);`
+      `await browser.switchFrame(${deepFrame(0)});`
     );
   });
 
@@ -584,7 +590,7 @@ describe('frames', () => {
     // A cross-origin frame has no element to walk to.
     const xo = { kind: 'frame', selector: null, index: 1, shadowPath: ['a-b', 'iframe'], child: id('c') };
     expect(stmt({ action: 'click', target: xo }).split('\n')[0]).toBe(
-      `await browser.switchFrame($$('iframe')[1]);`
+      `await browser.switchFrame(${deepFrame(1)});`
     );
   });
 
@@ -694,7 +700,11 @@ describe('test file', () => {
     ).actions;
     const ts = C.testScript(flow, FW, 'typescript');
     const js = C.testScript(flow, FW, 'javascript');
-    expect(ts.replace('browser.execute<[number, number], []>(', 'browser.execute(')).toBe(js);
+    expect(
+      ts
+        .replace('browser.execute<[number, number], []>(', 'browser.execute(')
+        .replaceAll('browser.execute<HTMLIFrameElement, [number]>(', 'browser.execute(')
+    ).toBe(js);
   });
 });
 
@@ -974,7 +984,7 @@ describe('page objects', () => {
       ].join('\n')
     );
     expect(ts).toContain(
-      "    await browser.switchFrame($$('iframe')[1]);\n    return $('#go').getElement();"
+      `    await browser.switchFrame(${deepFrame(1)});\n    return $('#go').getElement();`
     );
     expect(ts).toContain(
       "  async goto(): Promise<void> {\n    await browser.switchFrame(null);\n    await browser.url('https://e.example/');\n  }"
@@ -984,7 +994,8 @@ describe('page objects', () => {
     expect(ts).toContain(', await this.when(), value);');
     expect(ts).toContain('    await (await this.plan()).selectByVisibleText(value);');
     expect(ts).toContain('    await (await this.go()).click();');
-    expect(ts.split('\n')[2]).toBe("import { browser, $, $$ } from '@wdio/globals';");
+    // The selector-less frame is found with browser.execute, so $$ is not imported.
+    expect(ts.split('\n')[2]).toBe("import { browser, $ } from '@wdio/globals';");
     expect(po(model, 'javascript')).toContain('  async card() {\n');
   });
 
@@ -1267,17 +1278,24 @@ function fakeWdio() {
     }
     return el;
   };
-  const $ = (s) => element(s);
+  // execute() hands back a W3C element reference; $() accepts one, as WDIO's does.
+  const ELEMENT_KEY = 'element-6066-11e4-a52e-4f735466cecf';
+  const $ = (s) => (s && typeof s === 'object' && ELEMENT_KEY in s ? element(s[ELEMENT_KEY]) : element(s));
   const $$ = (s) => new Proxy([], { get: (_, i) => element(`${s}[${String(i)}]`) });
   const browser = {
     url: async (u) => log.push(`url(${u})`),
     keys: async (k) => log.push(`keys(${JSON.stringify(k)})`),
-    switchFrame: async (f) => log.push(`switchFrame(${f === null ? 'null' : f.desc})`),
+    switchFrame: async (f) => {
+      // Like WDIO: an element, a number, a URL string or null — never a bare reference.
+      if (f !== null && !(f && f.desc)) throw new Error('Invalid type for context parameter: object');
+      log.push(`switchFrame(${f === null ? 'null' : f.desc})`);
+    },
     execute: async (script, ...args) => {
       log.push(
         `execute(${script.slice(0, 16)}…, ${args.map((a) => (a && a.desc) || JSON.stringify(a)).join(', ')})`
       );
-      return [1000, 700];
+      // The deep <iframe> lookup returns the frame element — as a bare reference.
+      return script.startsWith('const frames') ? { [ELEMENT_KEY]: `iframe[${args[0]}]` } : [1000, 700];
     },
     setWindowSize: async (w, h) => log.push(`setWindowSize(${w}, ${h})`),
     waitUntil: async (fn, opts) => {
@@ -1387,6 +1405,7 @@ describe('generated code runs against WDIO stand-ins', () => {
         'switchFrame(x-a.shadow$(iframe))',
         '#pay.click()',
         'switchFrame(null)',
+        'execute(const frames = […, 1)',
         'switchFrame(iframe[1])',
         '#xo.click()',
         'switchFrame(null)',

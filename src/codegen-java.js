@@ -231,11 +231,18 @@
   function pwAssert(step, loc) {
     var t = step.assertType || 'toBeVisible';
     var v = step.value;
+    // hasValue's failure message prints the expected value: a secret's assertion keeps
+    // the retrying hasValue but rethrows with a message that names only the variable
+    // (no cause, so the original is not printed either).
+    if (I.sensitiveAssert(step)) {
+      return 'try {\n    assertThat(' + loc + ').hasValue(' + secretExpr(step) + ');\n' +
+        '} catch (AssertionError e) {\n    throw new AssertionError(' + jq(I.secretMismatch(step)) + ');\n}';
+    }
     var map = {
       toBeVisible: 'isVisible()',
       toHaveText: 'hasText(' + jq(v) + ', new LocatorAssertions.HasTextOptions().setUseInnerText(true))',
       toContainText: 'containsText(' + jq(v) + ', new LocatorAssertions.ContainsTextOptions().setUseInnerText(true))',
-      toHaveValue: 'hasValue(' + (I.sensitiveAssert(step) ? secretExpr(step) : jq(v)) + ')',
+      toHaveValue: 'hasValue(' + jq(v) + ')',
       toBeEnabled: 'isEnabled()',
       toBeChecked: String(v) === 'false' ? 'not().isChecked()' : 'isChecked()'
     };
@@ -343,8 +350,8 @@
     switch (t.kind) {
       case 'testid': return selFind('css', '[' + I.cssIdent(t.attr) + '="' + I.attrSel(t.value) + '"]');
       case 'role':
-        if (t.name || I.hasNth(t)) return selFind('xpath', roleXpath(t, rel));
-        return selFind('css', I.roleCss(t.role, t.level));
+        // XPath, named or not: CSS cannot say which role an element ends up with.
+        return selFind('xpath', roleXpath(t, rel));
       case 'label': return selFind('xpath', axis + '[' + I.labelXpath(t.value, t.exact) + ']');
       case 'placeholder': return selFind('css', I.attrMatchSel('placeholder', t.value, t.exact));
       case 'altText': return selFind('css', I.attrMatchSel('alt', t.value, t.exact));
@@ -367,8 +374,10 @@
       return 'driver.switchTo().frame(' + el + ');';
     }
     if (frame.selector) return 'driver.switchTo().frame(' + selFind('css', frame.selector) + ');';
-    // By position in window.frames (C4: framesIndex when the recorder knew it).
-    return 'driver.switchTo().frame(' + I.seleniumFrameIndex(frame) + ');';
+    // No selector (a cross-origin frame): the frame element, by its position among
+    // the page's <iframe>s, shadow roots included (codegen.js DEEP_IFRAME_JS).
+    return 'driver.switchTo().frame((WebElement) ((JavascriptExecutor) driver).executeScript(' +
+      jq(I.DEEP_IFRAME_JS) + ', ' + I.seleniumFrameIndex(frame) + '));';
   }
 
   /** A block that looks the element up once: `WebElement el = …;` (scoped, so steps can repeat). */

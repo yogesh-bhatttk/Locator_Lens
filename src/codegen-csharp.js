@@ -117,9 +117,9 @@
         var enumRole = ariaRole(t.role);
         if (!enumRole) {
           // Not an AriaRole member (Playwright for .NET has no string overload): the
-          // same native + explicit role selector the Selenium/Cypress targets use,
-          // narrowed by text when the recording had a name.
-          var css = root + '.Locator(' + q(I.roleCss(String(t.role == null ? '' : t.role), t.level)) + ')';
+          // same role XPath the Selenium targets use, narrowed by text when the
+          // recording had a name.
+          var css = root + '.Locator(' + q('xpath=//*[' + I.roleNodeXpath(String(t.role == null ? '' : t.role), t.level) + ']') + ')';
           if (t.name) css += '.Filter(new() { HasText = ' + q(t.name) + ' })';
           return css + nth;
         }
@@ -184,8 +184,8 @@
     switch (t.kind) {
       case 'testid': return selFind('css', '[' + I.cssIdent(t.attr) + '="' + I.attrSel(t.value) + '"]', root);
       case 'role':
-        if (t.name || I.hasNth(t)) return selFind('xpath', roleXpath(t, rel), root);
-        return selFind('css', I.roleCss(t.role, t.level), root);
+        // XPath, named or not: CSS cannot say which role an element ends up with.
+        return selFind('xpath', roleXpath(t, rel), root);
       case 'label': return selFind('xpath', axis + '[' + I.labelXpath(t.value, t.exact) + ']', root);
       case 'placeholder': return selFind('css', I.attrMatchSel('placeholder', t.value, t.exact), root);
       case 'altText': return selFind('css', I.attrMatchSel('alt', t.value, t.exact), root);
@@ -284,11 +284,19 @@
   function pwAssert(step, loc) {
     var t = step.assertType || 'toBeVisible';
     var v = step.value;
+    // ToHaveValueAsync's failure message prints the expected value: a secret's
+    // assertion keeps the retrying ToHaveValueAsync but rethrows the exception
+    // Playwright's assertions throw with a message that names only the variable (no
+    // inner exception, so the original is not printed either).
+    if (I.sensitiveAssert(step)) {
+      return 'try\n{\n    await Expect(' + loc + ').ToHaveValueAsync(' + secretExpr(step) + ');\n}\n' +
+        'catch (PlaywrightException)\n{\n    throw new PlaywrightException(' + q(I.secretMismatch(step)) + ');\n}';
+    }
     var map = {
       toBeVisible: 'ToBeVisibleAsync()',
       toHaveText: 'ToHaveTextAsync(' + q(v) + ', new() { UseInnerText = true })',
       toContainText: 'ToContainTextAsync(' + q(v) + ', new() { UseInnerText = true })',
-      toHaveValue: 'ToHaveValueAsync(' + (I.sensitiveAssert(step) ? secretExpr(step) : q(v)) + ')',
+      toHaveValue: 'ToHaveValueAsync(' + q(v) + ')',
       toBeEnabled: 'ToBeEnabledAsync()',
       toBeChecked: String(v) === 'false' ? 'Not.ToBeCheckedAsync()' : 'ToBeCheckedAsync()'
     };
@@ -370,8 +378,10 @@
       return root + '.SwitchTo().Frame(' + host + ');';
     }
     if (frame.selector) return root + '.SwitchTo().Frame(' + selFind('css', frame.selector, root) + ');';
-    // By position in window.frames (C4: framesIndex when the recorder knew it).
-    return root + '.SwitchTo().Frame(' + I.seleniumFrameIndex(frame) + ');';
+    // No selector (a cross-origin frame): the frame element, by its position among
+    // the page's <iframe>s, shadow roots included (codegen.js DEEP_IFRAME_JS).
+    return root + '.SwitchTo().Frame((IWebElement)((IJavaScriptExecutor)' + root + ').ExecuteScript(' +
+      q(I.DEEP_IFRAME_JS) + ', ' + I.seleniumFrameIndex(frame) + ')!);';
   }
 
   var SET_VALUE = '((IJavaScriptExecutor)driver).ExecuteScript(' + q(I.SET_VALUE_JS);

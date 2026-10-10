@@ -371,8 +371,10 @@ describe('chained locators', () => {
       'page.get_by_test_id("row-7").get_by_role("button", name="Delete")'
     );
     const cy = C.locatorExpr(chain, 'cypress', 'javascript');
-    expect(cy.startsWith("cy.get('[data-testid=\"row-7\"]').find('button:not([role]), ")).toBe(true);
-    expect(cy.endsWith(".filter((_, el) => locatraMatch(el, 'name', 'Delete'))")).toBe(true);
+    expect(cy.startsWith("cy.get('[data-testid=\"row-7\"]').find('button, ")).toBe(true);
+    expect(
+      cy.endsWith(".filter((_, el) => locatraRole(el) === 'button' && locatraMatch(el, 'name', 'Delete'))")
+    ).toBe(true);
   });
 
   it('scopes the Selenium child XPath to the parent with a leading dot', () => {
@@ -478,9 +480,12 @@ describe('frames', () => {
     expect(C.locatorExpr(xo, 'playwright', 'typescript')).toBe(
       "page.frameLocator('iframe >> nth=2').getByText('Pay')"
     );
-    expect(C.locatorExpr(xo, 'cypress', 'javascript')).toContain("cy.get('iframe').eq(2)");
+    // Cypress and Selenium find the index-th <iframe>, shadow roots included.
+    expect(C.locatorExpr(xo, 'cypress', 'javascript')).toContain(
+      'cy.document().then((doc) => locatraFrame(doc, 2))'
+    );
     expect(C.actionStatement({ action: 'click', target: xo }, 'selenium', 'python')).toContain(
-      'driver.switch_to.frame(2)'
+      `driver.switch_to.frame(driver.execute_script(${C.q(C._internals.DEEP_IFRAME_JS, 'python')}, 2))`
     );
   });
 
@@ -633,7 +638,9 @@ describe('frames inside shadow DOM', () => {
       shadowPath: ['a-b', 'iframe'],
       child: SHADOW.child,
     };
-    expect(fill(xo, 'selenium', 'python')).toContain('driver.switch_to.frame(2)');
+    expect(fill(xo, 'selenium', 'python')).toContain(
+      `driver.switch_to.frame(driver.execute_script(${C.q(C._internals.DEEP_IFRAME_JS, 'python')}, 2))`
+    );
   });
 
   it('produces scripts that parse in every language', () => {
@@ -858,9 +865,9 @@ describe('role selector tables', () => {
   it('narrows a heading to its level', () => {
     const h = { kind: 'role', role: 'heading', name: 'T', level: 2 };
     expect(C.locatorExpr(h, 'cypress', 'javascript')).toContain(
-      'h2:not([role]), [role~="heading"][aria-level="2"]'
+      'h2, [role~="heading"][aria-level="2"]:not(h1, h2, h3, h4, h5, h6)'
     );
-    expect(C.locatorExpr(h, 'cypress', 'javascript')).not.toContain('h1');
+    expect(C.locatorExpr(h, 'cypress', 'javascript').startsWith("cy.get('h2, [role~=")).toBe(true);
   });
 });
 
@@ -1342,7 +1349,8 @@ describe('Cypress cross-origin', () => {
     ];
     const ts = C.testScript(steps, 'cypress', 'typescript');
     expect(ts.match(/function locatraMatch\(/g)).toHaveLength(2);
-    expect(ts.startsWith('// Locatra: match an element')).toBe(true);
+    expect(ts.match(/function locatraRole\(/g)).toHaveLength(2);
+    expect(ts.startsWith('// Locatra: the ARIA role')).toBe(true);
     expect(ts).toContain(
       'function locatraMatch(el: HTMLElement, kind: string, text: string, exact?: boolean): boolean {'
     );
@@ -1643,15 +1651,13 @@ describe('remaining edge cases', () => {
 
   it('maps img roles to non-empty alt and SVG by local name', () => {
     expect(C.locatorExpr({ kind: 'role', role: 'img' }, 'cypress', 'javascript')).toBe(
-      'cy.get(\'img:not([alt=""]):not([role]), img[title]:not([title=""]):not([role]), ' +
-        'img:is([tabindex], [aria-atomic], [aria-busy], [aria-controls], [aria-current], [aria-describedby], ' +
-        '[aria-details], [aria-dropeffect], [aria-flowto], [aria-grabbed], [aria-hidden], [aria-keyshortcuts], ' +
-        '[aria-label], [aria-labelledby], [aria-live], [aria-owns], [aria-relevant], [aria-roledescription])' +
-        ':not([role]), svg:not([role]), [role~="img"]\').first()'
+      "cy.get('img, svg, [role~=\"img\"]').filter((_, el) => locatraRole(el) === 'img').first()"
     );
     const xp = C.locatorExpr({ kind: 'role', role: 'img', name: 'Logo' }, 'selenium', 'javascript');
-    expect(xp).toContain('(self::img and not(@role) and (not(@alt) or @alt!=""))');
-    expect(xp).toContain('(local-name(.)="svg" and not(@role))');
+    expect(xp).toContain(
+      '(self::img and (not(@alt) or string-length(@alt) > 0 or string-length(@title) > 0 or '
+    );
+    expect(xp).toContain('(local-name(.)="svg")');
   });
 
   it('chains without a parent fall back to the child; frames without one render nothing', () => {
@@ -1851,7 +1857,7 @@ describe('Selenium frame-wrapped chains', () => {
     expect(C.actionStatement({ action: 'click', target: nested }, 'selenium', 'javascript')).toBe(
       [
         "await driver.switchTo().frame(driver.findElement(By.css('#outer')));",
-        'await driver.switchTo().frame(1);',
+        `await driver.switchTo().frame(await driver.executeScript(${C.q(C._internals.DEEP_IFRAME_JS, 'javascript')}, 1));`,
         "await driver.findElement(By.css('form.card')).findElement(By.id('num')).click();",
         'await driver.switchTo().defaultContent();',
       ].join('\n')

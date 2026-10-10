@@ -13,13 +13,19 @@
 //       addresses the <iframe> in its parent document; when the frame is
 //       cross-origin its element is unreachable, so only `index` is known and the
 //       generators fall back to positional frame addressing. Nests for deep frames.
+//       `index` is the frame's position among the parent document's <iframe>
+//       elements in composed (shadow-piercing) order — exact even behind a
+//       cross-origin parent, whose own content script reports it via the worker.
 //       Optional `shadowPath` (an <iframe> inside shadow DOM): one CSS selector per
 //       tree, outermost first — the first host in the parent document, each further
 //       host in the previous host's shadow root, the <iframe> in the last root.
 //       Selenium and Cypress walk it host by host, since neither one's CSS pierces
 //       shadow roots; Playwright keeps using `selector`, which its CSS resolves
-//       across the composed tree. Optional `framesIndex`: the frame's position in
-//       window.frames, which Selenium's switchTo().frame(i) takes (C4).
+//       across the composed tree. Without a selector every framework finds the
+//       frame by `index` (Playwright `iframe >> nth=i`; the others run the same
+//       shadow-piercing walk, DEEP_IFRAME_JS / locatraFrame()). A bare number is never
+//       handed to Selenium: ChromeDriver counts /html/body//iframe, geckodriver
+//       window.frames. `framesIndex` (window.frames order) is for replay only.
 // The innermost (non-frame) target may carry `shadowHosts` and `shadowCss` when its
 // element is inside open shadow DOM (C3, see shadowOf()).
 //
@@ -92,10 +98,10 @@
   // Every number a target or step carries is emitted as code, never inside a string
   // literal, so it is validated first: a recording is data, and a hand-edited or
   // corrupted one must not be able to write code into the test.
-  /** A heading level: an integer 1–6 (a number or its digit string), else 0 (= none). */
+  /** A heading level: an integer 1–99 (a number or its digit string), else 0 (= none). */
   function headingLevel(value) {
     var n = typeof value === 'string' && /^\s*\d+\s*$/.test(value) ? Number(value) : value;
-    return typeof n === 'number' && n >= 1 && n <= 6 && Math.floor(n) === n ? n : 0;
+    return typeof n === 'number' && n >= 1 && n <= 99 && Math.floor(n) === n ? n : 0;
   }
 
   /** A non-negative integer (a number or its digit string), else `fallback`. */
@@ -212,90 +218,159 @@
     return LANGUAGES.filter(function (l) { return isValidCombo(fw, l.id); });
   }
 
-  // ── implicit ARIA role → selector helpers (for Selenium/Cypress) ────────────
-  // One table drives both the CSS (Cypress, unnamed Selenium) and the XPath (named
-  // Selenium) form, so the two can never disagree. It mirrors the engine's role table
-  // (content-locator-engine.js, itself a port of Playwright's getAriaRole): a native
-  // element only carries its implicit role when it has no explicit role attribute,
-  // hence the :not([role]) on each.
-  //   tag        element name
-  //   typeIn     input types (any listed; 'text' also covers a missing type)
-  //   typeNotIn  input types excluded
-  //   typeAttr   the attribute typeIn/typeNotIn test (default 'type')
-  //   has/lacks  attributes that must be present / absent
-  //   notEmpty   attribute that, when present, must not be ""
-  //   anyAttr    at least one of these attributes is present (CSS :is())
-  //   inGrid     only inside a [role=grid]/[role=treegrid] table
-  //   pre/css    CSS before / after the element's own selector; xpath: the same
-  //              condition as an XPath predicate (used together, never alone)
-  // Known gaps, where CSS cannot say what the engine checks: role=none/presentation
-  // on a focusable element, a role attribute holding only unknown tokens, the
-  // <datalist> a list= attribute must point at, landmarks inside sectioning content
-  // and a lone <th> in a one-row table.
+  // ── ARIA role → selectors (Selenium, WebdriverIO, Cypress) ──────────────────
+  // The engine (content-locator-engine.js, a port of Playwright's getAriaRole) gives
+  // an element the first *valid* token of its role attribute, else its implicit role
+  // (the tables below). role="none"/"presentation" also leaves the implicit role in
+  // place on an element that can take focus or carries a global ARIA attribute, and
+  // a list/table/dl whose role is presentational passes that on to its items.
+  // roleNodeXpath() says all of this in XPath 1.0, for every Selenium-family target.
+  // CSS cannot (token order, IDREFs, numeric tabindex), so roleCss() only selects
+  // the candidates — a superset — and Cypress narrows them with locatraRole(), the
+  // engine's role function emitted into the spec.
+  // The XPath reads the first role token against the valid roles; after an unknown
+  // first token any later R makes the role R, and the native role stays only when
+  // there is no later token (Playwright walks every token, so role="foo switch
+  // checkbox" and role="foo bar" on a <button> differ from it).
+  //   tag       element name
+  //   types     input types it has (as e.type reads them: lower-cased, unknown = text)
+  //   notTypes  input types it does not have
+  //   css       CSS narrowing the candidates (never dropping a match)
+  //   xp        the rest of the condition, in XPath
+  var VALID_ROLES = ('alert alertdialog application article banner blockquote button caption cell checkbox code ' +
+    'columnheader combobox complementary contentinfo definition deletion dialog directory document emphasis feed ' +
+    'figure form generic grid gridcell group heading img insertion link list listbox listitem log main mark marquee ' +
+    'math meter menu menubar menuitem menuitemcheckbox menuitemradio navigation none note option paragraph ' +
+    'presentation progressbar radio radiogroup region row rowgroup rowheader scrollbar search searchbox separator ' +
+    'slider spinbutton status strong subscript superscript switch tab table tablist tabpanel term textbox time ' +
+    'timer toolbar tooltip tree treegrid treeitem').split(' ');
+  var XP_ROLE = 'normalize-space(@role)';
+  var XP_ROLE1 = 'substring-before(concat(' + XP_ROLE + ', " "), " ")';
+  var XP_PRESENTATIONAL = 'contains(" none presentation ", concat(" ", ' + XP_ROLE1 + ', " "))';
+  // The first role token (if any) is not a valid role.
+  var XP_NO_VALID_ROLE = 'not(contains(" ' + VALID_ROLES.join(' ') + ' ", concat(" ", ' + XP_ROLE1 + ', " ")))';
+
+  // An input's type as e.type reads it: lower-cased, and a space (never part of a
+  // type) made "_" so a list lookup cannot match across two of its words.
+  var XP_TYPE = 'translate(@type, "ABCDEFGHIJKLMNOPQRSTUVWXYZ ", "abcdefghijklmnopqrstuvwxyz_")';
+  function xpTypeIn(types) {
+    return types.length === 1 ? XP_TYPE + '="' + types[0] + '"'
+      : 'contains(" ' + types.join(' ') + ' ", concat(" ", ' + XP_TYPE + ', " "))';
+  }
   var TEXTBOX_EXCLUDED = ['hidden', 'file', 'button', 'submit', 'reset', 'image', 'checkbox', 'radio', 'number', 'range', 'search'];
+  // Text-like types the list= attribute cannot turn into a combobox.
+  var LISTLESS_TEXT_TYPES = ['color', 'date', 'datetime-local', 'month', 'password', 'time', 'week'];
+  // The known types that are not text, email, tel or url (an unknown type is text).
+  var NON_TEXT_TYPES = TEXTBOX_EXCLUDED.concat(LISTLESS_TEXT_TYPES);
+  // list= makes a combobox only when its id names a <datalist>.
+  var XP_DATALIST = 'id(@list)[self::datalist]';
   // A select is a listbox when it is multiple or its size is above 1; size is
   // compared as written ("", "0" and "1" are the single-line values).
-  var SELECT_SINGLE_SIZES = ['', '0', '1'];
-  // A <th> without a usable scope is a row header when a cell beside it has content
-  // (and a column header otherwise) — the engine's and Playwright's heuristic.
-  var TH_SCOPES = ['col', 'colgroup', 'row', 'rowgroup'];
-  var FILLED_TD_CSS = 'td:not(:empty)';
-  var FILLED_TD_XPATH = 'self::td and (normalize-space(.)!="" or *)';
-  var TH_BESIDE_FILLED_XPATH = '(following-sibling::*[1][' + FILLED_TD_XPATH + '] or preceding-sibling::*[1][' + FILLED_TD_XPATH + '])';
-  // The global ARIA attributes: any of them keeps an alt="" image in the
-  // accessibility tree (role img instead of presentation), as does a tabindex.
+  var XP_SELECT_SINGLE = '(not(@size) or @size="" or @size="0" or @size="1")';
+
+  // A tabindex counts when it reads as a number (JavaScript's Number(): "" is 0).
+  var XP_TABINDEX = '(@tabindex and (number(@tabindex) = number(@tabindex) or normalize-space(@tabindex) = ""))';
+  // :disabled for a form control: its own attribute, or a disabled <fieldset> it is
+  // in, other than inside that fieldset's first <legend>.
+  var XP_DISABLED = '(@disabled or ancestor-or-self::*[parent::fieldset[@disabled] and not(self::legend and not(preceding-sibling::legend))])';
+  /** Whether an element of this tag can take focus (the engine's isFocusable), in XPath. */
+  function xpFocusable(tag) {
+    if (tag === 'button' || tag === 'select' || tag === 'textarea') return 'not' + XP_DISABLED;
+    if (tag === 'input') return 'not' + XP_DISABLED + ' and (not(@hidden) or ' + XP_TABINDEX + ')';
+    if (tag === 'a' || tag === 'area') return '(@href or ' + XP_TABINDEX + ')';
+    if (tag === 'details') return 'true()';
+    if (tag === 'option') return 'not(@disabled or parent::optgroup[@disabled]) and ' + XP_TABINDEX;
+    if (tag === 'optgroup') return 'not(@disabled) and ' + XP_TABINDEX;
+    return XP_TABINDEX;
+  }
+
+  // The global ARIA attributes: any of them keeps an element's implicit role under
+  // role="none" (and an alt="" image in the tree), except an attribute the role
+  // prohibits — naming on the roles in NAMELESS_ROLES.
   var GLOBAL_ARIA = ['aria-atomic', 'aria-busy', 'aria-controls', 'aria-current', 'aria-describedby', 'aria-details',
     'aria-dropeffect', 'aria-flowto', 'aria-grabbed', 'aria-hidden', 'aria-keyshortcuts', 'aria-label',
     'aria-labelledby', 'aria-live', 'aria-owns', 'aria-relevant', 'aria-roledescription'];
+  var NAMELESS_ROLES = ['caption', 'code', 'deletion', 'emphasis', 'generic', 'insertion', 'paragraph', 'presentation',
+    'strong', 'subscript', 'superscript'];
+  function globalAria(role) {
+    return GLOBAL_ARIA.filter(function (a) {
+      if (a === 'aria-label' || a === 'aria-labelledby') return NAMELESS_ROLES.indexOf(role) === -1;
+      return a !== 'aria-roledescription' || role !== 'generic';
+    });
+  }
+  function xpGlobalAria(role) {
+    return '(' + globalAria(role).map(function (a) { return '@' + a; }).join(' or ') + ')';
+  }
+
+  // A presentational list, table or <dl> makes its own items presentational too
+  // (items → owners: li → ol/ul; dt/dd → dl or a div in one; tr → its section or
+  // table; td/th → tr and up). An owner keeps its role under the same conditions.
+  var XP_PRESENTATIONAL_OWNER = '[(' + XP_ROLE1 + '="presentation" or (' + XP_ROLE1 + '="none" and not(@aria-label or @aria-labelledby)))' +
+    ' and not(' + xpGlobalAria('presentation') + ' or ' + XP_TABINDEX + ')]';
+  var XP_SECTION = 'self::thead or self::tbody or self::tfoot';
+  var DL_OWNERS = '(parent::dl | parent::div | parent::div/parent::dl)';
+  var CELL_OWNERS = '(parent::tr | parent::tr/parent::*[' + XP_SECTION + ' or self::table] | parent::tr/parent::*[' + XP_SECTION + ']/parent::table)';
+  var OWNERS = {
+    li: '(parent::ol | parent::ul)', dt: DL_OWNERS, dd: DL_OWNERS,
+    tr: '(parent::*[' + XP_SECTION + ' or self::table] | parent::*[' + XP_SECTION + ']/parent::table)',
+    thead: 'parent::table', tbody: 'parent::table', tfoot: 'parent::table', td: CELL_OWNERS, th: CELL_OWNERS
+  };
+
+  // <header>/<footer> are landmarks only outside sectioning content.
+  var XP_OUTSIDE_SECTIONING = 'not(ancestor::*[((self::article or self::aside or self::main or self::nav or self::section) and not(@role))' +
+    ' or @role="article" or @role="complementary" or @role="main" or @role="navigation" or @role="region"])';
+  // A <td> is a gridcell when its table's role is grid or treegrid.
+  var XP_IN_GRID = 'ancestor::table[1][' + XP_ROLE1 + '="grid" or ' + XP_ROLE1 + '="treegrid"]';
+  // A <th> without a usable scope is a row header when a cell beside it has content
+  // (and a column header otherwise) — the engine's and Playwright's heuristic; alone
+  // in the only row of its table it is neither. Content is what JavaScript's trim()
+  // leaves (it also strips no-break and other Unicode spaces).
+  var JS_SPACES = '                 　﻿';
+  var XP_FILLED_TD = 'self::td and (normalize-space(translate(., "' + JS_SPACES + '", "' +
+    new Array(JS_SPACES.length + 1).join(' ') + '"))!="" or *)';
+  var XP_TH_BESIDE_FILLED = '(following-sibling::*[1][' + XP_FILLED_TD + '] or preceding-sibling::*[1][' + XP_FILLED_TD + '])';
+  var XP_TH_LONE = '(not(preceding-sibling::* or following-sibling::*) and parent::tr and ' +
+    'ancestor::table[1][count(tr | *[' + XP_SECTION + ']/tr) < 2])';
+  var XP_SCOPE_COL = '(@scope="col" or @scope="colgroup")';
+  var XP_SCOPE_ROW = '(@scope="row" or @scope="rowgroup")';
+  // An alt="" image is presentational unless a title, global ARIA attribute or
+  // tabindex makes it interesting again.
+  var XP_IMG_SHOWN = 'not(@alt) or string-length(@alt) > 0 or string-length(@title) > 0 or ' + xpGlobalAria(null) + ' or ' + XP_TABINDEX;
+
   var ROLE_NATIVE = {
-    button: [{ tag: 'button' }, { tag: 'input', typeIn: ['button', 'submit', 'reset', 'image', 'file'] }],
-    link: [{ tag: 'a', has: ['href'] }, { tag: 'area', has: ['href'] }],
-    checkbox: [{ tag: 'input', typeIn: ['checkbox'] }],
-    radio: [{ tag: 'input', typeIn: ['radio'] }],
-    textbox: [{ tag: 'textarea' }, { tag: 'input', typeNotIn: TEXTBOX_EXCLUDED, lacks: ['list'] }],
-    searchbox: [{ tag: 'input', typeIn: ['search'], lacks: ['list'] }],
+    button: [{ tag: 'button' }, { tag: 'input', types: ['button', 'submit', 'reset', 'image', 'file'] }],
+    link: [{ tag: 'a', css: '[href]', xp: '@href' }, { tag: 'area', css: '[href]', xp: '@href' }],
+    checkbox: [{ tag: 'input', types: ['checkbox'] }],
+    radio: [{ tag: 'input', types: ['radio'] }],
+    textbox: [{ tag: 'textarea' },
+      { tag: 'input', notTypes: TEXTBOX_EXCLUDED, xp: 'not(' + XP_DATALIST + ') or ' + xpTypeIn(LISTLESS_TEXT_TYPES) }],
+    searchbox: [{ tag: 'input', types: ['search'], css: ':not([list])', xp: 'not(@list)' }],
     combobox: [
-      { tag: 'select', lacks: ['multiple', 'size'] },
-      { tag: 'select', lacks: ['multiple'], typeAttr: 'size', typeIn: SELECT_SINGLE_SIZES },
-      { tag: 'input', typeIn: ['text', 'email', 'tel', 'url', 'search'], has: ['list'] }
+      { tag: 'select', css: ':not([multiple])', xp: 'not(@multiple) and ' + XP_SELECT_SINGLE },
+      { tag: 'input', css: '[list]', xp: '(' + xpTypeIn(['search']) + ' and @list) or (' + XP_DATALIST + ' and not(' + xpTypeIn(NON_TEXT_TYPES) + '))' }
     ],
-    listbox: [
-      { tag: 'select', has: ['multiple'] },
-      { tag: 'select', has: ['size'], typeAttr: 'size', typeNotIn: SELECT_SINGLE_SIZES },
-      { tag: 'datalist' }
-    ],
+    listbox: [{ tag: 'select', xp: '@multiple or not' + XP_SELECT_SINGLE }, { tag: 'datalist' }],
     option: [{ tag: 'option' }],
-    spinbutton: [{ tag: 'input', typeIn: ['number'] }],
-    slider: [{ tag: 'input', typeIn: ['range'] }],
+    spinbutton: [{ tag: 'input', types: ['number'] }],
+    slider: [{ tag: 'input', types: ['range'] }],
     heading: [{ tag: 'h1' }, { tag: 'h2' }, { tag: 'h3' }, { tag: 'h4' }, { tag: 'h5' }, { tag: 'h6' }],
-    // alt="" marks a decorative image, unless a title, tabindex or global ARIA
-    // attribute makes it interesting again.
-    img: [{ tag: 'img', notEmpty: 'alt' }, { tag: 'img', has: ['title'], notEmpty: 'title' },
-      { tag: 'img', anyAttr: ['tabindex'].concat(GLOBAL_ARIA) }, { tag: 'svg' }],
+    img: [{ tag: 'img', xp: XP_IMG_SHOWN }, { tag: 'svg' }],
     list: [{ tag: 'ul' }, { tag: 'ol' }, { tag: 'menu' }],
     listitem: [{ tag: 'li' }],
     table: [{ tag: 'table' }],
     row: [{ tag: 'tr' }],
     rowgroup: [{ tag: 'thead' }, { tag: 'tbody' }, { tag: 'tfoot' }],
-    cell: [{ tag: 'td' }],
-    gridcell: [{ tag: 'td', inGrid: true }],
-    columnheader: [
-      { tag: 'th', typeAttr: 'scope', typeIn: ['col', 'colgroup'] },
-      { tag: 'th', typeAttr: 'scope', typeNotIn: TH_SCOPES,
-        css: ':not(:has(+ ' + FILLED_TD_CSS + ')):not(' + FILLED_TD_CSS + ' + th)', xpath: 'not' + TH_BESIDE_FILLED_XPATH }
-    ],
-    rowheader: [
-      { tag: 'th', typeAttr: 'scope', typeIn: ['row', 'rowgroup'] },
-      { tag: 'th', typeAttr: 'scope', typeNotIn: TH_SCOPES, css: ':has(+ ' + FILLED_TD_CSS + ')', xpath: TH_BESIDE_FILLED_XPATH },
-      { tag: 'th', typeAttr: 'scope', typeNotIn: TH_SCOPES, pre: FILLED_TD_CSS + ' + ', xpath: TH_BESIDE_FILLED_XPATH }
-    ],
+    cell: [{ tag: 'td', xp: 'not(' + XP_IN_GRID + ')' }],
+    gridcell: [{ tag: 'td', xp: XP_IN_GRID }],
+    columnheader: [{ tag: 'th', xp: XP_SCOPE_COL + ' or (not' + XP_SCOPE_ROW + ' and not' + XP_TH_BESIDE_FILLED + ' and not' + XP_TH_LONE + ')' }],
+    rowheader: [{ tag: 'th', xp: XP_SCOPE_ROW + ' or (not' + XP_SCOPE_COL + ' and ' + XP_TH_BESIDE_FILLED + ')' }],
     navigation: [{ tag: 'nav' }],
     main: [{ tag: 'main' }],
     dialog: [{ tag: 'dialog' }],
-    form: [{ tag: 'form', has: ['aria-label'] }, { tag: 'form', has: ['aria-labelledby'] }],
-    region: [{ tag: 'section', has: ['aria-label'] }, { tag: 'section', has: ['aria-labelledby'] }],
-    banner: [{ tag: 'header' }],
-    contentinfo: [{ tag: 'footer' }],
+    form: [{ tag: 'form', css: ':is([aria-label], [aria-labelledby])', xp: '@aria-label or @aria-labelledby' }],
+    region: [{ tag: 'section', css: ':is([aria-label], [aria-labelledby])', xp: '@aria-label or @aria-labelledby' }],
+    banner: [{ tag: 'header', xp: XP_OUTSIDE_SECTIONING }],
+    contentinfo: [{ tag: 'footer', xp: XP_OUTSIDE_SECTIONING }],
     complementary: [{ tag: 'aside' }],
     article: [{ tag: 'article' }],
     group: [{ tag: 'fieldset' }, { tag: 'details' }, { tag: 'optgroup' }],
@@ -334,69 +409,88 @@
   }
 
   function nativeCss(n) {
-    var attrPart = '';
-    (n.has || []).forEach(function (a) { attrPart += '[' + a + ']'; });
-    (n.lacks || []).forEach(function (a) { attrPart += ':not([' + a + '])'; });
-    if (n.notEmpty) attrPart += ':not([' + n.notEmpty + '=""])';
-    var typeAttr = n.typeAttr || 'type';
-    (n.typeNotIn || []).forEach(function (t) { attrPart += ':not([' + typeAttr + '="' + t + '"])'; });
-    attrPart += (n.css || '') + ':not([role])';
-    var heads = [n.tag];
-    if (n.typeIn) {
-      heads = n.typeIn.map(function (t) { return n.tag + '[' + typeAttr + '="' + t + '"]'; });
-      if (n.typeIn.indexOf('text') !== -1) heads.unshift(n.tag + ':not([' + typeAttr + '])');
-    }
-    if (n.anyAttr) heads = [n.tag + ':is(' + n.anyAttr.map(function (a) { return '[' + a + ']'; }).join(', ') + ')'];
-    var prefixes = n.inGrid ? ['[role="grid"] ', '[role="treegrid"] '] : [n.pre || ''];
-    var out = [];
-    prefixes.forEach(function (p) { heads.forEach(function (h) { out.push(p + h + attrPart); }); });
-    return out;
+    var tail = n.css || '';
+    if (n.notTypes) tail = n.notTypes.map(function (t) { return ':not([type="' + t + '"])'; }).join('') + tail;
+    if (!n.types) return [n.tag + tail];
+    return n.types.map(function (t) { return n.tag + '[type="' + t + '"]' + tail; });
   }
 
+  // SVG and MathML elements are in their own namespaces: self::svg misses them.
+  function xpTag(tag) { return tag === 'svg' || tag === 'math' ? 'local-name(.)="' + tag + '"' : 'self::' + tag; }
+
   function nativeXpath(n) {
-    var parts = ['self::' + n.tag, 'not(@role)'];
-    // SVG and MathML elements are in their own namespaces: self::svg misses them.
-    if (n.tag === 'svg' || n.tag === 'math') parts[0] = 'local-name(.)="' + n.tag + '"';
-    var typeAttr = '@' + (n.typeAttr || 'type');
-    if (n.typeIn) {
-      var any = n.typeIn.map(function (t) { return typeAttr + '="' + t + '"'; });
-      if (n.typeIn.indexOf('text') !== -1) any.unshift('not(' + typeAttr + ')');
-      parts.push('(' + any.join(' or ') + ')');
-    }
-    (n.typeNotIn || []).forEach(function (t) { parts.push('not(' + typeAttr + '="' + t + '")'); });
-    (n.has || []).forEach(function (a) { parts.push('@' + a); });
-    (n.lacks || []).forEach(function (a) { parts.push('not(@' + a + ')'); });
-    // Spelled so that a missing attribute counts as "not empty" whether a node-set is
-    // compared existentially (XPath 1.0) or as its string value (jsdom, in tests).
-    if (n.notEmpty) parts.push('(not(@' + n.notEmpty + ') or @' + n.notEmpty + '!="")');
-    if (n.anyAttr) parts.push('(' + n.anyAttr.map(function (a) { return '@' + a; }).join(' or ') + ')');
-    if (n.inGrid) parts.push('ancestor::table[@role="grid" or @role="treegrid"]');
-    if (n.xpath) parts.push(n.xpath);
+    var parts = [xpTag(n.tag)];
+    if (n.types) parts.push(xpTypeIn(n.types));
+    if (n.notTypes) parts.push('not(' + xpTypeIn(n.notTypes) + ')');
+    if (n.xp) parts.push('(' + n.xp + ')');
+    if (OWNERS[n.tag]) parts.push('not(' + OWNERS[n.tag] + XP_PRESENTATIONAL_OWNER + ')');
     return '(' + parts.join(' and ') + ')';
   }
 
-  // An explicit role is matched as one token of the role attribute, so a fallback
-  // list (role="doc-tip note", role="foo checkbox") still matches. The engine takes
-  // the first *valid* token; CSS cannot tell a valid token from an unknown one, so an
-  // element listing an earlier valid role (role="switch checkbox") matches both.
-  function explicitRole(role, level) {
-    level = headingLevel(level);
-    return { css: '[role~="' + attrSel(role) + '"]' + (level ? '[aria-level="' + level + '"]' : ''),
-      xpath: '(contains(concat(" ", normalize-space(@role), " "), ' + xpathLiteral(' ' + role + ' ') + ')' +
-        (level ? ' and @aria-level="' + level + '"' : '') + ')' };
+  /** Whether one of these natives can take focus, by tag (natives of one kind share it). */
+  function xpNativesFocusable(natives) {
+    var tags = natives.map(function (n) { return n.tag; });
+    var controls = tags.filter(function (t) { return /^(button|select|textarea|input)$/.test(t); });
+    // Form controls only: one :disabled test; a hidden input needs a tabindex.
+    if (controls.length === tags.length) {
+      var hidden = '(not(@hidden) or ' + XP_TABINDEX + ')';
+      if (controls.indexOf('input') === -1) return 'not' + XP_DISABLED;
+      return 'not' + XP_DISABLED + ' and ' + (controls.length === 1 ? hidden : '(not(self::input) or ' + hidden + ')');
+    }
+    var groups = [];
+    natives.forEach(function (n) {
+      var f = xpFocusable(n.tag);
+      var g = groups.filter(function (x) { return x.f === f; })[0];
+      if (!g) groups.push(g = { f: f, tags: [] });
+      if (g.tags.indexOf(n.tag) === -1) g.tags.push(n.tag);
+    });
+    if (groups.length === 1) return groups[0].f;
+    return groups.map(function (g) {
+      return '((' + g.tags.map(xpTag).join(' or ') + ') and ' + g.f + ')';
+    }).join(' or ');
   }
 
+  // A role attribute's token, matched as one whitespace-separated word (CSS ~=). A
+  // heading's level is its tag's for <h1>–<h6>, else its aria-level.
+  function roleTokenCss(role, level) {
+    level = headingLevel(level);
+    return '[role~="' + attrSel(role) + '"]' + (level ? '[aria-level="' + level + '"]:not(h1, h2, h3, h4, h5, h6)' : '');
+  }
+  var XP_H1_6 = 'self::h1 or self::h2 or self::h3 or self::h4 or self::h5 or self::h6';
+  function xpLevel(level) {
+    var aria = '(not(' + XP_H1_6 + ') and number(@aria-level) = ' + level + ')';
+    return level <= 6 ? '(self::h' + level + ' or ' + aria + ')' : aria;
+  }
+
+  /** CSS selecting every element the engine may give `role` (Cypress filters them). */
   function roleCss(role, level) {
     var sels = [];
     roleNatives(role, level).forEach(function (n) { sels = sels.concat(nativeCss(n)); });
-    sels.push(explicitRole(role, level).css);
+    sels.push(roleTokenCss(role, level));
     return sels.join(', ');
   }
 
+  /** An XPath predicate true exactly for the elements the engine gives `role`. */
   function roleNodeXpath(role, level) {
-    var alts = roleNatives(role, level).map(nativeXpath);
-    alts.push(explicitRole(role, level).xpath);
-    return alts.join(' or ');
+    role = String(role == null ? '' : role);
+    // No role, or one that cannot be a single token, names nothing.
+    if (!role || /\s/.test(role)) return 'false()';
+    level = headingLevel(level);
+    var lv = level ? ' and ' + xpLevel(level) : '';
+    var first = '(' + XP_ROLE1 + '=' + xpathLiteral(role) + lv + ')';
+    var later = '(contains(concat(" ", ' + XP_ROLE + ', " "), ' + xpathLiteral(' ' + role + ' ') + ')' + lv + ')';
+    var natives = roleNatives(role, level);
+    // An unknown first token: a later R is the role, or (no later token) the native role.
+    var unknown = XP_NO_VALID_ROLE + ' and (' + later;
+    if (!natives.length) return first + ' or (' + unknown + '))';
+    var native = '(' + natives.map(nativeXpath).join(' or ') + ')';
+    var alone = 'not(contains(' + XP_ROLE + ', " "))';
+    // none/presentation: the native role still, where focus or a global ARIA attribute keeps it.
+    var kept = XP_PRESENTATIONAL + ' and (' + xpGlobalAria(role) + ' or ' + xpNativesFocusable(natives) + ')';
+    var a = first + ' or (' + unknown + ' or (' + alone + ' and ' + native + '))) or (' + kept + ' and ' + native + ')';
+    // The same, spelling the (long) native test once and the valid-role list twice.
+    var b = first + ' or (' + unknown + ')) or (' + native + ' and ((' + XP_NO_VALID_ROLE + ' and ' + alone + ') or (' + kept + ')))';
+    return a.length <= b.length ? a : b;
   }
 
   // ── accessible-name / label matching in XPath 1.0 (Selenium) ───────────────
@@ -558,6 +652,199 @@
     }).join('\n');
   }
 
+  // ── Cypress: the element-role helper emitted once per spec ──────────────────
+  // CSS cannot say which role an element ends up with (see roleCss()), so a Cypress
+  // role locator filters its candidates through locatraRole(), the engine's role
+  // function (Playwright's getAriaRole) for one element. Simple tag → role pairs
+  // come from IMPLICIT_TAG_ROLES; the rest is spelled out.
+  var CY_ROLE_NAME = 'locatraRole';
+  var IMPLICIT_TAG_ROLES = {
+    article: 'article', aside: 'complementary', blockquote: 'blockquote', button: 'button', caption: 'caption',
+    code: 'code', datalist: 'listbox', dd: 'definition', del: 'deletion', details: 'group', dfn: 'term',
+    dialog: 'dialog', dt: 'term', em: 'emphasis', fieldset: 'group', figure: 'figure', h1: 'heading', h2: 'heading',
+    h3: 'heading', h4: 'heading', h5: 'heading', h6: 'heading', hr: 'separator', html: 'document', ins: 'insertion',
+    li: 'listitem', main: 'main', mark: 'mark', math: 'math', menu: 'list', meter: 'meter', nav: 'navigation',
+    ol: 'list', optgroup: 'group', option: 'option', output: 'status', p: 'paragraph', progress: 'progressbar',
+    search: 'search', strong: 'strong', sub: 'subscript', sup: 'superscript', svg: 'img', table: 'table',
+    tbody: 'rowgroup', textarea: 'textbox', tfoot: 'rowgroup', thead: 'rowgroup', time: 'time', tr: 'row', ul: 'list'
+  };
+  var INPUT_TYPE_ROLES = { button: 'button', checkbox: 'checkbox', file: 'button', image: 'button', number: 'spinbutton',
+    radio: 'radio', range: 'slider', reset: 'button', submit: 'button' };
+  // A list spread over source lines of at most ~110 characters, so the helper stays
+  // readable: an array literal, or (str) a space-delimited string built with +.
+  function wrapWords(prefix, words, sep, open, close, str) {
+    var lines = [];
+    var cur = prefix + open;
+    words.forEach(function (w, i) {
+      var piece = w + (i < words.length - 1 ? sep : '');
+      if (cur.length + piece.length > 108) {
+        lines.push(str ? cur + "' +" : cur.replace(/\s+$/, ''));
+        cur = str ? "    '" : '    ';
+      }
+      cur += piece;
+    });
+    lines.push(cur + close);
+    return lines;
+  }
+  var CY_ROLE_SRC = [
+    '// Locatra: the ARIA role Playwright\'s getByRole gives an element: the first valid token',
+    '// of its role attribute, else its implicit role (which role="none"/"presentation" also',
+    '// leaves in place on an element that can take focus or has a global ARIA attribute).',
+    'function locatraRole(el$T{: Element})$T{: string | null} {'
+  ].concat(
+    wrapWords('  const VALID = ', VALID_ROLES, ' ', '\' ', ' \';', true),
+    wrapWords('  const GLOBAL = ', GLOBAL_ARIA.map(function (a) { return "'" + a + "'"; }), ', ', '[', '];'),
+    wrapWords('  const NAMELESS = ', NAMELESS_ROLES, ' ', '\' ', ' \';', true),
+    wrapWords('  const ROLES$T{: Record<string, string>} = ', Object.keys(IMPLICIT_TAG_ROLES).map(function (k) {
+      return k + ': \'' + IMPLICIT_TAG_ROLES[k] + '\'';
+    }), ', ', '{ ', ' };'),
+    wrapWords('  const INPUTS$T{: Record<string, string>} = ', Object.keys(INPUT_TYPE_ROLES).map(function (k) {
+      return k + ': \'' + INPUT_TYPE_ROLES[k] + '\'';
+    }), ', ', '{ ', ' };'),
+    [
+      '  // A presentational list, table or <dl> makes its items presentational too.',
+      '  const OWNERS$T{: Record<string, string[]>} = { dd: [\'dl\', \'div\'], div: [\'dl\'], dt: [\'dl\', \'div\'], li: [\'ol\', \'ul\'],',
+      '    tbody: [\'table\'], td: [\'tr\'], tfoot: [\'table\'], th: [\'tr\'], thead: [\'table\'], tr: [\'thead\', \'tbody\', \'tfoot\', \'table\'] };',
+      '  const has = (o$T{: object}, k$T{: string})$T{: boolean} => Object.prototype.hasOwnProperty.call(o, k);',
+      '  const tag = (e$T{: Element})$T{: string} => e.tagName.toLowerCase();',
+      '  const up = (e$T{: Element})$T{: Element | null} => {',
+      '    const p = e.parentNode;',
+      '    return e.parentElement || (p && p.nodeType === 11 ? (p$T{ as ShadowRoot}).host : null);',
+      '  };',
+      '  const closest = (e$T{: Element}, sel$T{: string})$T{: Element | null} => {',
+      '    let n$T{: Element | null} = e;',
+      '    while (n) {',
+      '      const c = n.closest(sel);',
+      '      if (c) return c;',
+      '      const r = n.getRootNode();',
+      '      n = r.nodeType === 11 ? (r$T{ as ShadowRoot}).host : null;',
+      '    }',
+      '    return null;',
+      '  };',
+      '  const first = (e$T{: Element})$T{: string | null} => (e.getAttribute(\'role\') || \'\').split(\' \').map((r) => r.trim())',
+      '    .find((r) => r !== \'\' && VALID.indexOf(\' \' + r + \' \') !== -1) || null;',
+      '  const aria = (e$T{: Element}, role$T{: string | null})$T{: boolean} => GLOBAL.some((a) => e.hasAttribute(a) &&',
+      '    !(a === \'aria-roledescription\' ? role === \'generic\' : a.indexOf(\'aria-label\') === 0 && NAMELESS.indexOf(\' \' + role + \' \') !== -1));',
+      '  const tabbable = (e$T{: Element})$T{: boolean} => !isNaN(Number(String(e.getAttribute(\'tabindex\'))));',
+      '  const focusable = (e$T{: Element})$T{: boolean} => {',
+      '    const t = tag(e);',
+      '    if (/^(button|input|select|textarea|option|optgroup)$/.test(t) && e.matches(\':disabled\')) return false;',
+      '    if (/^(button|details|select|textarea)$/.test(t) || (/^(a|area)$/.test(t) && e.hasAttribute(\'href\'))) return true;',
+      '    return (t === \'input\' && !(e$T{ as HTMLElement}).hidden) || tabbable(e);',
+      '  };',
+      '  const filled = (e$T{: Element | null})$T{: boolean} =>',
+      '    !!e && tag(e) === \'td\' && (!!(e.textContent || \'\').trim() || e.children.length > 0);',
+      '  const own = (e$T{: Element})$T{: string | null} => {',
+      '    const t = tag(e);',
+      '    if (has(ROLES, t)) return ROLES[t];',
+      '    if (t === \'a\' || t === \'area\') return e.hasAttribute(\'href\') ? \'link\' : null;',
+      '    if (t === \'form\' || t === \'section\') {',
+      '      if (!e.hasAttribute(\'aria-label\') && !e.hasAttribute(\'aria-labelledby\')) return null;',
+      '      return t === \'form\' ? \'form\' : \'region\';',
+      '    }',
+      '    if (t === \'header\' || t === \'footer\') {',
+      '      if (closest(e, \'article:not([role]), aside:not([role]), main:not([role]), nav:not([role]), section:not([role]), \' +',
+      '        \'[role=article], [role=complementary], [role=main], [role=navigation], [role=region]\')) return null;',
+      '      return t === \'header\' ? \'banner\' : \'contentinfo\';',
+      '    }',
+      '    if (t === \'img\') {',
+      '      const shown = e.getAttribute(\'alt\') !== \'\' || !!e.getAttribute(\'title\') || aria(e, null) || tabbable(e);',
+      '      return shown ? \'img\' : \'presentation\';',
+      '    }',
+      '    if (t === \'select\') return e.hasAttribute(\'multiple\') || (e$T{ as HTMLSelectElement}).size > 1 ? \'listbox\' : \'combobox\';',
+      '    if (t === \'td\') {',
+      '      const table = closest(e, \'table\');',
+      '      const r = table && first(table);',
+      '      return r === \'grid\' || r === \'treegrid\' ? \'gridcell\' : \'cell\';',
+      '    }',
+      '    if (t === \'th\') {',
+      '      const scope = e.getAttribute(\'scope\');',
+      '      if (scope === \'col\' || scope === \'colgroup\') return \'columnheader\';',
+      '      if (scope === \'row\' || scope === \'rowgroup\') return \'rowheader\';',
+      '      const next = e.nextElementSibling;',
+      '      const prev = e.previousElementSibling;',
+      '      if (!next && !prev) {',
+      '        const row = e.parentElement && tag(e.parentElement) === \'tr\' ? e.parentElement : null;',
+      '        const table = row && closest(row, \'table\');',
+      '        return table && (table$T{ as HTMLTableElement}).rows.length <= 1 ? null : \'columnheader\';',
+      '      }',
+      '      return filled(next) || filled(prev) ? \'rowheader\' : \'columnheader\';',
+      '    }',
+      '    if (t === \'input\') {',
+      '      const type = String((e$T{ as HTMLInputElement}).type || \'\').toLowerCase();',
+      '      if (type === \'search\') return e.hasAttribute(\'list\') ? \'combobox\' : \'searchbox\';',
+      '      if ([\'email\', \'tel\', \'text\', \'url\', \'\'].indexOf(type) !== -1) {',
+      '        // list= makes a combobox only when it names a <datalist>.',
+      '        const root$T{: any} = e.getRootNode();',
+      '        const ids = (e.getAttribute(\'list\') || \'\').split(\' \').filter((id) => id !== \'\');',
+      '        const list = ids.map((id) => (root.getElementById ? root.getElementById(id) : null)).find((n) => !!n);',
+      '        return list && tag(list) === \'datalist\' ? \'combobox\' : \'textbox\';',
+      '      }',
+      '      if (type === \'hidden\') return null;',
+      '      return has(INPUTS, type) ? INPUTS[type] : \'textbox\';',
+      '    }',
+      '    return null;',
+      '  };',
+      '  const implicit = (e$T{: Element})$T{: string | null} => {',
+      '    const r = own(e);',
+      '    if (!r) return null;',
+      '    let a = e;',
+      '    let p = up(e);',
+      '    while (p && has(OWNERS, tag(a)) && OWNERS[tag(a)].indexOf(tag(p)) !== -1) {',
+      '      const pr = first(p);',
+      '      if ((pr === \'none\' || pr === \'presentation\') && !(aria(p, pr) || focusable(p))) return pr;',
+      '      a = p;',
+      '      p = up(p);',
+      '    }',
+      '    return r;',
+      '  };',
+      '  const role = first(el);',
+      '  if (!role) return implicit(el);',
+      '  if (role === \'none\' || role === \'presentation\') {',
+      '    const i = implicit(el);',
+      '    if (aria(el, i) || focusable(el)) return i;',
+      '  }',
+      '  return role;',
+      '}'
+    ]
+  );
+  function cyRoleSource(lang) {
+    var ts = lang === 'typescript';
+    return CY_ROLE_SRC.map(function (l) {
+      return l.replace(/\$T\{([^}]*)\}/g, function (m, t) { return ts ? t : ''; });
+    }).join('\n');
+  }
+  // The index-th <iframe>, shadow roots included, as a jQuery subject for .its().
+  var CY_FRAME_NAME = 'locatraFrame';
+  var CY_FRAME_SRC = [
+    '// Locatra: the index-th <iframe> of a document in the order the recorder counts them',
+    '// (the document\'s own, then each open shadow root\'s), which cy.get(\'iframe\') cannot see.',
+    'function locatraFrame(doc$T{: Document}, index$T{: number})$T{: JQuery<HTMLIFrameElement>} {',
+    '  const frames$T{: HTMLIFrameElement[]} = [];',
+    '  const walk = (root$T{: Document | ShadowRoot})$T{: void} => {',
+    '    frames.push(...Array.from(root.querySelectorAll(\'iframe\')));',
+    '    root.querySelectorAll(\'*\').forEach((el) => {',
+    '      if (el.shadowRoot) walk(el.shadowRoot);',
+    '    });',
+    '  };',
+    '  walk(doc);',
+    '  if (!frames[index]) throw new Error(\'Locatra: no iframe at index \' + index);',
+    '  return Cypress.$(frames[index]);',
+    '}'
+  ];
+  function cyFrameSource(lang) {
+    var ts = lang === 'typescript';
+    return CY_FRAME_SRC.map(function (l) {
+      return l.replace(/\$T\{([^}]*)\}/g, function (m, t) { return ts ? t : ''; });
+    }).join('\n');
+  }
+  function usesCyFrame(stmts) {
+    return new RegExp('\\b' + CY_FRAME_NAME + '\\(').test(stmts.join('\n'));
+  }
+  function usesCyRole(stmts) {
+    return new RegExp('\\b' + CY_ROLE_NAME + '\\(').test(stmts.join('\n'));
+  }
+
   // ── Cypress: reading a secret, emitted once per spec when a step needs it ────
   // Cypress 16 removed Cypress.env(); cy.env() (added in Cypress 15) replaces it but
   // does not exist in older versions. The helper uses whichever this Cypress has and
@@ -587,14 +874,18 @@
   /** The helpers a set of Cypress statements calls, as source lines to prepend. */
   function cyHelpers(stmts, lang) {
     var out = [];
+    if (usesCyRole(stmts)) out.push(cyRoleSource(lang));
+    if (usesCyFrame(stmts)) out.push(cyFrameSource(lang));
     if (usesCyHelper(stmts)) out.push(cyHelperSource(lang));
     if (usesCySecret(stmts)) out.push(cySecretSource(lang));
     return out;
   }
 
+  function cyMatchCall(kind, text, exact, lang) {
+    return CY_HELPER_NAME + '(el, ' + q(kind, lang) + ', ' + q(normText(text), lang) + (exact ? ', true' : '') + ')';
+  }
   function cyFilter(kind, text, exact, lang) {
-    return '.filter((_, el) => ' + CY_HELPER_NAME + '(el, ' + q(kind, lang) + ', ' + q(normText(text), lang) +
-      (exact ? ', true' : '') + '))';
+    return '.filter((_, el) => ' + cyMatchCall(kind, text, exact, lang) + ')';
   }
 
   // Regex literal for an exact cy.contains(): whole (whitespace-trimmed) text only.
@@ -702,10 +993,14 @@
       case 'testid': return 'cy.get(' + q('[' + cssIdent(t.attr) + '="' + attrSel(t.value) + '"]', lang) + ')';
       case 'role': {
         var expr = 'cy.get(' + q(roleCss(t.role, t.level), lang) + ')';
+        // The CSS selects candidates; locatraRole() keeps those that have the role.
         // .contains(name) used to yield the deepest element containing the text — a
         // <span> inside the button, never an <input> named by its <label>, and never
         // something a chained .find() could continue from. Filter by accessible name.
-        if (t.name) expr += cyFilter('name', t.name, t.exact, lang);
+        var keep = [];
+        if (VALID_ROLES.indexOf(t.role) !== -1) keep.push(CY_ROLE_NAME + '(el) === ' + q(t.role, lang));
+        if (t.name) keep.push(cyMatchCall('name', t.name, t.exact, lang));
+        if (keep.length) expr += '.filter((_, el) => ' + keep.join(' && ') + ')';
         if (hasNth(t)) expr += '.eq(' + t.nth + ')';
         else if (isAmbiguousRole(t)) expr += '.first()';
         return expr;
@@ -754,8 +1049,8 @@
     switch (t.kind) {
       case 'testid': return selFind('css', '[' + cssIdent(t.attr) + '="' + attrSel(t.value) + '"]', lang);
       case 'role':
-        if (t.name || hasNth(t)) return selFind('xpath', roleXpath(t, rel), lang);
-        return selFind('css', roleCss(t.role, t.level), lang);
+        // XPath, named or not: CSS cannot say which role an element ends up with.
+        return selFind('xpath', roleXpath(t, rel), lang);
       case 'label': return selFind('xpath', axis + '[' + labelXpath(t.value, t.exact) + ']', lang);
       case 'placeholder': return selFind('css', attrMatchSel('placeholder', t.value, t.exact), lang);
       case 'altText': return selFind('css', attrMatchSel('alt', t.value, t.exact), lang);
@@ -807,11 +1102,10 @@
     var frames = [];
     var t = target;
     while (t && t.kind === 'frame') {
-      // index: position among the parent's <iframe> elements (Playwright, Cypress,
-      // WebdriverIO); framesIndex: position in window.frames (Selenium), when known.
+      // index: position among the parent document's <iframe> elements, shadow roots
+      // included (DEEP_IFRAME_JS). framesIndex is not used: window.frames order is
+      // what geckodriver counts, but ChromeDriver counts /html/body//iframe instead.
       var f = { selector: t.selector, index: nonNegInt(t.index, 0) };
-      var framesIndex = nonNegInt(t.framesIndex, -1);
-      if (framesIndex >= 0) f.framesIndex = framesIndex;
       if (t.selector && validShadowPath(t.shadowPath)) f.shadowPath = t.shadowPath;
       frames.push(f);
       t = t.child;
@@ -819,10 +1113,23 @@
     return { frames: frames, inner: t || null };
   }
 
-  /** The frame index Selenium's switchTo().frame(i) takes: window.frames order when known. */
+  /**
+   * The position DEEP_IFRAME_JS looks a frame up by. Selenium is never handed a bare
+   * number: ChromeDriver resolves switchTo().frame(i) as (/html/body//iframe |
+   * /html/frameset//frame)[i+1] and geckodriver as window.frames[i], so the same
+   * number means different frames, and neither reaches an <iframe> in shadow DOM.
+   */
   function seleniumFrameIndex(frame) {
-    return frame.framesIndex != null ? frame.framesIndex : frame.index;
+    return frame.index;
   }
+
+  // The index-th <iframe> of the current document in the order the recorder counts
+  // them (the engine's deepQueryAll): the document's own, then each open shadow
+  // root's, depth first in document order. Run with executeScript(DEEP_IFRAME_JS, i)
+  // (WebDriver passes i as arguments[0]); it throws when there is no such frame.
+  var DEEP_IFRAME_JS = "const frames = []; const walk = (root) => { frames.push(...root.querySelectorAll('iframe')); " +
+    "root.querySelectorAll('*').forEach((el) => { if (el.shadowRoot) walk(el.shadowRoot); }); }; walk(document); " +
+    "if (!frames[arguments[0]]) throw new Error('Locatra: no iframe at index ' + arguments[0]); return frames[arguments[0]];";
 
   function validShadowPath(p) {
     if (!Array.isArray(p) || p.length < 2) return false;
@@ -833,9 +1140,10 @@
   function frameEnterExpr(frame, fw, lang) {
     var sel = frame.selector;
     if (fw === 'cypress') {
+      // Without a selector, the index-th <iframe> counting shadow roots (locatraFrame()).
       var base = sel
         ? 'cy.get(' + q(sel, lang) + ')'
-        : "cy.get('iframe').eq(" + frame.index + ')';
+        : 'cy.document().then((doc) => ' + CY_FRAME_NAME + '(doc, ' + frame.index + '))';
       if (frame.shadowPath) {
         // cy.get/find stay inside one tree (and includeShadowDom matches a selector
         // within a single root, not a path across several), so step host by host.
@@ -864,6 +1172,12 @@
     var expr = '';
     for (var i = 0; i < peeled.frames.length; i++) {
       var enter = frameEnterExpr(peeled.frames[i], fw, lang);
+      if (expr && /^cy\.document\(\)/.test(enter)) {
+        // Inside a frame: look in the document of the body the chain yields.
+        // (cy.wrap yields an untyped subject, so TypeScript is told what it is.)
+        var body = lang === 'typescript' ? '(body as JQuery<HTMLElement>)' : 'body';
+        enter = enter.replace(/^cy\.document\(\)\.then\(\(doc\) => (\w+)\(doc, /, '.then((body) => $1(' + body + '[0].ownerDocument, ');
+      }
       expr = expr ? expr + enter.replace(/^cy\.get\(/, '.find(').replace(/^page\./, '.') : enter;
     }
     var child = locatorExpr(peeled.inner, fw, lang);
@@ -1460,8 +1774,10 @@
       var el = selFind('css', frame.selector, lang);
       return py ? 'driver.switch_to.frame(' + el + ')' : 'await driver.switchTo().frame(' + el + ');';
     }
-    var idx = seleniumFrameIndex(frame);
-    return py ? 'driver.switch_to.frame(' + idx + ')' : 'await driver.switchTo().frame(' + idx + ');';
+    // No selector (a cross-origin frame): the frame element, by its position.
+    var js = q(DEEP_IFRAME_JS, lang) + ', ' + seleniumFrameIndex(frame);
+    return py ? 'driver.switch_to.frame(driver.execute_script(' + js + '))'
+      : 'await driver.switchTo().frame(await driver.executeScript(' + js + '));';
   }
 
   function selPress(value, lang) {
@@ -1632,6 +1948,26 @@
   // against the same environment variable the field's fill reads.
   function sensitiveAssert(step) { return !!step.sensitive && step.assertType === 'toHaveValue'; }
 
+  // A sensitive comparison never prints the secret: not in an assertion's failure
+  // message, and not in Cypress's command log (which also lands in videos).
+  function secretMismatch(step) { return 'the value does not match ' + secretName(step); }
+
+  // Playwright's toHaveValue prints the expected value (the secret) when it fails, in
+  // the CI log and the HTML report. JS/TS polls a yes/no comparison instead, so the
+  // report shows only the message and true/false, with the same retrying and timeout;
+  // Python keeps the native retrying assertion and replaces its message (from None
+  // drops the original from the traceback).
+  function pwSecretAssert(step, loc, lang) {
+    var secret = secretExpr(step, 'playwright', lang);
+    var msg = q(secretMismatch(step), lang);
+    if (lang === 'python') {
+      return 'try:\n    expect(' + loc + ').to_have_value(' + secret + ')\n' +
+        'except AssertionError:\n    raise AssertionError(' + msg + ') from None';
+    }
+    return 'await expect.poll(async () => (await ' + loc + '.inputValue()) === (' + secret + '), ' +
+      '{ message: ' + msg + ' }).toBe(true);';
+  }
+
   // Text assertions: the recorder takes an element's text from innerText (what is
   // rendered, white space normalised), while Playwright's toHaveText/toContainText
   // compare textContent unless told otherwise — hidden text, <script> content and the
@@ -1642,13 +1978,13 @@
     var t = step.assertType || 'toBeVisible';
     var v = step.value;
     var unchecked = t === 'toBeChecked' && String(v) === 'false';
-    var expectedValue = sensitiveAssert(step) ? secretExpr(step, 'playwright', lang) : q(v, lang);
+    if (sensitiveAssert(step)) return pwSecretAssert(step, loc, lang);
     if (py) {
       var pmap = {
         toBeVisible: 'to_be_visible()',
         toHaveText: 'to_have_text(' + q(v, lang) + ', use_inner_text=True)',
         toContainText: 'to_contain_text(' + q(v, lang) + ', use_inner_text=True)',
-        toHaveValue: 'to_have_value(' + expectedValue + ')',
+        toHaveValue: 'to_have_value(' + q(v, lang) + ')',
         toBeEnabled: 'to_be_enabled()',
         toBeChecked: unchecked ? 'not_to_be_checked()' : 'to_be_checked()'
       };
@@ -1658,16 +1994,12 @@
       toBeVisible: 'toBeVisible()',
       toHaveText: 'toHaveText(' + q(v, lang) + ', { useInnerText: true })',
       toContainText: 'toContainText(' + q(v, lang) + ', { useInnerText: true })',
-      toHaveValue: 'toHaveValue(' + expectedValue + ')',
+      toHaveValue: 'toHaveValue(' + q(v, lang) + ')',
       toBeEnabled: 'toBeEnabled()',
       toBeChecked: unchecked ? 'not.toBeChecked()' : 'toBeChecked()'
     };
     return 'await expect(' + loc + ').' + (jmap[t] || 'toBeVisible()') + ';';
   }
-
-  // A sensitive comparison never prints the secret: not in an assertion's failure
-  // message, and not in Cypress's command log (which also lands in videos).
-  function secretMismatch(step) { return 'the value does not match ' + secretName(step); }
 
   // Cypress's have.text compares raw textContent, so indentation and newlines in the
   // markup failed a text the user can see is identical. Compare the rendered text
@@ -2346,7 +2678,9 @@
       });
     });
     var all = body.join('\n');
-    var helper = usesCyHelper([all]) ? cyHelperSource(lang) + '\n\n' : '';
+    var helper = (usesCyRole([all]) ? cyRoleSource(lang) + '\n\n' : '') +
+      (usesCyFrame([all]) ? cyFrameSource(lang) + '\n\n' : '') +
+      (usesCyHelper([all]) ? cyHelperSource(lang) + '\n\n' : '');
     return poHeader(model, lang, info.skipped) + helper + 'export class ' + cls + ' {\n' + block(body, '  ') + '\n}\n';
   }
 
@@ -2398,12 +2732,14 @@
       escapeControls: escapeControls, attrSel: attrSel, normWs: normWs, normText: normText, cssIdent: cssIdent,
       // numeric target fields, validated before they are emitted as code (C4)
       headingLevel: headingLevel, nonNegInt: nonNegInt, seleniumFrameIndex: seleniumFrameIndex,
+      DEEP_IFRAME_JS: DEEP_IFRAME_JS, cyFrameSource: cyFrameSource,
       // multi-select (C1), sensitive assertions (C2), open shadow DOM (C3)
       multiValues: multiValues, sensitiveAssert: sensitiveAssert, secretMismatch: secretMismatch,
       shadowOf: shadowOf, lacksShadowCss: lacksShadowCss, SHADOW_NOTE: SHADOW_NOTE, xpNorm: xpNorm,
       xpathLiteral: xpathLiteral, roleCss: roleCss, roleNodeXpath: roleNodeXpath, nameXpath: nameXpath,
       labelXpath: labelXpath, textXpath: textXpath, xpMatch: xpMatch, attrMatchSel: attrMatchSel,
-      explicitRole: explicitRole, roleNatives: roleNatives, LABELLED_ROLES: LABELLED_ROLES,
+      roleNatives: roleNatives, NATIVE_ROLES: Object.keys(ROLE_NATIVE), VALID_ROLES: VALID_ROLES,
+      cyRoleSource: cyRoleSource, LABELLED_ROLES: LABELLED_ROLES,
       PLACEHOLDER_ROLES: PLACEHOLDER_ROLES, ALT_ROLES: ALT_ROLES, LABELABLE_XPATH: LABELABLE_XPATH,
       LABELABLE_CSS: LABELABLE_CSS, unwrapFrames: unwrapFrames, validShadowPath: validShadowPath,
       hasNth: hasNth, isAmbiguousRole: isAmbiguousRole, hasAmbiguousRole: hasAmbiguousRole,

@@ -331,7 +331,7 @@ describe('M6 / C4: numeric target fields never become code', () => {
     Infinity,
     -1,
     0,
-    7,
+    100,
     2.5,
     '',
     null,
@@ -339,7 +339,7 @@ describe('M6 / C4: numeric target fields never become code', () => {
     '3x',
   ];
 
-  it('emits a heading level only when it is an integer 1-6', () => {
+  it('emits a heading level only when it is an integer 1-99', () => {
     for (const level of HOSTILE) {
       for (const [fw, lang] of ALL) {
         for (const t of [role('heading', 'x', { level }), role('heading', null, { level })]) {
@@ -353,6 +353,13 @@ describe('M6 / C4: numeric target fields never become code', () => {
     expect(C.locatorExpr(role('heading', 'x', { level: 3 }), 'playwright', 'typescript')).toBe(
       "page.getByRole('heading', { name: 'x', level: 3 })"
     );
+    // The engine records any aria-level of 1 or more on role="heading".
+    expect(C.locatorExpr(role('heading', 'x', { level: 7 }), 'playwright', 'typescript')).toBe(
+      "page.getByRole('heading', { name: 'x', level: 7 })"
+    );
+    expect(C.locatorExpr(role('heading', 'x', { level: '42' }), 'playwright', 'python')).toBe(
+      'page.get_by_role("heading", name="x", level=42)'
+    );
     expect(C.locatorExpr(role('heading', 'x', { level: '2' }), 'playwright', 'python')).toBe(
       'page.get_by_role("heading", name="x", level=2)'
     );
@@ -363,7 +370,8 @@ describe('M6 / C4: numeric target fields never become code', () => {
       'page.getByRole(AriaRole.HEADING, new Page.GetByRoleOptions().setLevel(4))'
     );
     expect(C.locatorExpr(role('heading', null, { level: 2 }), 'cypress', 'javascript')).toBe(
-      'cy.get(\'h2:not([role]), [role~="heading"][aria-level="2"]\').first()'
+      'cy.get(\'h2, [role~="heading"][aria-level="2"]:not(h1, h2, h3, h4, h5, h6)\')' +
+        ".filter((_, el) => locatraRole(el) === 'heading').first()"
     );
   });
 
@@ -375,33 +383,44 @@ describe('M6 / C4: numeric target fields never become code', () => {
         for (const [fw, lang] of ALL) {
           const code = stmt({ action: 'click', target }, fw, lang);
           expect(code, `${fw}/${lang}`).not.toMatch(/PWNED|NaN|Infinity|-1|2\.5|\[object/);
-          expect(code).toMatch(
-            /nth=0|eq\(0\)|frame\(0\)|Frame\(0\)|\[0\]|frame_locator|FrameLocator|frameLocator/
-          );
+          expect(code).toMatch(/nth=0|, 0\)|frame_locator|FrameLocator|frameLocator/);
         }
       }
     }
   });
 
-  it('switches Selenium by framesIndex when known, everything else by index (C4)', () => {
+  // ChromeDriver resolves switchTo().frame(n) as (/html/body//iframe | /html/frameset//frame)[n+1],
+  // geckodriver as window.frames[n]: a bare number is a different frame per browser, and
+  // never one inside shadow DOM. Every target finds the frame element itself instead.
+  it('finds a selector-less frame by index, as an element, in every framework (never framesIndex)', () => {
+    const I = C._internals;
     const target = { kind: 'frame', selector: null, index: 1, framesIndex: 3, child: testid('x') };
     const click = (fw, lang) => stmt({ action: 'click', target }, fw, lang).split('\n');
-    expect(click('selenium', 'javascript')[0]).toBe('await driver.switchTo().frame(3);');
-    expect(click('selenium', 'python')[0]).toBe('driver.switch_to.frame(3)');
-    expect(click('selenium', 'java')[0]).toBe('driver.switchTo().frame(3);');
-    expect(click('selenium', 'csharp')[0]).toBe('driver.SwitchTo().Frame(3);');
+    const js = (lang) => C.q(I.DEEP_IFRAME_JS, lang);
+    expect(click('selenium', 'javascript')[0]).toBe(
+      `await driver.switchTo().frame(await driver.executeScript(${js('javascript')}, 1));`
+    );
+    expect(click('selenium', 'python')[0]).toBe(
+      `driver.switch_to.frame(driver.execute_script(${js('python')}, 1))`
+    );
+    expect(click('selenium', 'java')[0]).toBe(
+      `driver.switchTo().frame((WebElement) ((JavascriptExecutor) driver).executeScript(${JSON.stringify(I.DEEP_IFRAME_JS)}, 1));`
+    );
+    expect(click('selenium', 'csharp')[0]).toBe(
+      `driver.SwitchTo().Frame((IWebElement)((IJavaScriptExecutor)driver).ExecuteScript(${JSON.stringify(I.DEEP_IFRAME_JS)}, 1)!);`
+    );
     expect(click('playwright', 'typescript')[0]).toContain("frameLocator('iframe >> nth=1')");
-    expect(click('cypress', 'javascript').pop()).toContain("cy.get('iframe').eq(1)");
-    expect(click('webdriverio', 'javascript')[0]).toBe("await browser.switchFrame($$('iframe')[1]);");
-    // A string of digits is a number; anything else falls back to index.
-    const t2 = { ...target, framesIndex: '2' };
-    expect(stmt({ action: 'click', target: t2 }, 'selenium', 'python').split('\n')[0]).toBe(
-      'driver.switch_to.frame(2)'
+    expect(click('cypress', 'javascript').pop()).toContain(
+      'cy.document().then((doc) => locatraFrame(doc, 1))'
     );
-    const t3 = { ...target, framesIndex: -2 };
-    expect(stmt({ action: 'click', target: t3 }, 'selenium', 'python').split('\n')[0]).toBe(
-      'driver.switch_to.frame(1)'
+    expect(click('webdriverio', 'javascript')[0]).toBe(
+      `await browser.switchFrame($(await browser.execute(${js('javascript')}, 1)));`
     );
+    expect(click('webdriverio', 'typescript')[0]).toBe(
+      `await browser.switchFrame($(await browser.execute<HTMLIFrameElement, [number]>(${js('typescript')}, 1)));`
+    );
+    for (const [fw, lang] of ALL)
+      expect(stmt({ action: 'click', target }, fw, lang), `${fw}/${lang}`).not.toMatch(/\b3\b/);
     // A frame with a selector is still entered by its element.
     const t4 = { ...target, selector: '#pay' };
     expect(stmt({ action: 'click', target: t4 }, 'selenium', 'java').split('\n')[0]).toBe(
@@ -409,7 +428,7 @@ describe('M6 / C4: numeric target fields never become code', () => {
     );
     // Page objects use the same switch.
     const po = C.pageObject({ elements: [{ name: 'x', kind: 'button', target }] }, 'selenium', 'python');
-    expect(po).toContain('self.driver.switch_to.frame(3)');
+    expect(po).toContain(`self.driver.switch_to.frame(self.driver.execute_script(${js('python')}, 1))`);
   });
 
   it('falls back to the default viewport for anything but a positive finite size', () => {
@@ -528,12 +547,29 @@ describe('C2: sensitive toHaveValue assertions', () => {
 
   it('reads the environment variable, never the value, in every target', () => {
     const want = {
-      'playwright/typescript': "await expect(page.getByTestId('pw')).toHaveValue(process.env.MY_PW ?? '');",
-      'playwright/python': 'expect(page.get_by_test_id("pw")).to_have_value(os.environ.get("MY_PW", ""))',
+      'playwright/typescript':
+        "await expect.poll(async () => (await page.getByTestId('pw').inputValue()) === (process.env.MY_PW ?? ''), " +
+        "{ message: 'the value does not match MY_PW' }).toBe(true);",
+      'playwright/javascript':
+        "await expect.poll(async () => (await page.getByTestId('pw').inputValue()) === (process.env.MY_PW ?? ''), " +
+        "{ message: 'the value does not match MY_PW' }).toBe(true);",
+      'playwright/python':
+        'try:\n' +
+        '    expect(page.get_by_test_id("pw")).to_have_value(os.environ.get("MY_PW", ""))\n' +
+        'except AssertionError:\n' +
+        '    raise AssertionError("the value does not match MY_PW") from None',
       'playwright/java':
-        'assertThat(page.getByTestId("pw")).hasValue(System.getenv().getOrDefault("MY_PW", ""));',
+        'try {\n' +
+        '    assertThat(page.getByTestId("pw")).hasValue(System.getenv().getOrDefault("MY_PW", ""));\n' +
+        '} catch (AssertionError e) {\n' +
+        '    throw new AssertionError("the value does not match MY_PW");\n' +
+        '}',
       'playwright/csharp':
-        'await Expect(Page.GetByTestId("pw")).ToHaveValueAsync(Environment.GetEnvironmentVariable("MY_PW") ?? "");',
+        'try\n{\n' +
+        '    await Expect(Page.GetByTestId("pw")).ToHaveValueAsync(Environment.GetEnvironmentVariable("MY_PW") ?? "");\n' +
+        '}\ncatch (PlaywrightException)\n{\n' +
+        '    throw new PlaywrightException("the value does not match MY_PW");\n' +
+        '}',
       'selenium/javascript':
         "assert.ok((await driver.findElement(By.css('[data-testid=\"pw\"]')).getAttribute('value')) === " +
         "(process.env.MY_PW ?? ''), 'the value does not match MY_PW');",
@@ -593,6 +629,107 @@ describe('C2: sensitive toHaveValue assertions', () => {
     await expect(run('hunter2')).resolves.toBeUndefined();
     const err = await run('wrong').catch((e) => e);
     expect(String(err.message)).toBe('the value does not match MY_PW');
+  });
+
+  // Playwright's toHaveValue prints the expected value when it fails; every Playwright
+  // language either compares yes/no (JS/TS expect.poll) or keeps the native retrying
+  // assertion and replaces its failure with one that names only the variable.
+  it('a Playwright JS failure is retried and never prints the secret', async () => {
+    const run = async (values) => {
+      const seen = { calls: 0 };
+      let i = 0;
+      const loc = { inputValue: async () => values[Math.min(i++, values.length - 1)] };
+      const expectFn = () => {
+        throw new Error('the native toHaveValue must not be used');
+      };
+      // The real expect.poll retries the generator until toBe passes or the timeout.
+      expectFn.poll = (gen, opts) => ({
+        toBe: async (want) => {
+          seen.opts = opts;
+          seen.want = want;
+          for (let n = 0; n < 5; n++) {
+            seen.calls++;
+            const got = await gen();
+            seen.got = got;
+            if (got === want) return;
+          }
+          throw new Error(`${opts.message}\n\nExpected: ${want}\nReceived: ${seen.got}`);
+        },
+      });
+      const err = await new Function(
+        'expect',
+        'page',
+        'process',
+        `return (async () => { ${stmt(step, 'playwright', 'typescript')} })();`
+      )(expectFn, { getByTestId: () => loc }, { env: { MY_PW: 'hunter2' } }).catch((e) => e);
+      return { err, seen };
+    };
+    const ok = await run(['', 'hunt', 'hunter2']);
+    expect(ok.err).toBeUndefined();
+    expect(ok.seen.calls).toBe(3);
+    expect(ok.seen.want).toBe(true);
+    const bad = await run(['wrong']);
+    expect(bad.seen.calls).toBe(5);
+    expect(bad.seen.got).toBe(false);
+    expect(bad.seen.opts).toEqual({ message: 'the value does not match MY_PW' });
+    expect(String(bad.err.message)).toContain('MY_PW');
+    expect(String(bad.err.message)).not.toContain('hunter2');
+  });
+
+  it('a Playwright Python failure keeps the native assertion and never prints the secret', () => {
+    let python = true;
+    try {
+      execFileSync('python3', ['--version'], { stdio: 'pipe' });
+    } catch {
+      python = false;
+    }
+    if (!python) return;
+    // A stand-in for playwright.sync_api.expect: its failure names the expected value,
+    // as the real one does.
+    const py = (actual) =>
+      [
+        'import os',
+        'class A:',
+        '    def __init__(self, v): self.v = v',
+        '    def to_have_value(self, want):',
+        '        if self.v != want: raise AssertionError(f"Locator expected to have Value \'{want}\'")',
+        'def expect(loc): return A(loc)',
+        'class P:',
+        `    def get_by_test_id(self, _): return ${JSON.stringify(actual)}`,
+        'page = P()',
+        stmt(step, 'playwright', 'python'),
+      ].join('\n');
+    const env = { ...process.env, MY_PW: 'hunter2' };
+    expect(() => execFileSync('python3', ['-I', '-c', py('hunter2')], { stdio: 'pipe', env })).not.toThrow();
+    let out = '';
+    try {
+      execFileSync('python3', ['-I', '-c', py('wrong')], { stdio: 'pipe', env });
+    } catch (err) {
+      out = String(err.stderr);
+    }
+    expect(out).toContain('AssertionError: the value does not match MY_PW');
+    expect(out).not.toContain('hunter2');
+    expect(out).not.toContain('Locator expected');
+  });
+
+  it('Java and C# keep the native retrying assertion inside, and rethrow without the cause', () => {
+    const java = stmt(step, 'playwright', 'java');
+    expect(java).toContain(
+      'assertThat(page.getByTestId("pw")).hasValue(System.getenv().getOrDefault("MY_PW", ""));'
+    );
+    expect(java).toMatch(/throw new AssertionError\("the value does not match MY_PW"\);/);
+    expect(java).not.toMatch(/AssertionError\([^)]*, e\)|initCause/);
+    const cs = stmt(step, 'playwright', 'csharp');
+    expect(cs).toContain('await Expect(Page.GetByTestId("pw")).ToHaveValueAsync(');
+    expect(cs).toContain('catch (PlaywrightException)\n');
+    expect(cs).toContain('throw new PlaywrightException("the value does not match MY_PW");');
+    // The whole scripts still bring in what the statements use.
+    expect(C.testScript([step], 'playwright', 'csharp')).toContain('using Microsoft.Playwright;');
+    for (const lang of ['typescript', 'javascript', 'python', 'java', 'csharp']) {
+      const code = C.testScript([step], 'playwright', lang);
+      expect(code, lang).not.toContain('hunter2');
+      expect(code, lang).toContain('the value does not match MY_PW');
+    }
   });
 
   it('leaves non-sensitive toHaveValue and a sensitive non-value assertion alone', () => {

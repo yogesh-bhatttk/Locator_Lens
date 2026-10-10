@@ -83,8 +83,8 @@
     switch (t.kind) {
       case 'testid': return find('css', '[' + I.cssIdent(t.attr) + '="' + I.attrSel(t.value) + '"]', lang);
       case 'role':
-        if (t.name || I.hasNth(t)) return find('xpath', roleXpath(t, rel), lang);
-        return find('css', I.roleCss(t.role, t.level), lang);
+        // XPath, named or not: CSS cannot say which role an element ends up with.
+        return find('xpath', roleXpath(t, rel), lang);
       case 'label': return find('xpath', axis + '[' + I.labelXpath(t.value, t.exact) + ']', lang);
       case 'placeholder': return find('css', I.attrMatchSel('placeholder', t.value, t.exact), lang);
       case 'altText': return find('css', I.attrMatchSel('alt', t.value, t.exact), lang);
@@ -137,8 +137,12 @@
       return expr;
     }
     if (frame.selector) return find('css', frame.selector, lang);
-    // A cross-origin frame has no readable selector: address it by position.
-    return "$$('iframe')[" + frame.index + ']';
+    // A cross-origin frame has no readable selector: address it by its position
+    // among the page's <iframe>s, shadow roots included ($$('iframe') sees only the
+    // document's own), as codegen.js DEEP_IFRAME_JS counts them. execute() hands back
+    // a bare element reference, which switchFrame() refuses; $() makes it an element.
+    return '$(await browser.execute' + (lang === 'typescript' ? '<HTMLIFrameElement, [number]>' : '') + '(' +
+      q(I.DEEP_IFRAME_JS, lang) + ', ' + frame.index + '))';
   }
 
   function frameSwitch(frame, lang) {
