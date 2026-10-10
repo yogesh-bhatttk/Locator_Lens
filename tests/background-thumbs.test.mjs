@@ -12,6 +12,7 @@ import {
   WINDOW,
   fakeIndexedDB,
   flush,
+  imageApis,
   memoryThumbs,
   setWaiter,
   startWorker,
@@ -108,6 +109,159 @@ describe('step screenshots: capture', () => {
     await flush(30);
     expect(w.captures).toEqual([]);
     expect(thumbsOf(w)).toEqual([]);
+  });
+
+  it('a sensitive step cancels a capture already queued for its tab (the paste after a clean click)', async () => {
+    const w = startWorker();
+    record(w, step()); // the first capture goes now…
+    await until(() => w.captures.length === 1);
+    record(w, step({ action: 'click' })); // …this one waits for the next slot
+    record(w, step({ action: 'fill', value: '', sensitive: true, secretName: 'LOCATRA_SECRET' }));
+    await flush(1500);
+    expect(w.captures).toHaveLength(1);
+    // Also when the sensitive step lands before the clean one was even queued.
+    const w2 = startWorker();
+    record(w2, step());
+    record(w2, step({ action: 'click', sensitiveOnScreen: true }));
+    await flush(1500);
+    expect(w2.captures).toEqual([]);
+    // Only that tab: another tab's queued capture is untouched.
+    const w3 = startWorker({
+      tabs: [
+        { id: TAB, windowId: WINDOW, active: true },
+        { id: 70, windowId: 8, active: true },
+      ],
+    });
+    record(w3, step(), 70);
+    record(w3, step({ action: 'fill', value: '', sensitive: true }));
+    await until(() => w3.captures.length === 1);
+    expect(w3.captures[0].windowId).toBe(8);
+  });
+
+  it('a secret showing in any frame of the tab blocks its captures (SENSITIVE_ON_SCREEN)', async () => {
+    const w = startWorker();
+    const flag = (visible, frameId = 3, tabId = TAB) =>
+      w.fromTab({ type: 'SENSITIVE_ON_SCREEN', visible }, tabId, { frameId });
+    flag(true); // the payment iframe shows a card number
+    await flush(5);
+    record(w, step()); // "Pay" clicked in the top frame, which sees nothing
+    await flush(700);
+    expect(w.captures).toEqual([]);
+    flag(true, 5);
+    flag(false);
+    record(w, step());
+    await flush(700);
+    expect(w.captures).toEqual([]); // frame 5 still shows one
+    flag(false, 5);
+    await flush(5);
+    record(w, step());
+    await until(() => w.captures.length === 1);
+  });
+
+  it('a frame starting to show a secret voids queued and in-flight captures of its tab', async () => {
+    let w;
+    let duringCapture = null;
+    w = startWorker({
+      capture: () => {
+        if (duringCapture) duringCapture();
+        return DATA_URL;
+      },
+    });
+    // Queued: waiting for its slot when the card number appears.
+    record(w, step());
+    await until(() => w.captures.length === 1);
+    record(w, step());
+    await flush(5);
+    w.fromTab({ type: 'SENSITIVE_ON_SCREEN', visible: true }, TAB, { frameId: 2 });
+    w.fromTab({ type: 'SENSITIVE_ON_SCREEN', visible: false }, TAB, { frameId: 2 }); // and goes again
+    await flush(1500);
+    expect(w.captures).toHaveLength(1);
+    const puts = () => w.thumbs.calls.filter((c) => c[0] === 'put').length;
+    await until(() => puts() === 1);
+    // In flight: the shot is taken as the value appears; the picture is discarded.
+    duringCapture = () => {
+      duringCapture = null;
+      w.fromTab({ type: 'SENSITIVE_ON_SCREEN', visible: true }, TAB, { frameId: 2 });
+      w.fromTab({ type: 'SENSITIVE_ON_SCREEN', visible: false }, TAB, { frameId: 2 });
+    };
+    const data = step();
+    record(w, data);
+    await until(() => w.captures.length === 2);
+    await flush(100);
+    expect(puts()).toBe(1);
+    expect(w.thumbs.records.has(data.eventId)).toBe(false);
+  });
+
+  it('a sensitive step while the capture is being decoded: discarded before it is stored', async () => {
+    let w;
+    const decoded = imageApis();
+    w = startWorker({
+      image: false,
+      context: {
+        OffscreenCanvas: decoded.OffscreenCanvas,
+        createImageBitmap: async (blob) => {
+          w.fromTab({ type: 'RECORDED_ACTION', data: step({ action: 'fill', value: '', sensitive: true }) });
+          return decoded.createImageBitmap(blob);
+        },
+      },
+    });
+    const data = step();
+    record(w, data);
+    await until(() => w.captures.length === 1);
+    await flush(100);
+    expect(w.thumbs.calls.filter((c) => c[0] === 'put')).toEqual([]);
+    expect(thumbsOf(w)).toEqual([]);
+    expect(w.thumbs.records.has(data.eventId)).toBe(false);
+  });
+
+  it('SENSITIVE_ON_SCREEN: content scripts only, own frame only, well-formed only', async () => {
+    const w = startWorker();
+    w.send({ type: 'SENSITIVE_ON_SCREEN', visible: true }); // an extension page
+    w.sendFrom({ type: 'SENSITIVE_ON_SCREEN', visible: true }, { tab: { id: TAB, windowId: WINDOW } }); // no frameId
+    w.fromTab({ type: 'SENSITIVE_ON_SCREEN', visible: 'yes' });
+    w.fromTab({ type: 'SENSITIVE_ON_SCREEN' });
+    await flush(5);
+    record(w, step());
+    await until(() => w.captures.length === 1);
+    // A frame clears only its own flag, whatever the message says.
+    w.fromTab({ type: 'SENSITIVE_ON_SCREEN', visible: true }, TAB, { frameId: 4 });
+    w.fromTab({ type: 'SENSITIVE_ON_SCREEN', visible: false, frameId: 4 }, TAB, { frameId: 0 });
+    await flush(5);
+    record(w, step());
+    await flush(700);
+    expect(w.captures).toHaveLength(1);
+  });
+
+  it('the flag is cleared by a new document in that frame, a navigation or the tab closing — and survives eviction', async () => {
+    const session = {};
+    let w = startWorker({ session });
+    const flag = (visible, frameId = 3) =>
+      w.fromTab({ type: 'SENSITIVE_ON_SCREEN', visible }, TAB, { frameId });
+    flag(true);
+    await flush(5);
+    // The worker is evicted and comes back: the frame still shows the number.
+    w = startWorker({ session });
+    record(w, step());
+    await flush(700);
+    expect(w.captures).toEqual([]);
+    // That frame loads a new document.
+    w.fromTab({ type: 'CONTENT_READY' }, TAB, { frameId: 3 });
+    await flush(5);
+    record(w, step());
+    await until(() => w.captures.length === 1);
+    // A top-level navigation drops every frame's flag.
+    flag(true, 7);
+    await flush(5);
+    w.fireUpdated(TAB, 'loading');
+    await flush(700);
+    record(w, step());
+    await until(() => w.captures.length === 2);
+    // A closed tab forgets it (a tab id is never reused, but nothing may linger).
+    flag(true, 7);
+    await flush(5);
+    w.closeTab(TAB);
+    await flush(5);
+    expect(JSON.stringify(session)).not.toMatch(/sensitiveFrames":\[\[/);
   });
 
   it('only captures when the step’s tab is the active tab of its window', async () => {

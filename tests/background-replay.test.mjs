@@ -492,6 +492,35 @@ describe('replay: sensitive values', () => {
     expect(JSON.stringify(w.session)).not.toContain('s3cret');
   });
 
+  it('serves LOCATRA_PASSWORD to a legacy step with no (or an invalid) secretName, as the panel prompts', async () => {
+    const answers = [];
+    let w;
+    w = startWorker({
+      respond: (tabId, msg) => {
+        if (msg.type !== 'REPLAY_STEP') return NO_ANSWER;
+        if (msg.step.sensitive) {
+          answers.push(
+            w.fromTab({ type: 'REPLAY_SECRET_REQUEST', runId: msg.runId, index: msg.index }).response
+          );
+        }
+        return { ok: true };
+      },
+    });
+    const steps = [
+      fill('', { sensitive: true }), // recorded before secretName existed
+      fill('', { sensitive: true, secretName: 'not valid!' }),
+      fill('', { sensitive: true, secretName: 42 }),
+      fill('', { sensitive: true, secretName: 'LOCATRA_SECRET' }),
+    ];
+    await runToEnd(w, { steps, secrets: { LOCATRA_PASSWORD: 'typed-pw', LOCATRA_SECRET: 'otp-1' } });
+    expect(answers).toEqual([
+      { ok: true, value: 'typed-pw' },
+      { ok: true, value: 'typed-pw' },
+      { ok: true, value: 'typed-pw' },
+      { ok: true, value: 'otp-1' },
+    ]);
+  });
+
   it('refuses a secret request from another tab, an extension page, a stale run or a non-current step', async () => {
     let w;
     const answers = {};

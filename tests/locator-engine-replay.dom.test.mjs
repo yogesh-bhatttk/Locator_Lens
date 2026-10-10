@@ -169,6 +169,27 @@ describe('resolveTarget: order and position (pw-verified element by element)', (
     expect(keys(E.resolveTarget(role('button', 'Save')))).toEqual(['page', 'ours']);
   });
 
+  it('a re-evaluation of the engine file (re-injection) keeps the registry', () => {
+    render('<button k="page">Parent</button><div id="ours"><button k="ours">▲ Parent</button></div>');
+    const ours = document.getElementById('ours');
+    E.markOwnUi(ours);
+    const again = () =>
+      vm.runInThisContext(readFileSync(join(ROOT, 'src/content-locator-engine.js'), 'utf8'), {
+        filename: 'src/content-locator-engine.js',
+      });
+    try {
+      again();
+      const E2 = globalThis.__LocatorLensEngine;
+      expect(E2).not.toBe(E);
+      expect(keys(E2.resolveTarget(role('button', 'Parent')))).toEqual(['page']);
+      E2.unmarkOwnUi(ours); // one registry: either engine object sees the change
+      expect(keys(E.resolveTarget(role('button', 'Parent')))).toEqual(['page', 'ours']);
+    } finally {
+      E.unmarkOwnUi(ours);
+      globalThis.__LocatorLensEngine = E;
+    }
+  });
+
   it('never hides a page subtree because of an ll-/locatra- id (M4)', () => {
     render('<div id="ll-root"><button k="a">Save</button></div><div id="locatra-x"><p k="b">Hi</p></div>');
     expect(keys(E.resolveTarget(role('button', 'Save')))).toEqual(['a']);

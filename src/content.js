@@ -15,7 +15,13 @@
   if (prior) {
     let priorAlive = false;
     try { priorAlive = typeof prior.isAlive === 'function' && !!prior.isAlive(); } catch (err) { priorAlive = false; }
-    if (priorAlive) return;
+    if (priorAlive) {
+      // This injection re-ran the engine file too. The engine carries its own-UI
+      // registry over, but the live instance re-marks its overlay, toolbar and toast
+      // in whatever engine is current now, so they never count as page elements.
+      try { if (typeof prior.remarkOwnUi === 'function') prior.remarkOwnUi(); } catch (err) { /* best effort */ }
+      return;
+    }
     try { if (typeof prior.teardown === 'function') prior.teardown(); } catch (err) { /* already gone */ }
   }
   window.__LocatorLensInjected = true;
@@ -93,6 +99,10 @@
     const E = globalThis.__LocatorLensEngine;
     if (E && typeof E.markOwnUi === 'function') E.markOwnUi(el);
     return el;
+  }
+  function remarkOwnUi() {
+    const E = globalThis.__LocatorLensEngine;
+    if (E && typeof E.markOwnUi === 'function') _ownUi.forEach((el) => E.markOwnUi(el));
   }
   function releaseOwnUi(el) {
     if (!el) return;
@@ -213,23 +223,100 @@
   }
   function sensitiveValueOnScreen(stepEl) {
     const layout = documentHasLayout();
-    return [stepEl, deepActiveElement(document)].concat(sensitiveCandidates()).some((el) => onScreen(el, layout));
+    return [stepEl, deepActiveElement(document)].concat(sensitiveCandidates(), Array.from(_secretFields))
+      .some((el) => onScreen(el, layout));
   }
+
+  // C6, tab-wide: captureVisibleTab shoots the whole tab, frames included, but the
+  // check above only sees this frame — a card number typed into a payment iframe
+  // was in the screenshot of the "Pay" click in the top frame. So, while recording,
+  // every frame tells background whether a secret shows anywhere in its document
+  // (SENSITIVE_ON_SCREEN, only when that changes), and background captures nothing
+  // in the tab while any frame says yes. Re-evaluated when a secret field's value
+  // changes (input/change/blur, page scripts and autofill included), before every
+  // step leaves this frame, when recording (re)starts, and once a second while the
+  // answer is yes. Deliberately wider than the per-step check: a field scrolled out
+  // of this frame's viewport still counts (scrolling sends no event in time, and
+  // the frame itself may be anywhere in the tab), so is a field the user left.
+  // A masked password field never counts.
+  const SECRET_RECHECK_MS = 1000;
+  /** The fields that made the last answer yes: re-checked even before the candidate cache sees them. */
+  let _secretFields = new Set();
+  let _secretShown = false;
+  let _secretRecheckTimer = null;
+  function showsSecret(el) {
+    return !!el && el.nodeType === Node.ELEMENT_NODE && el.isConnected && !!el.value && !isMaskedOrPlain(el) &&
+      isElementVisible(el);
+  }
+  function reportSecretShown(extraEl) {
+    if (!isRecording || tornDown) return;
+    const shown = new Set([extraEl, deepActiveElement(document)].concat(sensitiveCandidates(), Array.from(_secretFields))
+      .filter(showsSecret));
+    _secretFields = shown;
+    const visible = shown.size > 0;
+    if (visible && !_secretRecheckTimer) _secretRecheckTimer = setInterval(() => reportSecretShown(null), SECRET_RECHECK_MS);
+    if (!visible) stopSecretRecheck();
+    if (visible === _secretShown) return;
+    _secretShown = visible;
+    safeSend({ type: 'SENSITIVE_ON_SCREEN', visible });
+  }
+  function stopSecretRecheck() {
+    if (_secretRecheckTimer) clearInterval(_secretRecheckTimer);
+    _secretRecheckTimer = null;
+  }
+  function onSecretFieldEvent(e) {
+    if (!isRecording) return;
+    const path = typeof e.composedPath === 'function' ? e.composedPath() : [];
+    const el = path[0] || e.target;
+    if (!el || el.nodeType !== Node.ELEMENT_NODE || el.tagName.toLowerCase() !== 'input') return;
+    // Only a secret field (or one that just stopped being one) can change the answer.
+    if (isMaskedOrPlain(el) && !_secretFields.has(el)) return;
+    reportSecretShown(el);
+  }
+  const SECRET_FIELD_EVENTS = ['input', 'change', 'focusout'];
 
   // Credentials and tokens that travel in a URL (OAuth implicit-flow hashes and
   // authorization codes, magic links, pre-signed S3 URLs, session ids, API keys)
   // must not end up in a recorded test or a stored pick. Whole parameter names only
   // (case-insensitive): `author=` or `keyword=` are left alone, and so are ordinary
   // ones like q, page or id.
-  const SENSITIVE_URL_PARAM_RE = new RegExp('([?&#;])(' + [
+  // Two tiers. A name that can only mean a credential is always redacted. A generic
+  // one (code, token, key, auth, sig, session) is just as often a search term, a
+  // promo code or a page number — `/search?key=shoes`, `?code=SUMMER`, `?session=2`
+  // — and redacting those sent replay and every export to the wrong URL. So its
+  // value is redacted only when it looks like a secret: a JWT, or a long run of
+  // token characters mixing letters and digits (an OAuth code, a hex or base64 key).
+  const SECRET_URL_PARAMS = [
     'password', 'passwd', 'pwd', 'secret', 'client_secret',
-    'code', 'token', 'access_token', 'id_token', 'refresh_token', 'auth',
-    'sig', 'signature', 'x-amz-signature', 'x-amz-credential', 'x-amz-security-token',
-    'key', 'apikey', 'api_key', 'session', 'sessionid'
-  ].join('|') + ')=([^&#;]*)', 'gi');
+    'access_token', 'id_token', 'refresh_token', 'api_key', 'apikey',
+    'signature', 'x-amz-signature', 'x-amz-credential', 'x-amz-security-token', 'sessionid'
+  ];
+  const GENERIC_URL_PARAMS = ['code', 'token', 'key', 'auth', 'sig', 'session'];
+  const SENSITIVE_URL_PARAM_RE = new RegExp('([?&#;])(' + SECRET_URL_PARAMS.concat(GENERIC_URL_PARAMS).join('|') +
+    ')=([^&#;]*)', 'gi');
+  const SECRET_VALUE_MIN = 16;
+  const JWT_RE = /^eyJ[\w-]+\.[\w-]+\.[\w-]*$/;
+  const TOKEN_CHARS_RE = /^[\w\-.~+/=:]+$/;
+  function looksLikeSecretValue(raw) {
+    let v = raw;
+    try { v = decodeURIComponent(raw); } catch (err) { v = raw; }
+    if (JWT_RE.test(v)) return true;
+    if (v.length < SECRET_VALUE_MIN || !TOKEN_CHARS_RE.test(v)) return false;
+    // Random-looking: letters and digits interleaved, with enough distinct
+    // characters — "4/0AX4XfWh…" or 32 hex digits, not "running-shoes-for-men",
+    // "summer-sale-2024", "1234567890123456" or "a1a1a1a1a1a1a1a1".
+    let switches = 0;
+    for (let i = 1; i < v.length; i++) {
+      const a = /[0-9]/.test(v[i - 1]) ? 1 : /[A-Za-z]/.test(v[i - 1]) ? 2 : 0;
+      const b = /[0-9]/.test(v[i]) ? 1 : /[A-Za-z]/.test(v[i]) ? 2 : 0;
+      if (a && b && a !== b) switches++;
+    }
+    return switches >= 3 && new Set(v).size >= 8;
+  }
   function redactUrl(href) {
     if (href == null) return href;
-    return String(href).replace(SENSITIVE_URL_PARAM_RE, (m, sep, key) => `${sep}${key}=REDACTED`);
+    return String(href).replace(SENSITIVE_URL_PARAM_RE, (m, sep, key, value) =>
+      (GENERIC_URL_PARAMS.indexOf(key.toLowerCase()) !== -1 && !looksLikeSecretValue(value) ? m : `${sep}${key}=REDACTED`));
   }
 
   // Pending debounced fills, field → timer. Declared up here because every other
@@ -238,11 +325,18 @@
   /** eventId + element of the most recent click steps, for dblclick supersedes. */
   let _recentClicks = [];
 
-  /** @returns the eventId of the step it sent. */
-  function sendRecordedAction(data) {
-    // Typing is debounced; anything the user did after it (Enter, Tab, a click on
-    // Submit, a select, an assertion…) must land *after* the fill it commits.
-    flushPendingFills();
+  /**
+   * @param held the held label click itself: everything still pending is newer.
+   * @returns the eventId of the step it sent.
+   */
+  function sendRecordedAction(data, held) {
+    if (!held) {
+      // A held label click (see holdLabelClick) came before anything sent now…
+      flushHeldLabelClick();
+      // …and typing is debounced; anything the user did after it (Enter, Tab, a
+      // click on Submit, a select, an assertion…) must land *after* the fill it commits.
+      flushPendingFills();
+    }
     const payload = {
       eventId: nextRecordEventId(),
       sequence: ++recordActionSeq,
@@ -255,8 +349,10 @@
       target: data.target != null ? data.target : null,
       assertType: data.assertType != null ? data.assertType : null
     };
-    // C6: background skips the step screenshot while a secret is readable on screen.
+    // C6: background skips the step screenshot while a secret is readable on screen
+    // — in this frame (the step says so) or any other (the frame flag, sent first).
     if (sensitiveValueOnScreen(data.el)) data = Object.assign({}, data, { sensitiveOnScreen: true });
+    reportSecretShown(data.el);
     ['sensitive', 'secretName', 'inputType', 'supersedes', 'suggested', 'reason', 'values', 'sensitiveOnScreen'].forEach((k) => {
       if (data[k] != null) payload[k] = data[k];
     });
@@ -268,7 +364,7 @@
         payload.viewport = geo.viewport;
       }
     }
-    safeSend({ type: 'RECORDED_ACTION', data: payload });
+    deliverRecordedAction(payload);
     return payload.eventId;
   }
 
@@ -625,14 +721,25 @@
     const tag = el.tagName.toLowerCase();
     const type = (el.getAttribute('type') || '').toLowerCase();
 
-    // A click on a checkbox's / radio's <label> (wrapping it, or for=) makes the
-    // browser toggle the control, and that change records the check below. Recording
+    // An <option> (or <optgroup>) of a <select>, listbox or dropdown, is recorded by
+    // the select's change: selectOption with every selected value. A click step
+    // loses the Ctrl/Shift that extended the selection, so replaying it deselected
+    // the earlier choices. (An optgroup or an empty option promotes to the select
+    // itself: what was hit decides.)
+    if (isSelectPart(hit) || isSelectPart(el)) return;
+
+    // A click on a checkbox's / radio's <label> (wrapping it, or for=) normally makes
+    // the browser toggle the control, and that change records the check. Recording
     // the label click as well replayed as two toggles — a box that ended unchecked.
+    // But a page may cancel the click and toggle its own state in script: then no
+    // trusted change comes and the click is the only record. So the click is held
+    // until the gesture is over (see holdLabelClick) and dropped only if the
+    // control's change arrived meanwhile.
     // (A link inside the label is its own control: clicking it toggles nothing.)
     const label = isInteractiveEl(el) ? null : el.closest('label');
     const control = label && label.control;
-    if (control && control.tagName.toLowerCase() === 'input' &&
-      ['checkbox', 'radio'].indexOf((control.getAttribute('type') || '').toLowerCase()) !== -1) return;
+    const labelOfToggle = !!control && control.tagName.toLowerCase() === 'input' &&
+      ['checkbox', 'radio'].indexOf((control.getAttribute('type') || '').toLowerCase()) !== -1;
 
     // File, colour and range inputs are recorded from their change (upload / fill
     // with the settled value). A click on them opens a native chooser in a replay.
@@ -655,20 +762,93 @@
       best = bestLocatorFor(el, 'click()');
     }
 
-    const eventId = sendRecordedAction({
+    const click = {
       action: 'click',
       value: '',
       code: best.code,
       fullCode: best.fullCode,
       target: best && best.target,
       el: el
-    });
+    };
+    if (labelOfToggle) {
+      holdLabelClick(click, control);
+      return;
+    }
+    const eventId = sendRecordedAction(click);
     rememberClick(el, eventId);
     // F3: a click on a submit-like button may produce feedback worth asserting.
     if (isSubmitLikeButton(el)) startFeedbackWatch();
   }
 
   const _recordPointerOptions = { capture: true };
+
+  /** An <option>/<optgroup> inside a <select> (not a datalist, not an ARIA listbox). */
+  function isSelectPart(el) {
+    if (!el || el.nodeType !== Node.ELEMENT_NODE) return false;
+    const tag = el.tagName.toLowerCase();
+    return (tag === 'option' || tag === 'optgroup') && !!el.closest('select');
+  }
+
+  // ── Label clicks on checkboxes / radios, held ─────────────────────────────
+  // The click is generated at pointerdown (the DOM it describes) but only sent once
+  // the gesture is over: the task after its click — by then the control's change,
+  // which the browser fires inside the click's own task, has either come or not. A
+  // pointerup or pointercancel with no click after it (released elsewhere) settles
+  // it LABEL_NO_CLICK_MS later. A trusted change on that control drops it. Any other
+  // step flushes it first (sendRecordedAction), so it keeps its place in the flow;
+  // LABEL_HOLD_MAX_MS bounds a gesture whose end was never seen.
+  const LABEL_HOLD_MAX_MS = 5000;
+  const LABEL_NO_CLICK_MS = 100;
+  let _heldLabelClick = null; // { data, control, timer, settleTimer, settleOnClick }
+  const LABEL_GESTURE_END_EVENTS = ['click', 'pointerup', 'pointercancel'];
+
+  function holdLabelClick(data, control) {
+    flushHeldLabelClick();
+    // Fills typed before this click belong before it, whenever it is sent.
+    flushPendingFills();
+    const held = {
+      data: Object.assign({}, data, { timestamp: Date.now() }),
+      control,
+      timer: null,
+      settleTimer: null,
+      settleOnClick: false
+    };
+    held.timer = setTimeout(() => { if (_heldLabelClick === held) flushHeldLabelClick(); }, LABEL_HOLD_MAX_MS);
+    _heldLabelClick = held;
+  }
+
+  function onLabelGestureEnd(e) {
+    const held = _heldLabelClick;
+    if (!held || held.settleOnClick) return;
+    const isClick = e && e.type === 'click';
+    if (held.settleTimer && !isClick) return;
+    clearTimeout(held.settleTimer);
+    held.settleOnClick = isClick;
+    // After the click's task: the change of a native label activation fires inside it.
+    held.settleTimer = setTimeout(() => { if (_heldLabelClick === held) flushHeldLabelClick(); },
+      isClick ? 0 : LABEL_NO_CLICK_MS);
+  }
+
+  function dropHeldLabelClick() {
+    const held = _heldLabelClick;
+    if (!held) return null;
+    _heldLabelClick = null;
+    clearTimeout(held.timer);
+    clearTimeout(held.settleTimer);
+    return held;
+  }
+
+  /** Send the held label click now (nothing toggled the control natively). */
+  function flushHeldLabelClick() {
+    const held = dropHeldLabelClick();
+    if (!held || !isRecording) return;
+    rememberClick(held.data.el, sendRecordedAction(held.data, true));
+  }
+
+  /** The control's own change came: it records the toggle, the label click goes. */
+  function settleHeldLabelClick(changed) {
+    if (_heldLabelClick && _heldLabelClick.control === changed) dropHeldLabelClick();
+  }
 
   // ── Typing ────────────────────────────────────────────────────────────────
   // `input` is debounced per field (React/controlled fields often skip native
@@ -795,6 +975,7 @@
     if (!isUserEvent(e)) return;
     const el = resolvePrimaryTarget(e);
     if (!el || el.nodeType !== Node.ELEMENT_NODE) return;
+    settleHeldLabelClick(el);
     const tag = el.tagName.toLowerCase();
     const type = (el.getAttribute('type') || '').toLowerCase();
 
@@ -861,6 +1042,10 @@
     const hit = resolvePrimaryTarget(e);
     if (!hit || isOwnUi(hit)) return;
     const el = actionTargetFor(hit, false); // the element the pointerdowns recorded
+    if (isSelectPart(hit) || isSelectPart(el)) return; // its change records the selection
+    // The second click of a double-click on a label may still be held (its task is
+    // this one): send it now so it can be superseded like any other.
+    flushHeldLabelClick();
     const best = bestWithChain(el, 'dblclick()');
     // The two pointerdowns of this double-click were already recorded as clicks.
     // Name them so the panel can replace them with this single dblclick step (C6).
@@ -939,9 +1124,24 @@
 
   // The page is going away (navigation, tab close, bfcache) or being hidden: a
   // fill still inside its debounce window would otherwise be lost with it.
-  function onRecordPageHide() {
-    if (isRecording) flushPendingFills();
+  function onRecordPageHide(e) {
+    if (isRecording) {
+      flushHeldLabelClick();
+      flushPendingFills();
+    }
     stopFeedbackWatch();
+    // The document is going away (a frame navigating or removed): it shows nothing.
+    // Not on beforeunload, which the page may still cancel.
+    if (e && e.type === 'pagehide' && _secretShown) {
+      _secretShown = false;
+      _secretFields = new Set();
+      stopSecretRecheck();
+      safeSend({ type: 'SENSITIVE_ON_SCREEN', visible: false });
+    }
+  }
+  /** Back from the back/forward cache: whatever it shows counts again. */
+  function onRecordPageShow(e) {
+    if (e && e.persisted) reportSecretShown(null);
   }
   function onRecordVisibility() {
     if (isRecording && document.visibilityState === 'hidden') flushPendingFills();
@@ -1252,8 +1452,11 @@
   }
 
   function setPaused(paused) {
-    // Keystrokes made before Pause belong to the recording.
-    if (paused && !isPaused) flushPendingFills();
+    // Keystrokes (and a held label click) made before Pause belong to the recording.
+    if (paused && !isPaused) {
+      flushHeldLabelClick();
+      flushPendingFills();
+    }
     if (paused) {
       stopFeedbackWatch();
       if (urlStableTimer) { clearTimeout(urlStableTimer); urlStableTimer = null; }
@@ -1267,7 +1470,10 @@
   function applyAssertState(state) {
     if (!state) return;
     if (typeof state.assertMode === 'boolean') {
-      if (state.assertMode && !assertMode) flushPendingFills();
+      if (state.assertMode && !assertMode) {
+        flushHeldLabelClick();
+        flushPendingFills();
+      }
       assertMode = state.assertMode;
     }
     if (typeof state.assertType === 'string' && state.assertType) assertType = state.assertType;
@@ -1291,6 +1497,7 @@
       if (typeof paused === 'boolean') setPaused(paused);
       else if (!rearm) setPaused(false);
       applyAssertState(assertState);
+      reportSecretShown(null); // e.g. a page restored from the back/forward cache
       return;
     }
     recordActionSeq = 0;
@@ -1314,8 +1521,13 @@
     window.addEventListener('pagehide', onRecordPageHide, true);
     window.addEventListener('beforeunload', onRecordPageHide, true);
     document.addEventListener('submit', onRecordSubmit, true);
+    SECRET_FIELD_EVENTS.forEach((t) => document.addEventListener(t, onSecretFieldEvent, true));
+    LABEL_GESTURE_END_EVENTS.forEach((t) => window.addEventListener(t, onLabelGestureEnd, true));
+    window.addEventListener('pageshow', onRecordPageShow, true);
     updateFrameWatcher();
     startUrlWatch(!!rearm);
+    reportSecretShown(null); // a value autofilled or typed before recording started
+    refreshFrameFix(); // C4: ready before the first step in a cross-origin frame
     debugLog('Recording started.' + (rearm ? ' (resumed after navigation)' : ''));
 
     // Only the top document opens the flow: every frame used to add its own
@@ -1345,6 +1557,7 @@
     if (!isRecording) return;
     // A keystroke made just before Stop is part of this recording — emit it now
     // rather than dropping it (or, as it once did, leaking it into the next session).
+    flushHeldLabelClick();
     flushPendingFills();
     isRecording = false;
     isPaused = false;
@@ -1363,6 +1576,12 @@
     window.removeEventListener('pagehide', onRecordPageHide, true);
     window.removeEventListener('beforeunload', onRecordPageHide, true);
     document.removeEventListener('submit', onRecordSubmit, true);
+    SECRET_FIELD_EVENTS.forEach((t) => document.removeEventListener(t, onSecretFieldEvent, true));
+    LABEL_GESTURE_END_EVENTS.forEach((t) => window.removeEventListener(t, onLabelGestureEnd, true));
+    window.removeEventListener('pageshow', onRecordPageShow, true);
+    // The last answer stands (background only uses it while recording); the next
+    // recording re-evaluates and reports a change.
+    stopSecretRecheck();
     stopUrlWatch();
     stopFeedbackWatch();
     _shadowChangeRoots.forEach((root) => root.removeEventListener('change', onRecordChange, true));
@@ -1600,6 +1819,7 @@
   function onContextMenuTrack(e) {
     if (tornDown) return;
     lastRightClickedEl = actionTargetFor(resolvePrimaryTarget(e) || getDeepElementAt(e.clientX, e.clientY), true);
+    refreshFrameFix(); // answered long before the menu item is chosen
   }
   document.addEventListener('contextmenu', onContextMenuTrack, true);
 
@@ -2411,23 +2631,260 @@
    * what `iframe >> nth=i`, cy.get('iframe').eq(i) and $$('iframe')[i] count, and
    * what the engine's nodesInFrame() resolves. `framesIndex` is the window.frames
    * position, which also counts <frame>/<object> contexts and so can differ.
-   * Residual limit: a cross-origin parent hides its document, so there `index`
-   * falls back to framesIndex — right whenever the parent has only <iframe>s in
-   * its light DOM, and possibly off by the <frame>/<object>/shadow-hosted frames
-   * before this one otherwise.
+   * A cross-origin parent hides its document: there `index` is provisionally
+   * framesIndex (`exact: false`), and frameChain() replaces it with the parent's
+   * own answer once this frame has it (see refreshFrameFix).
    */
   function frameIndexOf(win) {
     const framesIndex = framesIndexOf(win);
     let index = -1;
+    let readable = false;
     try {
       const fe = win.frameElement; // null, or a throw, across an origin boundary
+      readable = !!fe;
       index = globalThis.__LocatorLensEngine.deepQueryAll('iframe', fe.ownerDocument).indexOf(fe);
     } catch (err) {
       index = -1;
     }
-    const out = { index: index >= 0 ? index : Math.max(framesIndex, 0) };
+    // A readable element that is not among the <iframe>s (a <frame>, or one in a
+    // closed shadow root) has no better answer anywhere: that counts as settled.
+    const out = { index: index >= 0 ? index : Math.max(framesIndex, 0), exact: readable };
     if (framesIndex >= 0) out.framesIndex = framesIndex;
     return out;
+  }
+
+  // ── Exact `index` behind a cross-origin parent (C4) ────────────────────────
+  // A cross-origin parent hides frameElement, but its own content script can map
+  // each of its child browsing contexts to an <iframe> element: WindowProxy
+  // identity (iframe.contentWindow === window.frames[k]) compares across origins.
+  // A frame with such a level asks BACKGROUND (FRAME_INDEX_LOOKUP), which asks the
+  // parent at each hidden level (FRAME_CHILD_INDEX) — the top frame by frameId 0,
+  // a deeper one by its window.frames path from the top, which every frame can
+  // work out for itself without reading any parent's document. An <iframe> in a
+  // shadow root has no window.frames position (-1 in the path): the innermost
+  // level is then found by this frame's URL, which BACKGROUND takes from the
+  // message's sender. Only extension messaging carries any of this: a page script
+  // can neither read nor forge it.
+  // The answer is cached under that path plus each parent's frames.length (both
+  // readable across origins), so the synchronous capture at pointerdown can use
+  // it; it is fetched when the frame starts recording or inspecting and refreshed
+  // after every step. A step captured while it is missing or stale is held until a
+  // fresh answer arrives (FRAME_FIX_WAIT_MS at most), and this frame's later steps
+  // queue behind it, so the order of steps never changes.
+  const FRAME_FIX_WAIT_MS = 600;
+  /** { key, indices }: indices[j] is level j's exact index, or null (keep the provisional one). */
+  let _frameFix = null;
+  let _frameFixInFlight = null;
+  /** Recorded steps held for the lookup, in the order they were taken. */
+  let _heldSteps = [];
+
+  /** This frame's window.frames path from the top, outermost first: [] at the top, null if unknowable. */
+  function ownFramesPath() {
+    const path = [];
+    for (const w of ownFrameWindows()) {
+      const k = framesIndexOf(w);
+      if (k < 0) return null;
+      path.push(k);
+    }
+    return path;
+  }
+
+  /** Levels (outermost first) whose <iframe> element this frame cannot read. */
+  function hiddenFrameLevels(wins) {
+    const out = [];
+    wins.forEach((w, j) => {
+      let fe = null;
+      try { fe = w.frameElement; } catch (err) { fe = null; }
+      if (!fe) out.push(j);
+    });
+    return out;
+  }
+
+  function frameFixKey(wins) {
+    try {
+      return wins.map((w) => framesIndexOf(w) + ':' + w.parent.frames.length).join('/');
+    } catch (err) {
+      return null;
+    }
+  }
+
+  /** The cached answer, when it was given for this frame's current position. */
+  function currentFrameFix(wins) {
+    return _frameFix && _frameFix.key === frameFixKey(wins) ? _frameFix : null;
+  }
+
+  /** Would a frame target built now carry a provisional index? */
+  function frameFixNeeded() {
+    if (window === window.top) return false;
+    const wins = ownFrameWindows();
+    return hiddenFrameLevels(wins).length > 0 && !currentFrameFix(wins);
+  }
+
+  /** Puts the cached exact indices on a frameChain(). */
+  function applyFrameFix(chain) {
+    if (chain.every((f) => f.exact)) return chain;
+    const fix = currentFrameFix(ownFrameWindows());
+    if (!fix) return chain;
+    chain.forEach((f, j) => {
+      const i = fix.indices[j];
+      if (!f.exact && typeof i === 'number') {
+        f.index = i;
+        f.exact = true;
+      }
+    });
+    return chain;
+  }
+
+  /**
+   * Fetch (or re-fetch) the exact indices of this frame's hidden levels. Resolves
+   * once settled, never rejects. No answer in time (a busy worker) caches the
+   * provisional indices, so later steps are not held again; the refresh after the
+   * next step can still correct them.
+   */
+  function refreshFrameFix() {
+    if (_frameFixInFlight) return _frameFixInFlight;
+    if (window === window.top) return Promise.resolve();
+    const wins = ownFrameWindows();
+    const path = wins.map(framesIndexOf);
+    const last = path.length - 1;
+    // A level can be asked when its parent has a window.frames path, and it has a
+    // position in that parent's window.frames — or is this frame (found by URL).
+    const levels = hiddenFrameLevels(wins).filter((j) =>
+      path.slice(0, j).every((k) => k >= 0) && (path[j] >= 0 || j === last));
+    const key = frameFixKey(wins);
+    if (!key) return Promise.resolve();
+    if (!levels.length) {
+      // Nothing anyone could answer: settled as provisional, so steps are not held.
+      _frameFix = { key, indices: path.map(() => null) };
+      return Promise.resolve();
+    }
+    let settled = false;
+    const lookup = new Promise((resolve) => {
+      let timer = null;
+      const finish = (res) => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timer);
+        _frameFixInFlight = null;
+        // An answer for a position this frame no longer has is worth nothing.
+        if (frameFixKey(ownFrameWindows()) === key) {
+          const got = res && res.ok === true && Array.isArray(res.indices) ? res.indices : [];
+          _frameFix = {
+            key,
+            indices: path.map((_, j) => (levels.indexOf(j) !== -1 && Number.isInteger(got[j]) && got[j] >= 0 ? got[j] : null))
+          };
+        }
+        resolve();
+      };
+      timer = setTimeout(() => finish(null), FRAME_FIX_WAIT_MS);
+      if (!safeSend({ type: 'FRAME_INDEX_LOOKUP', path, levels }, finish)) finish(null);
+    });
+    if (!settled) _frameFixInFlight = lookup; // an answer can arrive synchronously
+    return lookup;
+  }
+
+  /**
+   * FRAME_CHILD_INDEX: where this document's child browsing context
+   * window.frames[framesIndex] sits among its <iframe>s, in the engine's pierce
+   * order — what the child records as `index`. null when the question is for
+   * another frame (it carries the asked parent's own window.frames path); -1 when
+   * that child is not an <iframe> this document can see (a <frame>, an <object>,
+   * one in a closed shadow root, or gone).
+   * framesIndex -1 is a child with no window.frames position — an <iframe> in a
+   * shadow root — known only by its document's `url`: the one such <iframe> whose
+   * src is that URL, or else the only such <iframe> there is.
+   */
+  function childFrameIndex(parentPath, framesIndex, url) {
+    if (!Array.isArray(parentPath) || !Number.isInteger(framesIndex) || framesIndex < -1) return null;
+    if (framesIndex < 0 && typeof url !== 'string') return null;
+    const own = ownFramesPath();
+    if (!own || own.length !== parentPath.length || own.some((k, j) => k !== parentPath[j])) return null;
+    let iframes = null;
+    try { iframes = globalThis.__LocatorLensEngine.deepQueryAll('iframe', document); } catch (err) { iframes = null; }
+    const list = iframes || [];
+    const windowOf = (el) => {
+      try { return el.contentWindow || null; } catch (err) { return null; }
+    };
+    if (framesIndex < 0) return unlistedChildIndex(list, windowOf, url);
+    let child = null;
+    try { child = framesIndex < window.frames.length ? window.frames[framesIndex] : null; } catch (err) { child = null; }
+    if (!child) return -1;
+    for (let i = 0; i < list.length; i++) {
+      const w = windowOf(list[i]);
+      if (w && w === child) return i;
+    }
+    return -1;
+  }
+
+  function unlistedChildIndex(list, windowOf, url) {
+    const listed = new Set();
+    try {
+      for (let k = 0; k < window.frames.length; k++) listed.add(window.frames[k]);
+    } catch (err) { /* nothing listed */ }
+    const noHash = (u) => String(u).split('#')[0];
+    const unlisted = [];
+    list.forEach((el, i) => {
+      const w = windowOf(el);
+      if (w && !listed.has(w)) unlisted.push(i);
+    });
+    const byUrl = unlisted.filter((i) => {
+      try { return noHash(list[i].src) === noHash(url); } catch (err) { return false; }
+    });
+    if (byUrl.length === 1) return byUrl[0];
+    return !byUrl.length && unlisted.length === 1 ? unlisted[0] : -1;
+  }
+
+  /**
+   * A held step, given the exact indices that arrived after it was captured: its
+   * frame levels and the locator strings rendered from them.
+   */
+  function withExactFrameIndices(payload) {
+    const fix = currentFrameFix(ownFrameWindows());
+    if (!fix || !payload.target || payload.target.kind !== 'frame') return payload;
+    let changed = false;
+    const reindex = (t, j) => {
+      if (!t || t.kind !== 'frame') return t;
+      const i = fix.indices[j];
+      const out = Object.assign({}, t, { child: reindex(t.child, j + 1) });
+      if (typeof i === 'number' && i !== t.index) {
+        out.index = i;
+        changed = true;
+      }
+      return out;
+    };
+    const target = reindex(payload.target, 0);
+    if (!changed) return payload;
+    const out = Object.assign({}, payload, { target });
+    let code = '';
+    try { code = window.LLCodegen ? window.LLCodegen.locatorExpr(target, 'playwright', 'typescript') : ''; } catch (err) { code = ''; }
+    if (code && payload.code) {
+      // Every recorded statement is built around the locator expression verbatim.
+      out.fullCode = String(payload.fullCode || '').split(payload.code).join(code);
+      out.code = code;
+    }
+    return out;
+  }
+
+  /** Sends one recorded step now, or holds it (and every later one) for the lookup. */
+  function deliverRecordedAction(payload) {
+    const framed = !!payload.target && payload.target.kind === 'frame';
+    if (!_heldSteps.length && !(framed && frameFixNeeded())) {
+      safeSend({ type: 'RECORDED_ACTION', data: payload });
+      if (framed) refreshFrameFix(); // keep the cache current for the next step
+      return;
+    }
+    _heldSteps.push(payload);
+    if (_heldSteps.length > 1) return;
+    // A refresh already in flight may have asked about an older position: one more
+    // round settles the current one.
+    refreshFrameFix()
+      .then(() => (frameFixNeeded() ? refreshFrameFix() : null))
+      .then(() => {
+        const held = _heldSteps;
+        _heldSteps = [];
+        if (tornDown) return;
+        held.forEach((p) => safeSend({ type: 'RECORDED_ACTION', data: withExactFrameIndices(p) }));
+      });
   }
 
   /** Outermost frame first. Empty in the top document. */
@@ -2451,10 +2908,10 @@
         shadowPath = null;
       }
       const pos = frameIndexOf(win);
-      chain.unshift({ selector, index: pos.index, framesIndex: pos.framesIndex, shadow, shadowPath });
+      chain.unshift({ selector, index: pos.index, framesIndex: pos.framesIndex, exact: pos.exact, shadow, shadowPath });
       win = win.parent;
     }
-    return chain;
+    return applyFrameFix(chain);
   }
 
   function wrapInFrames(chain, target) {
@@ -2701,6 +3158,9 @@
     }
     const path = framePathOf(target);
     if (!path.length) return isTop;
+    // Not known yet (a frame injected for this replay): asked now, so that the
+    // worker's retry of an unclaimed step finds it.
+    if (frameFixNeeded()) refreshFrameFix();
     const chain = frameChain();
     if (chain.length !== path.length) return false;
     const wins = ownFrameWindows();
@@ -3451,6 +3911,7 @@
 
   async function buildPomModel(region) {
     const E = globalThis.__LocatorLensEngine;
+    if (frameFixNeeded()) await refreshFrameFix(); // C4: exact frame indices
     const { list, truncated } = pomCollect(region);
     const taken = new Set();
     const elements = [];
@@ -4008,7 +4469,18 @@
 
   function pickElement(el) {
     lastPickedEl = el; // remember for Stress Test even after inspect stops
+    // C4: a pick in a cross-origin frame whose exact index is not known yet is
+    // generated once it is (the click itself was swallowed: the element stays put).
+    if (frameFixNeeded()) {
+      refreshFrameFix().then(() => {
+        if (!tornDown && el.isConnected) finishPick(el);
+      });
+      return;
+    }
+    finishPick(el);
+  }
 
+  function finishPick(el) {
     const result = withFingerprint(generateLocators(el), el);
 
     const bestCode = result.locators[0] ? copyLocatorCode(result.locators[0]) : '';
@@ -4127,6 +4599,7 @@
     INSPECT_SWALLOWED_EVENTS.forEach((t) => window.addEventListener(t, onInspectSwallow, true));
     document.addEventListener('keydown', onKeyDown, true);
     updateFrameWatcher();
+    refreshFrameFix(); // C4: picks in a cross-origin frame get the exact index
   }
 
   function stopInspect() {
@@ -4196,6 +4669,7 @@
     try { stopUrlWatch(); stopFeedbackWatch(); } catch (err) { /* best effort */ }
     _pendingFills.forEach((t) => clearTimeout(t));
     _pendingFills.clear();
+    _heldSteps = [];
     document.removeEventListener('contextmenu', onContextMenuTrack, true);
     releaseOwnUi(stylesEl);
     stylesEl = null;
@@ -4208,7 +4682,7 @@
     lastRightClickedEl = null;
   }
 
-  const instanceHandle = { isAlive: contextAlive, teardown };
+  const instanceHandle = { isAlive: contextAlive, teardown, remarkOwnUi };
   window.__LocatorLensInstance = instanceHandle;
 
   // 🛡️ INITIALIZATION: Force Neutral State
@@ -4343,6 +4817,15 @@
       sendResponse({ ok: true });
     }
 
+    // C4: BACKGROUND asks a parent where one of its child frames sits among its
+    // <iframe>s (see refreshFrameFix). Sent to every frame when the parent is not
+    // the top one: only the frame at `parentPath` answers, the rest stay silent.
+    else if (msg.type === 'FRAME_CHILD_INDEX') {
+      const index = childFrameIndex(msg.parentPath, msg.framesIndex, msg.url);
+      if (index === null) return false;
+      sendResponse({ ok: true, index });
+    }
+
     // ▶ REPLAY (F1): only the frame the step belongs to answers; the others stay
     // silent so BACKGROUND's sendMessage to all frames resolves with the owner's reply.
     else if (msg.type === 'REPLAY_STEP') {
@@ -4453,4 +4936,5 @@
     }
     if (res.inspecting) whenBodyReady(startInspect);
   });
+  refreshFrameFix(); // C4: a subframe behind a cross-origin parent learns its index
 })();

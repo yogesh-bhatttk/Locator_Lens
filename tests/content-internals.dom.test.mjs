@@ -780,7 +780,11 @@ describe('frames that cannot be read', () => {
       runtime: {
         id: 'x',
         lastError: null,
-        sendMessage: (m) => frameSent.push(m),
+        sendMessage: (m, cb) => {
+          frameSent.push(m);
+          // C4: the parent's content script could not place this frame either.
+          if (m.type === 'FRAME_INDEX_LOOKUP' && cb) cb({ ok: true, indices: [null] });
+        },
         onMessage: { addListener: (fn) => frameHandlers.push(fn) },
       },
       storage: { local: { get: (k, cb) => cb({}) }, onChanged: { addListener: () => {} } },
@@ -795,7 +799,7 @@ describe('frames that cannot be read', () => {
     return { w, frameSend, frameSent };
   }
 
-  it('a frame whose element cannot be read is addressed by index, with a note', () => {
+  it('a frame whose element cannot be read, and that its parent cannot place, is addressed by window.frames position, with a note', () => {
     document.body.innerHTML = '<iframe></iframe><iframe id="f"></iframe>';
     const { w, frameSend, frameSent } = loadIntoFrame(document.getElementById('f'));
     Object.defineProperty(w, 'frameElement', {
@@ -806,6 +810,11 @@ describe('frames that cannot be read', () => {
     });
     w.document.body.innerHTML = '<button>Pay</button>';
     frameSend({ type: 'START_INSPECT' });
+    expect(frameSent.find((m) => m.type === 'FRAME_INDEX_LOOKUP')).toEqual({
+      type: 'FRAME_INDEX_LOOKUP',
+      path: [1],
+      levels: [0],
+    });
     w.document.querySelector('button').dispatchEvent(new w.MouseEvent('click', { bubbles: true }));
     const pick = frameSent.find((m) => m.type === 'ELEMENT_PICKED').data;
     expect(pick.locators[0].target).toMatchObject({
@@ -869,6 +878,44 @@ describe('frames that cannot be read', () => {
 });
 
 describe('instance lifecycle', () => {
+  // background's injectAllFrames re-runs the engine and content.js in every frame
+  // (an iframe added while inspecting, recording, health, POM). The live instance
+  // stands down; its overlay must still not count as page elements.
+  describe('re-injection keeps Locatra’s own UI out of every count', () => {
+    const parentRole = { kind: 'role', role: 'button', name: 'Parent' };
+    const rerun = (files) => {
+      for (const file of files)
+        vm.runInThisContext(readFileSync(join(ROOT, file), 'utf8'), { filename: file });
+    };
+    const inspectPageParent = () => {
+      document.body.innerHTML = '<button id="b">Parent</button>';
+      send({ type: 'START_INSPECT' });
+      expect(document.getElementById('ll-traversal-bar')).not.toBeNull(); // ▲ Parent / ▼ Child
+      expect(globalThis.__LocatorLensEngine.countTargetMatches(parentRole)).toBe(1);
+    };
+
+    it('the engine carries its own-UI registry over to its next evaluation', () => {
+      inspectPageParent();
+      const before = globalThis.__LocatorLensEngine;
+      rerun(['src/content-locator-engine.js', 'src/content.js']);
+      expect(globalThis.__LocatorLensEngine).not.toBe(before);
+      expect(globalThis.__LocatorLensEngine.countTargetMatches(parentRole)).toBe(1);
+      send({ type: 'STOP_INSPECT' });
+    });
+
+    it('the standing-down instance re-marks its UI in an engine that knows nothing of it', () => {
+      inspectPageParent();
+      delete globalThis.__LocatorLensEngine; // e.g. an engine from before the carry-over
+      rerun(['src/content-locator-engine.js']);
+      expect(globalThis.__LocatorLensEngine.countTargetMatches(parentRole)).toBe(2);
+      rerun(['src/content.js']);
+      expect(globalThis.__LocatorLensEngine.countTargetMatches(parentRole)).toBe(1);
+      const r = globalThis.__LocatorLensEngine.generateLocators(document.getElementById('b'));
+      expect(r.locators.find((l) => l.target && l.target.kind === 'role').unique).toBe(true);
+      send({ type: 'STOP_INSPECT' });
+    });
+  });
+
   it('a prior instance whose liveness probe throws is replaced', () => {
     window.__LocatorLensInstance = {
       isAlive: () => {

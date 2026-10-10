@@ -93,7 +93,15 @@
   // vanish from every count. A page script cannot reach this registry (content
   // scripts run in an isolated world), so it cannot hide its elements here either.
   // Our UI is plain light DOM appended to <body>, so Node.contains() is enough.
-  const ownUiRoots = new Set();
+  // The registry outlives a re-evaluation of this file: background re-runs every
+  // content script whenever it injects into all frames (an iframe added while
+  // inspecting, recording, a health check, a POM pick), and the live content.js
+  // instance then stands down without re-marking anything. A fresh Set here forgot
+  // the overlay, its "▲ Parent" button and the toast, which then counted as page
+  // elements. The previous engine object lives in this same isolated world, so its
+  // registry is ours to carry over.
+  const prevEngine = global.__LocatorLensEngine;
+  const ownUiRoots = prevEngine && prevEngine.ownUiRoots instanceof Set ? prevEngine.ownUiRoots : new Set();
   function markOwnUi(el) {
     if (el && el.nodeType === 1) ownUiRoots.add(el);
   }
@@ -1296,7 +1304,8 @@
   // like Playwright's frameLocator — pierces open shadow roots, or positionally as
   // `iframe >> nth=index` for a cross-origin frame), then resolve `child` inside
   // its document. `index` is the position among the document's <iframe> elements
-  // in this pierce order — exactly what content.js's frameIndexOf() records — not
+  // in this pierce order — exactly what content.js's frameIndexOf() records, or,
+  // behind a cross-origin parent, what that parent's childFrameIndex() answers — not
   // the position in window.frames (that one is `framesIndex`, for Selenium only,
   // and counts <frame>/<object> browsing contexts too). null when the frame
   // cannot be evaluated: several elements match
@@ -1986,6 +1995,7 @@
     resolveTarget,
     markOwnUi,
     unmarkOwnUi,
+    ownUiRoots, // read by the next evaluation of this file (see above)
     unwrapFrameTarget,
     suggestName,
     elementKind,

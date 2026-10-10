@@ -598,30 +598,55 @@ describe('L3 · redactUrl', () => {
   beforeEach(() => (original = window.location.href));
   afterEach(() => window.history.replaceState(null, '', original));
 
-  it('redacts OAuth codes, tokens, signatures, keys and sessions (case-insensitive)', () => {
+  it('always redacts names that can only mean a credential (case-insensitive)', () => {
     const keys = [
-      'code',
-      'token',
       'access_token',
       'id_token',
       'refresh_token',
-      'auth',
-      'sig',
       'signature',
       'X-Amz-Signature',
       'X-Amz-Credential',
       'X-Amz-Security-Token',
-      'key',
       'apikey',
       'api_key',
       'API_KEY',
       'client_secret',
-      'session',
+      'secret',
       'SessionId',
       'password',
+      'passwd',
+      'pwd',
     ];
     for (const k of keys) expect(urlOf(`/cb?${k}=s3cr3t&q=shoes`)).toBe(`/cb?${k}=REDACTED&q=shoes`);
     expect(urlOf('/cb#access_token=abc&state=1')).toBe('/cb#access_token=REDACTED&state=1');
+  });
+
+  it('keeps ordinary values of generic names (code, token, key, auth, sig, session)', () => {
+    // A search term, a promo code, a page number, a slug: replay and every export
+    // must navigate to the same URL the recording started on.
+    expect(urlOf('/search?key=shoes')).toBe('/search?key=shoes');
+    expect(urlOf('/cart?code=SUMMER')).toBe('/cart?code=SUMMER');
+    expect(urlOf('/talks?session=2')).toBe('/talks?session=2');
+    expect(urlOf('/p?code=summer-sale-2024&token=x&auth=sso&sig=1')).toBe(
+      '/p?code=summer-sale-2024&token=x&auth=sso&sig=1'
+    );
+    expect(urlOf('/s?key=running-shoes-for-men&code=1234567890123456')).toBe(
+      '/s?key=running-shoes-for-men&code=1234567890123456'
+    );
+  });
+
+  it('redacts generic names whose value looks like a secret: OAuth codes, hex/base64 tokens, JWTs', () => {
+    const jwt = 'eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0In0.c2lnbmF0dXJl';
+    expect(urlOf('/cb?code=4/0AX4XfWhq3Lk9vZpT2mR8nB&scope=email')).toBe('/cb?code=REDACTED&scope=email');
+    expect(urlOf('/cb?code=4%2F0AX4XfWhq3Lk9vZpT2mR8nB')).toBe('/cb?code=REDACTED');
+    expect(urlOf('/x?token=9f86d081884c7d659a2feaa0c55ad015&q=1')).toBe('/x?token=REDACTED&q=1');
+    expect(urlOf(`/x?Token=${jwt}`)).toBe('/x?Token=REDACTED');
+    expect(urlOf('/x#auth=dGhpc2lzYXNlY3JldDEyMw==&sig=Zx81kQp2Lm7Vb3Nc')).toBe(
+      '/x#auth=REDACTED&sig=REDACTED'
+    );
+    expect(urlOf('/x?KEY=AKIA1234ABCD5678EFGH&session=s3ss10nIdQ8wX2vB')).toBe(
+      '/x?KEY=REDACTED&session=REDACTED'
+    );
   });
 
   it('leaves ordinary parameters (and lookalike names) alone', () => {
@@ -812,5 +837,285 @@ describe('L8 · shadow-root change listeners do not pile up', () => {
     oldBox.checked = true;
     oldBox.dispatchEvent(new window.Event('change', { bubbles: true }));
     expect(steps().filter((s) => s.action === 'check')).toHaveLength(1);
+  });
+});
+
+describe('C6 · tab-wide: each frame reports a secret on screen (SENSITIVE_ON_SCREEN)', () => {
+  const flags = (list = sent) => list.filter((m) => m.type === 'SENSITIVE_ON_SCREEN').map((m) => m.visible);
+  const input = (el, init = {}) =>
+    el.dispatchEvent(new window.Event('input', { bubbles: true, composed: true, ...init }));
+
+  it('reports a card number as it appears and goes, once per change; masked and plain fields never', () => {
+    document.body.innerHTML = `
+      <input id="card" autocomplete="cc-number"><input id="pw" type="password"><input id="q">`;
+    record();
+    const card = document.getElementById('card');
+    const pw = document.getElementById('pw');
+    pw.value = 'hunter2';
+    input(pw);
+    document.getElementById('q').value = 'shoes';
+    input(document.getElementById('q'));
+    expect(flags()).toEqual([]);
+    card.value = '4';
+    input(card);
+    card.value = '42';
+    input(card);
+    card.dispatchEvent(new window.FocusEvent('focusout', { bubbles: true, composed: true }));
+    expect(flags()).toEqual([true]); // only on change, not per keystroke
+    card.value = '';
+    input(card);
+    expect(flags()).toEqual([true, false]);
+    expect(JSON.stringify(sent)).not.toContain('42');
+  });
+
+  it('counts a value a page script or autofill writes (untrusted events), and one present before recording', () => {
+    document.body.innerHTML = '<input id="otp" autocomplete="one-time-code" value="">';
+    const otp = document.getElementById('otp');
+    otp.value = '123456';
+    record(); // record() clears sent: start again to see the start-up report
+    send({ type: 'STOP_RECORDING' });
+    sent.length = 0;
+    send({ type: 'START_RECORDING' });
+    expect(flags()).toEqual([]); // the last answer (yes) still stands: nothing changed
+    globalThis.__LocatraTrustSyntheticEvents = false;
+    otp.value = '';
+    input(otp);
+    expect(flags()).toEqual([false]);
+    otp.value = '654321';
+    otp.dispatchEvent(new window.Event('change', { bubbles: true }));
+    expect(flags()).toEqual([false, true]);
+  });
+
+  it('reports a value present when recording starts', () => {
+    document.body.innerHTML = '<input id="card" autocomplete="cc-number" value="4242424242424242">';
+    send({ type: 'START_RECORDING' });
+    expect(flags()).toEqual([true]);
+  });
+
+  it('is sent before the step that leaves the frame, and sees fields in open shadow roots', () => {
+    document.body.innerHTML = '<x-pay id="h"></x-pay><button id="go">Go</button>';
+    const sr = document.getElementById('h').attachShadow({ mode: 'open' });
+    sr.innerHTML = '<input id="cvc" autocomplete="cc-csc">';
+    record();
+    const cvc = sr.getElementById('cvc');
+    cvc.value = '123';
+    input(cvc);
+    expect(flags()).toEqual([true]);
+    sent.length = 0;
+    cvc.remove(); // gone without an event: the step re-evaluates first
+    pointer(document.getElementById('go'));
+    expect(sent.map((m) => m.type + (m.type === 'SENSITIVE_ON_SCREEN' ? ':' + m.visible : ''))).toEqual([
+      'SENSITIVE_ON_SCREEN:false',
+      'RECORDED_ACTION', // the pending (sensitive) fill, flushed by the click
+      'RECORDED_ACTION',
+    ]);
+    expect(steps().map((s) => s.action)).toEqual(['fill', 'click']);
+  });
+
+  it('remembers the field that said yes until it no longer shows a secret (re-checked each second)', () => {
+    vi.useFakeTimers();
+    document.body.innerHTML = '<input id="card" autocomplete="cc-number"><button id="go">Go</button>';
+    record();
+    const card = document.getElementById('card');
+    card.value = '4242';
+    input(card);
+    // A click elsewhere moves focus away; the field still shows the number.
+    pointer(document.getElementById('go'));
+    expect(flags()).toEqual([true]);
+    card.style.display = 'none'; // hidden by the page, no event
+    vi.advanceTimersByTime(1000);
+    expect(flags()).toEqual([true, false]);
+    vi.advanceTimersByTime(5000);
+    expect(flags()).toEqual([true, false]); // no re-check (nor message) while the answer is no
+  });
+
+  it('a frame going away says it shows nothing; not on a cancellable beforeunload', () => {
+    document.body.innerHTML = '<input id="card" autocomplete="cc-number">';
+    record();
+    const card = document.getElementById('card');
+    card.value = '4242';
+    input(card);
+    window.dispatchEvent(new window.Event('beforeunload'));
+    expect(flags()).toEqual([true]);
+    window.dispatchEvent(new window.PageTransitionEvent('pagehide', { persisted: true }));
+    expect(flags()).toEqual([true, false]);
+    window.dispatchEvent(new window.PageTransitionEvent('pageshow', { persisted: true }));
+    expect(flags()).toEqual([true, false, true]); // back from the bfcache, still showing
+  });
+
+  it('a payment iframe reports for itself: its own messages, keyed by its frame', () => {
+    document.body.innerHTML = '<iframe id="pay"></iframe><button id="pay-btn">Pay</button>';
+    const { w, frameSend, frameSent } = loadIntoFrame(document.getElementById('pay'));
+    w.document.body.innerHTML = '<input id="cc" autocomplete="cc-number">';
+    record();
+    frameSend({ type: 'START_RECORDING', rearm: true });
+    const cc = w.document.getElementById('cc');
+    cc.value = '4242424242424242';
+    cc.dispatchEvent(new w.Event('input', { bubbles: true, composed: true }));
+    expect(flags(frameSent)).toEqual([true]);
+    pointer(document.getElementById('pay-btn'));
+    // The top frame cannot see it; background combines the frames' answers.
+    expect(steps()[0].sensitiveOnScreen).toBeUndefined();
+    expect(flags()).toEqual([]);
+  });
+});
+
+describe('L7 · a label click the page handles itself is still recorded', () => {
+  const up = (el) =>
+    el.dispatchEvent(new window.PointerEvent('pointerup', { bubbles: true, composed: true }));
+  const click = (el) => el.dispatchEvent(new window.MouseEvent('click', { bubbles: true, cancelable: true }));
+
+  beforeEach(() => {
+    document.body.innerHTML = `
+      <label id="lbl" for="cb">Remember me</label><input type="checkbox" id="cb">
+      <button id="go">Go</button>`;
+  });
+
+  it('records the click when the page cancels it and toggles state in script (no change)', () => {
+    vi.useFakeTimers();
+    const lbl = document.getElementById('lbl');
+    const cb = document.getElementById('cb');
+    lbl.addEventListener('click', (e) => {
+      e.preventDefault();
+      cb.checked = !cb.checked; // no change event
+    });
+    record();
+    pointer(lbl);
+    up(lbl);
+    click(lbl);
+    expect(steps()).toEqual([]); // held until the click's task is over
+    vi.advanceTimersByTime(0);
+    expect(steps().map((s) => [s.action, s.code])).toEqual([['click', "page.getByText('Remember me')"]]);
+  });
+
+  it('records only the check when the browser toggles the control (native label activation)', () => {
+    vi.useFakeTimers();
+    const lbl = document.getElementById('lbl');
+    record();
+    pointer(lbl);
+    up(lbl);
+    click(lbl); // jsdom runs the label's activation: the checkbox toggles and fires change
+    vi.advanceTimersByTime(1000);
+    expect(steps().map((s) => s.action)).toEqual(['check']);
+  });
+
+  it('keeps its place: the next step flushes it first; release elsewhere or a lost gesture settle it', () => {
+    vi.useFakeTimers();
+    const lbl = document.getElementById('lbl');
+    const go = document.getElementById('go');
+    record();
+    pointer(lbl);
+    pointer(go); // no gesture end seen: the next step sends the held click before itself
+    expect(steps().map((s) => [s.action, s.target.kind])).toEqual([
+      ['click', 'text'],
+      ['click', 'role'],
+    ]);
+    expect(steps()[0].timestamp).toBeLessThanOrEqual(steps()[1].timestamp);
+
+    sent.length = 0;
+    pointer(lbl);
+    up(go); // released elsewhere: no click follows
+    vi.advanceTimersByTime(99);
+    expect(steps()).toEqual([]);
+    vi.advanceTimersByTime(1);
+    expect(steps().map((s) => s.action)).toEqual(['click']);
+
+    sent.length = 0;
+    pointer(lbl);
+    vi.advanceTimersByTime(5000); // never saw the end of the gesture
+    expect(steps().map((s) => s.action)).toEqual(['click']);
+
+    sent.length = 0;
+    pointer(lbl);
+    send({ type: 'STOP_RECORDING' }); // a stop sends it too
+    expect(steps().map((s) => s.action)).toEqual(['click']);
+  });
+
+  it('typing that follows the press lands after the held click; a double-click supersedes both clicks', () => {
+    vi.useFakeTimers();
+    document.body.insertAdjacentHTML('beforeend', '<input id="name" aria-label="Name">');
+    const lbl = document.getElementById('lbl');
+    const cb = document.getElementById('cb');
+    lbl.addEventListener('click', (e) => e.preventDefault());
+    record();
+    pointer(lbl);
+    up(document.getElementById('go')); // released elsewhere: settles in 100 ms
+    const name = document.getElementById('name');
+    name.value = 'Ada';
+    name.dispatchEvent(new window.Event('input', { bubbles: true }));
+    vi.advanceTimersByTime(100);
+    vi.advanceTimersByTime(450);
+    expect(steps().map((s) => s.action)).toEqual(['click', 'fill']);
+
+    sent.length = 0;
+    pointer(lbl);
+    up(lbl);
+    click(lbl);
+    vi.advanceTimersByTime(0);
+    pointer(lbl);
+    up(lbl);
+    click(lbl); // the second click's settle is still pending when dblclick fires
+    lbl.dispatchEvent(new window.MouseEvent('dblclick', { bubbles: true }));
+    const [c1, c2, dbl] = steps();
+    expect([c1.action, c2.action, dbl.action]).toEqual(['click', 'click', 'dblclick']);
+    expect(dbl.supersedes).toEqual([c1.eventId, c2.eventId]);
+    expect(cb.checked).toBe(false);
+  });
+
+  it('a page going away sends a held click', () => {
+    record();
+    pointer(document.getElementById('lbl'));
+    window.dispatchEvent(new window.PageTransitionEvent('pagehide'));
+    expect(steps().map((s) => s.action)).toEqual(['click']);
+  });
+
+  it('a pause, or assert mode, sends a held click first', () => {
+    const lbl = document.getElementById('lbl');
+    record();
+    pointer(lbl);
+    send({ type: 'PAUSE_RECORDING' });
+    expect(steps().map((s) => s.action)).toEqual(['click']);
+    send({ type: 'RESUME_RECORDING' });
+    pointer(lbl);
+    send({ type: 'SET_ASSERT_MODE', on: true, assertType: 'toBeVisible' });
+    expect(steps().map((s) => s.action)).toEqual(['click', 'click']);
+  });
+});
+
+describe('<option> clicks inside a <select> are left to its change', () => {
+  it('a listbox click and Ctrl+click record only selectOption steps, the last with every value', () => {
+    document.body.innerHTML = `
+      <label for="t">Toppings</label>
+      <select id="t" multiple size="4"><option>Cheese</option><option>Ham</option>
+        <optgroup id="veg" label="Veg"><option>Olive</option></optgroup></select>`;
+    record();
+    const sel = document.getElementById('t');
+    pointer(sel.options[0]);
+    sel.options[0].selected = true;
+    change(sel);
+    pointer(sel.options[1], { ctrlKey: true });
+    sel.options[1].selected = true;
+    change(sel);
+    pointer(document.getElementById('veg'));
+    sel.options[1].dispatchEvent(new window.MouseEvent('dblclick', { bubbles: true }));
+    expect(steps().map((s) => [s.action, s.values])).toEqual([
+      ['selectOption', undefined],
+      ['selectOption', ['Cheese', 'Ham']],
+    ]);
+    expect(steps()[1].fullCode).toBe(
+      "await page.getByRole('listbox', { name: 'Toppings' }).selectOption(['Cheese', 'Ham']);"
+    );
+  });
+
+  it('a dropdown option click (Firefox dispatches it) is not a step; the select’s own click still is', () => {
+    document.body.innerHTML =
+      '<select id="d" aria-label="Size"><option>S</option><option>M</option></select>';
+    record();
+    const sel = document.getElementById('d');
+    pointer(sel);
+    pointer(sel.options[1]);
+    sel.selectedIndex = 1;
+    change(sel);
+    expect(steps().map((s) => s.action)).toEqual(['click', 'selectOption']);
   });
 });

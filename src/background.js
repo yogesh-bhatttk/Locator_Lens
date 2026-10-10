@@ -246,6 +246,13 @@ let panelSeen = {};
 // them all race to sendResponse. Cleared when that tab closes or navigates.
 let lastPick = null;
 
+// C6, tab-wide: tabId -> Set of frameIds whose content script reports a secret
+// (card number, one-time code…) readable in its document. captureVisibleTab shoots
+// the whole tab, frames included, so no step of that tab is captured while any
+// frame says so. Persisted with the rest: a worker evicted mid-recording must not
+// forget a card number still showing in a payment iframe.
+const sensitiveFrames = new Map();
+
 /** windowId -> RECORDED_ACTION payloads not yet acknowledged by that window's panel. */
 let recordBuffers = {};
 
@@ -305,6 +312,16 @@ function ready() {
       if (saved.panelSeen && typeof saved.panelSeen === 'object') panelSeen = Object.assign({}, saved.panelSeen);
       else if (typeof saved.panelLastSeen === 'number') panelSeen = { any: saved.panelLastSeen };
       if (saved.lastPick) lastPick = saved.lastPick;
+      if (Array.isArray(saved.sensitiveFrames)) {
+        saved.sensitiveFrames.forEach((entry) => {
+          if (!Array.isArray(entry) || typeof entry[0] !== 'number' || !Array.isArray(entry[1])) return;
+          const ids = entry[1].filter((f) => typeof f === 'number');
+          if (!ids.length) return;
+          const set = sensitiveFrames.get(entry[0]) || new Set();
+          ids.forEach((f) => set.add(f));
+          sensitiveFrames.set(entry[0], set);
+        });
+      }
       const buf = res && res[RECORD_BUFFER_KEY];
       if (buf && typeof buf === 'object') recordBuffers = Object.assign({}, buf);
       // Any replay on record belonged to a previous worker instance, and its step
@@ -360,6 +377,7 @@ function persistState() {
       })),
       panelSeen,
       lastPick,
+      sensitiveFrames: Array.from(sensitiveFrames.entries()).map(([tabId, ids]) => [tabId, Array.from(ids)]),
       // Only what is needed to clean up after a worker restart — never the steps
       // or the secrets of a run.
       replays: Array.from(replayRuns.values())
@@ -513,6 +531,77 @@ function isContentScriptSender(sender) {
   return !!(sender && sender.tab && typeof sender.tab.id === 'number' && !isExtensionPageSender(sender));
 }
 
+// ── Exact frame index behind a cross-origin parent (C4) ──────────────────────
+// A frame whose <iframe> element sits in a cross-origin parent cannot count that
+// parent's <iframe>s, but the parent's own content script can. Each hidden level
+// is asked of its parent: the top frame directly (frameId 0); a deeper parent —
+// whose frameId this worker cannot know without webNavigation — by broadcasting
+// with its window.frames path from the top, which only that frame owns and only
+// it answers. A frame with no window.frames position (-1: an <iframe> in a shadow
+// root) can only be the asker itself, and is described to its parent by the URL
+// the browser reports for the asking frame (sender.url) — never by anything the
+// message says. No answer in time (a parent without a content script, a frame
+// that went away) leaves that level null: the frame keeps its provisional index.
+const FRAME_LOOKUP_TIMEOUT_MS = 400;
+const FRAME_LOOKUP_MAX_DEPTH = 8; // content.js's frameChain() stops there too
+const FRAME_LOOKUP_MAX_INDEX = 9999;
+
+/**
+ * A FRAME_INDEX_LOOKUP's { path, levels }, or null when malformed. path[j] is the
+ * window.frames position of the asker's level-j ancestor (-1: none); a level can
+ * be asked when every position above it is known, and its own is too unless it is
+ * the asker itself.
+ */
+function frameLookupRequest(msg) {
+  const path = msg.path;
+  const levels = msg.levels;
+  const isIndex = (n, min, max) => Number.isInteger(n) && n >= min && n <= max;
+  if (!Array.isArray(path) || !path.length || path.length > FRAME_LOOKUP_MAX_DEPTH) return null;
+  if (!path.every((k) => isIndex(k, -1, FRAME_LOOKUP_MAX_INDEX))) return null;
+  if (!Array.isArray(levels) || !levels.length || !levels.every((j) => isIndex(j, 0, path.length - 1))) return null;
+  const askable = (j) => path.slice(0, j).every((k) => k >= 0) && (path[j] >= 0 || j === path.length - 1);
+  if (!levels.every(askable)) return null;
+  return { path: path.slice(), levels: Array.from(new Set(levels)) };
+}
+
+/**
+ * The parent at `parentPath`'s answer for its child window.frames[framesIndex] (or,
+ * for -1, its child showing `url`): an index, or null.
+ */
+function askChildFrameIndex(tabId, parentPath, framesIndex, url) {
+  return new Promise((resolve) => {
+    let timer = null;
+    const finish = (index) => {
+      if (!timer) return;
+      clearTimeout(timer);
+      timer = null;
+      resolve(index);
+    };
+    timer = setTimeout(() => finish(null), FRAME_LOOKUP_TIMEOUT_MS);
+    const msg = { type: 'FRAME_CHILD_INDEX', parentPath, framesIndex };
+    if (framesIndex < 0) msg.url = url;
+    try {
+      sendToFrame(tabId, msg, parentPath.length ? undefined : 0, (res) => {
+        void chrome.runtime.lastError;
+        finish(res && res.ok === true && Number.isInteger(res.index) && res.index >= 0 ? res.index : null);
+      });
+    } catch (e) {
+      finish(null);
+    }
+  });
+}
+
+/** indices[j] for every level of `path`: the parent's answer for each asked level, else null. */
+function lookupFrameIndices(tabId, path, levels, url) {
+  return Promise.all(levels.map((j) => askChildFrameIndex(tabId, path.slice(0, j), path[j], url))).then((found) => {
+    const indices = path.map(() => null);
+    levels.forEach((j, n) => {
+      indices[j] = found[n];
+    });
+    return indices;
+  });
+}
+
 // ── Popup / SidePanel ↔ Content message relay ─────────────────────────────────
 chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
   if (!msg || typeof msg.type !== 'string') return;
@@ -530,6 +619,9 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
   if (msg.type === 'CONTENT_READY') {
     if (!fromTab) return;
     ready().then(() => {
+      // A new document in that frame: whatever the old one showed went with it (the
+      // new one reports for itself once it is recording).
+      if (typeof sender.frameId === 'number' && setSensitiveFrame(fromTab.id, sender.frameId, false)) persistState();
       const s = sessionForTab(fromTab.id);
       sendResponse({
         recording: !!s,
@@ -540,6 +632,22 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
       });
     });
     return true;
+  }
+
+  // SENSITIVE_ON_SCREEN (C6): a frame's content script says whether a secret is
+  // readable in its document — sent only when that changes. Only content scripts,
+  // and only about their own frame (sender.frameId, never a field of the message).
+  if (msg.type === 'SENSITIVE_ON_SCREEN') {
+    if (!fromTab || typeof sender.frameId !== 'number' || typeof msg.visible !== 'boolean') return;
+    const tabId = fromTab.id;
+    const frameId = sender.frameId;
+    // Right away, not after ready(): a capture already queued (or in flight) for
+    // this tab may otherwise shoot the value that just appeared.
+    if (msg.visible) voidCaptures(tabId);
+    ready().then(() => {
+      if (setSensitiveFrame(tabId, frameId, msg.visible)) persistState();
+    });
+    return;
   }
 
   if (msg.type === 'REQUEST_FRAME_INJECTION') {
@@ -813,6 +921,8 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
   if (msg.type === 'RECORDED_ACTION') {
     if (!fromTab) return;
     const tabId = fromTab.id;
+    const step = msg.data;
+    if (step && typeof step === 'object' && (step.sensitive || step.sensitiveOnScreen)) voidCaptures(tabId);
     ready().then(() => {
       const s = sessionForTab(tabId);
       const windowId = s ? s.windowId : fromTab.windowId;
@@ -826,6 +936,22 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
       maybeCaptureStep(fromTab, data);
     });
     return;
+  }
+
+  // FRAME_INDEX_LOOKUP (C4): a subframe's content script asks where its hidden
+  // levels sit among their parents' <iframe>s. Only content scripts in a subframe
+  // ask; the answer only ever describes frames of the asking tab.
+  if (msg.type === 'FRAME_INDEX_LOOKUP') {
+    if (!fromTab || !(sender.frameId > 0)) return;
+    const req = frameLookupRequest(msg);
+    // Finding a frame by URL needs the browser's word for that URL.
+    if (req && typeof sender.url !== 'string') req.levels = req.levels.filter((j) => req.path[j] >= 0);
+    if (!req || !req.levels.length) {
+      sendResponse({ ok: false });
+      return;
+    }
+    lookupFrameIndices(fromTab.id, req.path, req.levels, sender.url).then((indices) => sendResponse({ ok: true, indices }));
+    return true;
   }
 
   // 🧩 PAGE OBJECT: region pick in every frame of the active tab (each frame
@@ -1485,6 +1611,7 @@ if (chrome.tabs.onAttached) {
 chrome.tabs.onRemoved.addListener((tabId) => {
   tabLoadSeq.delete(tabId);
   pendingCaptures.delete(tabId);
+  captureEpochs.delete(tabId);
   captureBlockedTabs.delete(tabId);
   injectErrors.delete(tabId);
   for (const run of Array.from(replayRuns.values())) {
@@ -1500,6 +1627,7 @@ chrome.tabs.onRemoved.addListener((tabId) => {
     // short-circuits once the first is true, which used to leave a closed tab stuck
     // in the recording set whenever it was also the inspected tab.
     let changed = inspectTabs.delete(tabId);
+    if (sensitiveFrames.delete(tabId)) changed = true;
     for (const [windowId, s] of Array.from(sessions.entries())) {
       if (!s.tabIds.delete(tabId)) continue;
       changed = true;
@@ -1554,7 +1682,8 @@ chrome.tabs.onUpdated.addListener((tabId, info, tab) => {
   }
   ready().then(() => {
     if (info.status === 'loading') {
-      let changed = false;
+      // A new top document: every frame of the old one is gone.
+      let changed = sensitiveFrames.delete(tabId);
       const inspectWindow = inspectTabs.get(tabId);
       if (inspectTabs.delete(tabId)) {
         changed = true;
@@ -1673,6 +1802,44 @@ function thumbStore() {
   return t && typeof t.put === 'function' ? t : null;
 }
 
+// C6: a sensitive step, or a frame starting to show a secret, voids every capture
+// of its tab that is queued or in flight — a click on the card field queues one,
+// the user pastes the number, and that queued capture would otherwise shoot it.
+// Each job remembers its tab's epoch when it was queued; a bump discards it at
+// every later stage, up to the moment its thumbnail would be stored.
+/** tabId -> count of sensitive events seen in that tab. */
+const captureEpochs = new Map();
+
+function voidCaptures(tabId) {
+  pendingCaptures.delete(tabId);
+  captureEpochs.set(tabId, (captureEpochs.get(tabId) || 0) + 1);
+}
+
+/** Does any frame of the tab report a secret on screen? */
+function tabShowsSecret(tabId) {
+  const ids = sensitiveFrames.get(tabId);
+  return !!ids && ids.size > 0;
+}
+
+/** @returns whether the flag changed. */
+function setSensitiveFrame(tabId, frameId, visible) {
+  const ids = sensitiveFrames.get(tabId);
+  if (visible) {
+    if (ids && ids.has(frameId)) return false;
+    if (ids) ids.add(frameId);
+    else sensitiveFrames.set(tabId, new Set([frameId]));
+    return true;
+  }
+  if (!ids || !ids.delete(frameId)) return false;
+  if (!ids.size) sensitiveFrames.delete(tabId);
+  return true;
+}
+
+/** A secret appeared in the job's tab since it was queued, or is showing now. */
+function captureVoided(job) {
+  return (captureEpochs.get(job.tabId) || 0) !== job.epoch || tabShowsSecret(job.tabId);
+}
+
 function dropPendingCaptures() {
   pendingCaptures.clear();
   if (captureTimer) {
@@ -1786,19 +1953,27 @@ function maybeCaptureStep(fromTab, data) {
   // step (password, one-time code, card) gets no picture, nor does any step taken
   // while such a value shows in a field: the privacy policy promises it never
   // reaches extension storage.
-  if (!data || data.suggested || data.sensitive || data.sensitiveOnScreen) return;
+  // So is any step while another frame of the tab shows one (a card number typed
+  // into a payment iframe, then "Pay" clicked in the top frame), and a capture
+  // still queued from an earlier step of the tab is cancelled.
+  if (!data) return;
+  if (fromTab && (data.sensitive || data.sensitiveOnScreen)) voidCaptures(fromTab.id);
+  if (data.suggested || data.sensitive || data.sensitiveOnScreen) return;
   if (data.action === 'viewport' || !isEventId(data.eventId)) return;
   if (!fromTab || fromTab.active === false || !isWindowId(fromTab.windowId)) return;
+  if (tabShowsSecret(fromTab.id)) return;
   if (typeof chrome.tabs.captureVisibleTab !== 'function' || !thumbStore()) return;
   const job = {
     tabId: fromTab.id,
     tabWindowId: fromTab.windowId,
     windowId: isWindowId(data.windowId) ? data.windowId : fromTab.windowId,
     eventId: data.eventId,
-    queuedAt: Date.now()
+    queuedAt: Date.now(),
+    epoch: captureEpochs.get(fromTab.id) || 0
   };
   Promise.all([loadSettings(), screenshotPermission()]).then(() => {
     if (!stepScreenshotsEnabled || captureBlockedTabs.has(job.tabId) || thumbForgotten(job)) return;
+    if (captureVoided(job)) return;
     pendingCaptures.delete(job.tabId); // re-insert so the map stays in arrival order
     pendingCaptures.set(job.tabId, job);
     pumpCaptures();
@@ -1829,14 +2004,14 @@ function pumpCaptures() {
 /** Capture one step. Resolves when done, whatever the outcome; never rejects. */
 function captureStep(job) {
   return new Promise((resolve) => {
-    if (!stepScreenshotsEnabled || captureBlockedTabs.has(job.tabId) || thumbForgotten(job)) {
+    if (!stepScreenshotsEnabled || captureBlockedTabs.has(job.tabId) || thumbForgotten(job) || captureVoided(job)) {
       resolve();
       return;
     }
     // captureVisibleTab shoots whatever the window shows: only worth it while the
     // step's own tab is still the one on screen.
     queryActiveTab(job.tabWindowId, (tab) => {
-      if (!tab || tab.id !== job.tabId) {
+      if (!tab || tab.id !== job.tabId || captureVoided(job)) {
         resolve();
         return;
       }
@@ -1848,6 +2023,11 @@ function captureStep(job) {
           if (failed) {
             // No <all_urls> and no (longer an) activeTab grant on this tab: stop asking.
             if (allUrlsGranted !== true) captureBlockedTabs.add(job.tabId);
+            resolve();
+            return;
+          }
+          // A secret appeared while the capture was in flight: it may be in the picture.
+          if (captureVoided(job)) {
             resolve();
             return;
           }
@@ -1865,7 +2045,8 @@ async function storeThumbnail(job, dataUrl) {
   const image = await makeThumbnail(dataUrl);
   if (!store || !image) return;
   // Removed while the capture was in flight: storing it would only orphan it.
-  if (thumbForgotten(job)) return;
+  // Voided meanwhile: the picture may show the secret.
+  if (thumbForgotten(job) || captureVoided(job)) return;
   const ok = await store.put({
     eventId: job.eventId,
     windowId: job.windowId,
@@ -2372,6 +2553,16 @@ function sendReplayStep(run, msg) {
   });
 }
 
+// The env-var name a sensitive step's value is filed under — exactly as the panel
+// names it when it prompts for the replay's secrets (sidepanel.js secretNameOf): a
+// step recorded before secretName existed, or with an invalid one, is a password.
+const REPLAY_SECRET_NAME_RE = /^[A-Za-z_][A-Za-z0-9_]*$/;
+function replaySecretName(step) {
+  return typeof step.secretName === 'string' && REPLAY_SECRET_NAME_RE.test(step.secretName)
+    ? step.secretName
+    : 'LOCATRA_PASSWORD';
+}
+
 /** REPLAY_SECRET_REQUEST from a frame of `tabId`: {ok, value} once per step attempt, else {ok:false}. */
 function takeReplaySecret(tabId, runId, index) {
   for (const run of replayRuns.values()) {
@@ -2379,8 +2570,8 @@ function takeReplaySecret(tabId, runId, index) {
     const gate = run.secretGate;
     if (!gate || gate.served || gate.index !== index) return { ok: false };
     const step = run.steps[index];
-    const name = step && step.sensitive ? step.secretName : null;
-    if (typeof name !== 'string' || typeof run.secrets[name] !== 'string') return { ok: false };
+    const name = step && step.sensitive ? replaySecretName(step) : null;
+    if (!name || typeof run.secrets[name] !== 'string') return { ok: false };
     gate.served = true;
     return { ok: true, value: run.secrets[name] };
   }

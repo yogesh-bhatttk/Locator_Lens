@@ -101,7 +101,11 @@ describe('F3 · URL-change suggestions', () => {
     load();
     send({ type: 'START_RECORDING' });
     sent.length = 0;
-    window.history.pushState(null, '', '/orders/42?token=x&access_token=secret');
+    window.history.pushState(
+      null,
+      '',
+      '/orders/42?token=9f86d081884c7d659a2feaa0c55ad015&access_token=secret'
+    );
     await advance(500); // the poll notices the change
     expect(suggestions()).toEqual([]);
     await advance(500); // …and it held still
@@ -559,7 +563,7 @@ describe('F4 · rect and viewport on recorded steps', () => {
     expect(fill.rect).toBeUndefined();
   });
 
-  it('inside a same-origin iframe the rect is offset into top-frame coordinates', () => {
+  it('inside a same-origin iframe the rect is offset into top-frame coordinates', async () => {
     load();
     document.body.innerHTML = '<iframe id="f" style="border:0;padding-left:5px;padding-top:7px"></iframe>';
     const frame = document.getElementById('f');
@@ -573,7 +577,10 @@ describe('F4 · rect and viewport on recorded steps', () => {
       runtime: {
         id: 'x',
         lastError: null,
-        sendMessage: (m) => frameSent.push(m),
+        sendMessage: (m, cb) => {
+          frameSent.push(m);
+          if (m.type === 'FRAME_INDEX_LOOKUP' && cb) cb({ ok: true, indices: [0] });
+        },
         onMessage: { addListener: (fn) => (w.__h = fn) },
       },
       storage: { local: { get: (k, cb) => cb({}) }, onChanged: { addListener: () => {} } },
@@ -594,6 +601,7 @@ describe('F4 · rect and viewport on recorded steps', () => {
     // Across an origin boundary the frame element cannot be read: no rect at all.
     Object.defineProperty(w, 'frameElement', { configurable: true, get: () => null });
     btn.dispatchEvent(new w.PointerEvent('pointerdown', { bubbles: true, button: 0, isPrimary: true }));
+    for (let i = 0; i < 10; i++) await Promise.resolve(); // held for its exact frame index (C4)
     const second = frameSent.filter((m) => m.type === 'RECORDED_ACTION')[1].data;
     expect(second.rect).toBeUndefined();
     expect(second.viewport).toBeUndefined();
