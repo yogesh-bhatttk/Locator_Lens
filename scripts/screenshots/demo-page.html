@@ -263,6 +263,12 @@
             // steps (Tab, Shift+Tab, Enter) moved focus where they were meant to.
             submittedFrom: (focused && (focused.id || focused.getAttribute('data-testid'))) || ''
           };
+          // The export tests' server adds fields of its own (scripts/e2e/demo-server.mjs);
+          // it reports them through this hook. Absent everywhere else.
+          if (typeof window.demoExtraOrder === 'function') {
+            var extra = window.demoExtraOrder(form);
+            for (var k in extra) order[k] = extra[k];
+          }
           var card = order.card;
           document.querySelector('[data-testid="confirmation-name"]').textContent =
             (order.firstName + ' ' + order.lastName).trim();

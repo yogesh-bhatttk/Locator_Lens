@@ -94,12 +94,30 @@ export async function recordCheckoutFlow(opts) {
     await page.check('#create-account');
     await pause(500);
     await typeInto(page.locator('#password'), password);
+    // A value check on the password field: recorded as an env-var reference, never
+    // the value. Assert mode turns the next click into the assertion.
+    await viaWorker({ type: 'SET_ASSERT_MODE', on: true, assertType: 'toHaveValue' });
+    await pause(300);
+    await page.click('#password');
+    await pause(500);
+    await viaWorker({ type: 'SET_ASSERT_MODE', on: false });
+    await pause(300);
     // page.selectOption() dispatches untrusted events, which the recorder ignores on
     // purpose. ArrowDown on the focused, closed <select> is a real keystroke:
     // Chromium moves to the next option (United Kingdom → Ireland), trusted change.
     await page.focus('#country');
     await page.keyboard.press('ArrowDown');
     await pause(600);
+    // Interests (export server only): a listbox <select multiple>. A click picks
+    // Books; Ctrl/Cmd+click adds Music — real clicks, so real change events. The
+    // recorder keeps the changes (selectOption, the last with both values), not
+    // the clicks on the options.
+    await page.click('#interests option[value="books"]');
+    await pause(500);
+    await page.click('#interests option[value="music"]', { modifiers: ['ControlOrMeta'] });
+    await pause(600);
+    // Promo code lives in an open shadow root; Playwright's CSS pierces it.
+    await typeInto(page.locator('promo-code #promo'), 'SPRING-10');
     await typeInto(page.locator('#notes'), 'Ring the bell twice');
     await page.check('#gift-wrap');
     await pause(500);

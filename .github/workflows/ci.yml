@@ -96,6 +96,18 @@ jobs:
       - name: Smoke test test-data variables and the Health tab
         run: xvfb-run -a npm run smoke:data-health
 
+      - name: Smoke test frames addressed only by position (cross-origin parents)
+        run: xvfb-run -a npm run smoke:frames
+
+      # The runner image ships Firefox and geckodriver. $GECKOWEBDRIVER comes from the
+      # image, not the workflow, so only the shell sees it (the `env` context does
+      # not). Headless, so no xvfb. LOCATRA_REQUIRE_FIREFOX turns "not found" into a
+      # failure instead of a skip.
+      - name: Smoke test the Firefox package in Firefox
+        env:
+          LOCATRA_REQUIRE_FIREFOX: '1'
+        run: LOCATRA_GECKODRIVER="$GECKOWEBDRIVER/geckodriver" npm run smoke:firefox
+
   # The exported tests, run for real. Unit suites only prove generated code parses;
   # these run every Playwright and Selenium export (TypeScript, JavaScript, Python)
   # in its own real runner against the demo checkout, for a canonical stored flow

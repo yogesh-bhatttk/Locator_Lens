@@ -12,6 +12,8 @@
     "createAccount": true,
     "password": "{{LOCATRA_PASSWORD}}",
     "card": "4242424242424242",
-    "submittedFrom": "phone"
+    "submittedFrom": "phone",
+    "interests": ["books", "music"],
+    "promo": "SPRING-10"
   }
 }

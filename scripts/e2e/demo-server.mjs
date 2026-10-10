@@ -4,7 +4,18 @@
 // end to end — "the exported script submitted Ada Lovelace / Ireland / gift wrap /
 // card 4242 / the password from LOCATRA_PASSWORD", not merely "it exited 0".
 //
-//   const server = await startDemoServer({ port: 4175 });
+// With `exportExtras` (the export run only) the page also carries a few things the
+// store screenshots and the other smokes must not see, so they are injected rather
+// than written into demo-page.html:
+//   - a multi-select (Interests) whose option text has stray whitespace, so labels
+//     must be normalised and every chosen option sent;
+//   - a Promo code field inside an open shadow root (<promo-code>);
+//   - an invisible <object> before the payment <iframe>: a browsing context that is
+//     not an <iframe>, which positional frame addressing must not count.
+// The page reports the extra fields through its window.demoExtraOrder hook.
+//
+//   const server = await startDemoServer({ port: 4175 });                     // plain page
+//   const server = await startDemoServer({ port: 4175, exportExtras: true }); // export run
 //   server.base            // http://127.0.0.1:4175
 //   server.orders()        // every order placed so far, oldest first
 //   await server.close();
@@ -18,9 +29,68 @@ const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '../..');
 const DEMO_HTML = join(ROOT, 'scripts/screenshots/demo-page.html');
 const FRAME_HTML = join(ROOT, 'scripts/screenshots/payment-frame.html');
 
-export async function startDemoServer({ port = 4175, host = '127.0.0.1' } = {}) {
+const OBJECT_BEFORE_PAYMENT =
+  '<object data="/embedded-note" type="text/html" width="1" height="1" aria-hidden="true" tabindex="-1"' +
+  ' style="position:absolute;opacity:0;pointer-events:none"></object>\n';
+
+const PREFERENCES_CARD = `
+        <div class="card" id="preferences">
+          <h2>Preferences</h2>
+          <div class="field">
+            <label for="interests">Interests</label>
+            <select id="interests" name="interests" multiple size="4">
+              <option value="books">Books</option>
+              <option value="music">
+                Music
+              </option>
+              <option value="film">Film</option>
+              <option value="games">Games</option>
+            </select>
+          </div>
+          <promo-code></promo-code>
+        </div>
+`;
+
+const EXTRA_SCRIPT = `
+    <script>
+      customElements.define('promo-code', class extends HTMLElement {
+        constructor() {
+          super();
+          this.attachShadow({ mode: 'open' }).innerHTML =
+            '<div class="field"><label for="promo">Promo code</label><input id="promo" name="promo" /></div>';
+        }
+      });
+      window.demoExtraOrder = function (form) {
+        var host = document.querySelector('promo-code');
+        return {
+          interests: Array.prototype.map.call(form.elements.interests.selectedOptions, function (o) { return o.value; }),
+          promo: host && host.shadowRoot ? host.shadowRoot.getElementById('promo').value : ''
+        };
+      };
+    </script>
+`;
+
+/** The checkout page with the export-only additions above. */
+export function exportPage(html) {
+  const out = String(html)
+    .replace(
+      '<iframe\n            id="payment-frame"',
+      OBJECT_BEFORE_PAYMENT + '          <iframe\n            id="payment-frame"'
+    )
+    .replace('        </form>', PREFERENCES_CARD + '        </form>')
+    .replace('  </body>', EXTRA_SCRIPT + '  </body>');
+  if (!out.includes('id="interests"') || !out.includes('<object') || !out.includes('demoExtraOrder = '))
+    throw new Error('demo-page.html changed shape: the export-only additions no longer apply');
+  return out;
+}
+
+export async function startDemoServer({ port = 4175, host = '127.0.0.1', exportExtras = false } = {}) {
+  // The extras are for the export run only: the smokes that share this server scan
+  // or count what is on the page, and must see the plain checkout.
+  const shape = (html) => (exportExtras ? exportPage(html) : html);
+  shape(readFileSync(DEMO_HTML, 'utf8')); // a page that no longer takes the extras fails here, not mid-run
   // Read per request: the page can be edited while a long run is in progress.
-  const page = () => readFileSync(DEMO_HTML);
+  const page = () => shape(readFileSync(DEMO_HTML, 'utf8'));
   const frame = () => readFileSync(FRAME_HTML);
   const orders = [];
 
@@ -47,6 +117,12 @@ export async function startDemoServer({ port = 4175, host = '127.0.0.1' } = {}) 
     }
     if (path === '/favicon.ico') {
       res.writeHead(204).end();
+      return;
+    }
+    if (path === '/embedded-note') {
+      // What the export-only <object> shows.
+      res.writeHead(200, { 'content-type': 'text/html; charset=utf-8' });
+      res.end('<!doctype html><title>note</title><p>embedded</p>');
       return;
     }
     // Every other path is the checkout page (as the smoke and screenshot servers

@@ -44,6 +44,8 @@ const OPTIONAL = [
   'reason',
   'rect',
   'viewport',
+  'values',
+  'sensitiveOnScreen',
 ];
 
 describe('checkout-flow fixture', () => {
@@ -63,10 +65,11 @@ describe('checkout-flow fixture', () => {
     expect(state.actions.map((a) => a.sequence)).toEqual(state.actions.map((_, i) => i + 1));
   });
 
-  it('never stores the password: the sensitive step is empty and named', () => {
+  it('never stores the password: the sensitive fill and its value check are empty and named', () => {
     const secret = state.actions.filter((a) => a.sensitive);
-    expect(secret).toHaveLength(1);
+    expect(secret.map((a) => a.action)).toEqual(['fill', 'assert']);
     expect(secret[0]).toMatchObject({ value: '', secretName: 'LOCATRA_PASSWORD', inputType: 'password' });
+    expect(secret[1]).toMatchObject({ value: '', secretName: 'LOCATRA_PASSWORD', assertType: 'toHaveValue' });
     expect(expectation.order.password).toBe('{{LOCATRA_PASSWORD}}');
   });
 
@@ -96,6 +99,17 @@ describe('checkout-flow fixture', () => {
       expect(kinds, k).toContain(k);
     }
     expect(state.actions.some((a) => a.target?.kind === 'frame')).toBe(true);
+    // A frame known only by position, where <iframe> order (0) and window.frames
+    // order (1) differ because an <object> comes first.
+    expect(
+      state.actions.some(
+        (a) => a.target?.kind === 'frame' && !a.target.selector && a.target.framesIndex === 1
+      )
+    ).toBe(true);
+    expect(state.actions.some((a) => Array.isArray(a.values) && a.values.length > 1)).toBe(true);
+    expect(state.actions.some((a) => Array.isArray(a.target?.shadowHosts) && a.target.shadowCss)).toBe(true);
+    expect(expectation.order.interests).toEqual(['books', 'music']);
+    expect(expectation.order.promo).toBe('SPRING-10');
     expect(state.actions.filter((a) => a.action === 'press').map((a) => a.value)).toEqual([
       'Tab',
       'Tab',

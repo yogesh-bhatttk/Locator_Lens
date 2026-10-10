@@ -136,6 +136,26 @@ const substitute = (value, vars) =>
   JSON.parse(JSON.stringify(value).replace(/\{\{(\w+)\}\}/g, (m, k) => (k in vars ? vars[k] : m)));
 
 /**
+ * The step kinds the recorded flow is driven to produce (scripts/e2e/record-flow.mjs).
+ * One missing means the recorder was not exercised where it matters (a sensitive
+ * value check, a multi-select, a field in a shadow root), and every runner would
+ * pass while proving less, so the flow fails instead.
+ */
+function missingRecordedKinds(actions) {
+  const has = (fn) => actions.some(fn);
+  const missing = [];
+  if (!has((a) => a.action === 'assert' && a.assertType === 'toHaveValue' && a.sensitive && a.value === ''))
+    missing.push('a sensitive toHaveValue assertion');
+  if (!has((a) => a.action === 'selectOption' && Array.isArray(a.values) && a.values.length === 2))
+    missing.push('a multi-select step with both values');
+  if (!has((a) => a.action === 'fill' && Array.isArray(a.target?.shadowHosts) && a.target.shadowHosts.length))
+    missing.push('a fill inside a shadow root');
+  if (has((a) => a.action === 'click' && /option/i.test(String(a.code || ''))))
+    missing.push('nothing but the change for an <option> click (it recorded the click too)');
+  return missing;
+}
+
+/**
  * Steps ready for codegen: what the panel would export. Suggested steps that were
  * never accepted are left out (the panel excludes them too); a step kind this
  * codegen cannot express yet (e.g. toHaveURL before it existed) is dropped with a
@@ -475,7 +495,8 @@ function compareOrder(received, expected) {
   const problems = [];
   for (const [key, want] of Object.entries(expected)) {
     const got = received[0][key];
-    if (got !== want)
+    // Deep: some fields are lists (the multi-select's chosen options).
+    if (JSON.stringify(got) !== JSON.stringify(want))
       problems.push(`order.${key}: expected ${JSON.stringify(want)}, got ${JSON.stringify(got)}`);
   }
   return problems;
@@ -510,7 +531,7 @@ async function main() {
   const work = join(WORK, `port-${opts.port}`);
   rmSync(work, { recursive: true, force: true });
   mkdirSync(work, { recursive: true });
-  const server = await startDemoServer({ port: opts.port });
+  const server = await startDemoServer({ port: opts.port, exportExtras: true });
   const vars = { BASE: server.base, LOCATRA_PASSWORD: password };
   const expectation = substitute(
     JSON.parse(readFileSync(join(E2E, 'fixtures/checkout-flow.expect.json'), 'utf8')),
@@ -552,6 +573,8 @@ async function main() {
           notes.push(...rec.notes);
           actions = rec.state.actions;
           writeFileSync(join(work, 'recorded-flow.json'), JSON.stringify(rec.state, null, 2) + '\n');
+          const missing = missingRecordedKinds(actions);
+          if (missing.length) throw new Error(`the recorded flow lacks ${missing.join('; ')}`);
           // The recording itself placed an order: it must be the expected one too,
           // or the recorder was driven wrong and every runner below would mislead.
           const own = compareOrder(server.orders().slice(before), expectation.order);

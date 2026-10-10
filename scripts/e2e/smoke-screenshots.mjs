@@ -593,10 +593,14 @@ async function phaseB(context, extensionId, base) {
     );
   }
   const expected = new Set(thumbnailed.map((x) => x.eventId));
+  const timeline = (await s.steps()).map(
+    (x) => `${x.action}:${x.eventId.slice(0, 8)}:${x.code || ''}@${x.timestamp}`
+  );
   check(
     'IndexedDB holds exactly one record per thumbnailed step',
     records.length === expected.size && records.every((r) => expected.has(r.eventId)),
-    `records ${JSON.stringify(records.map((r) => r.eventId))} vs steps ${JSON.stringify([...expected])}`
+    `records ${JSON.stringify(records.map((r) => r.eventId))} vs steps ${JSON.stringify([...expected])}; ` +
+      `timeline ${JSON.stringify(timeline)}`
   );
 
   console.log('\npreview');
