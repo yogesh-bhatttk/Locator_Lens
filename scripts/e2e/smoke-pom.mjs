@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-/* global chrome, document */
+/* global chrome, document, CSS, LLCodegen */
 // Real-browser smoke test for the Page Object export (F2).
 //
 // The unit suites prove the codegen in isolation and drive the panel in jsdom. This
@@ -30,6 +30,8 @@ import { fileURLToPath, pathToFileURL } from 'node:url';
 import { chromium } from 'playwright';
 
 import { computeExtensionId, resolveChromium, until, waitForServiceWorker } from './browsers.mjs';
+// The decoder the codegen unit tests use for the emitted helper calls, in every language.
+import { helperCallOf } from '../../tests/codegen-helper-calls.mjs';
 import { startDemoServer } from './demo-server.mjs';
 
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '../..');
@@ -377,47 +379,82 @@ async function main() {
 
     // ═══ 5. Selenium locators resolve to the same elements ═══════════════════
     console.log('\nSelenium page objects resolve on the live page');
-    const countIn = (by, selector) =>
+    // Each member is a lookup by id / name / css / xpath, or (role, label or text
+    // with no simpler equivalent) a call to the emitted locatra helper, which runs
+    // the codegen's own in-page matcher (MATCH_JS) — evaluated here the same way.
+    const matchJs = await panel.evaluate(() => LLCodegen._internals.MATCH_JS);
+    const countIn = (lookup) =>
       page.evaluate(
-        ({ by, selector }) => {
-          if (by === 'css') {
-            const hits = document.querySelectorAll(selector);
-            return {
-              count: hits.length,
-              tag: hits.length === 1 ? hits[0].getAttribute('data-pom-smoke') : null,
-            };
+        ({ lookup, matchJs }) => {
+          let hits = [];
+          if (lookup.by === 'helper') {
+            const c = lookup.call;
+            hits = new Function(matchJs)(c.kind, c.value, c.name, !!c.exact, c.level || 0, document);
+            if (c.nth >= 0) hits = hits.slice(c.nth, c.nth + 1);
+          } else if (lookup.by === 'xpath') {
+            const r = document.evaluate(
+              lookup.selector,
+              document,
+              null,
+              7 /* ORDERED_NODE_SNAPSHOT_TYPE */,
+              null
+            );
+            hits = Array.from({ length: r.snapshotLength }, (_, i) => r.snapshotItem(i));
+          } else {
+            const css =
+              lookup.by === 'id'
+                ? '#' + CSS.escape(lookup.selector)
+                : lookup.by === 'name'
+                  ? `[name="${CSS.escape(lookup.selector)}"]`
+                  : lookup.selector;
+            hits = [...document.querySelectorAll(css)];
           }
-          const r = document.evaluate(selector, document, null, 7 /* ORDERED_NODE_SNAPSHOT_TYPE */, null);
-          const one = r.snapshotLength === 1 ? r.snapshotItem(0) : null;
-          return { count: r.snapshotLength, tag: one && one.getAttribute('data-pom-smoke') };
+          return {
+            count: hits.length,
+            tag: hits.length === 1 ? hits[0].getAttribute('data-pom-smoke') : null,
+          };
         },
-        { by, selector }
+        { lookup, matchJs }
       );
+
+    /** Each page-object member and the lookup its body makes. */
+    // Only the members that hand back an element: their body is one `return` of a
+    // lookup. The fill… / check… / click… action methods around them are not lookups.
+    const membersOf = (code, language, memberRe) =>
+      [...code.matchAll(memberRe)]
+        .filter(([, , body]) => /^\s*return\b/.test(body))
+        .map(([, member, body]) => {
+          const call = helperCallOf(body, language);
+          if (call)
+            return { member, by: 'helper', call, selector: `${call.kind} ${call.value} ${call.name ?? ''}` };
+          const m =
+            language === 'python'
+              ? /By\.(ID|NAME|CSS_SELECTOR|XPATH), ("(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*')/.exec(body)
+              : /By\.(id|name|css|xpath)\(('(?:\\.|[^'\\])*'|"(?:\\.|[^"\\])*")\)/.exec(body);
+          if (!m) return { member, by: 'unknown', selector: body.trim().slice(0, 60) };
+          const by = { ID: 'id', NAME: 'name', CSS_SELECTOR: 'css', XPATH: 'xpath' }[m[1]] || m[1];
+          return {
+            member,
+            by,
+            selector: language === 'python' ? pyString(m[2]) : new Function(`return ${m[2]}`)(),
+          };
+        });
 
     const seleniumCases = [
       {
         language: 'javascript',
         ready: /require\('selenium-webdriver'\)/,
-        parse: (code) =>
-          [
-            ...code.matchAll(
-              /^\s*(\w+)\(\)\s*\{\s*\n\s*return this\.driver\.findElement\(By\.(xpath|css)\(('(?:\\.|[^'\\])*'|"(?:\\.|[^"\\])*")\)\);/gm
-            ),
-          ].map(([, member, by, lit]) => ({ member, by, selector: new Function(`return ${lit}`)() })),
+        parse: (code) => membersOf(code, 'javascript', /^\s*(?:async )?(\w+)\(\)\s*\{([\s\S]*?)\n\s*\}/gm),
       },
       {
         language: 'python',
         ready: /from selenium\.webdriver/,
         parse: (code) =>
-          [
-            ...code.matchAll(
-              /^\s*def (\w+)\(self\) -> WebElement:\s*\n\s*return self\.driver\.find_element\(By\.(XPATH|CSS_SELECTOR), ("(?:\\.|[^"\\])*"|'(?:\\.|[^'\\])*')\)/gm
-            ),
-          ].map(([, member, by, lit]) => ({
-            member: snakeToCamel(member),
-            by: by === 'XPATH' ? 'xpath' : 'css',
-            selector: pyString(lit),
-          })),
+          membersOf(
+            code,
+            'python',
+            /^\s*def (\w+)\(self\)[^:\n]*:\s*\n([\s\S]*?)(?=\n\s*(?:def |@|class )|\n\S|$)/gm
+          ).map((x) => ({ ...x, member: snakeToCamel(x.member) })),
       },
     ];
     for (const { language, ready, parse } of seleniumCases) {
@@ -429,10 +466,11 @@ async function main() {
         found.length === wholeRows.length,
         `parsed ${found.length} lookups for ${wholeRows.length} elements`
       );
-      for (const { member, by, selector } of found) {
-        const { count, tag } = await countIn(by, selector);
+      for (const lookup of found) {
+        const { member, by, selector } = lookup;
+        const { count, tag } = by === 'unknown' ? { count: -1, tag: null } : await countIn(lookup);
         check(
-          `Selenium ${language} ${member}: By.${by}(${selector.slice(0, 40)}…) matches exactly 1 element`,
+          `Selenium ${language} ${member}: ${by} ${selector.slice(0, 40)}… matches exactly 1 element`,
           count === 1,
           `matched ${count}`
         );

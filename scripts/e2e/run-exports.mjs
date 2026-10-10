@@ -150,6 +150,10 @@ function missingRecordedKinds(actions) {
     missing.push('a multi-select step with both values');
   if (!has((a) => a.action === 'fill' && Array.isArray(a.target?.shadowHosts) && a.target.shadowHosts.length))
     missing.push('a fill inside a shadow root');
+  // The checkout's fields have ids: role/label steps must carry them as simpler
+  // equivalents (C9), or non-Playwright exports fall back to helper lookups.
+  if (!has((a) => Array.isArray(a.altTargets) && a.altTargets.some((t) => t && t.kind === 'id')))
+    missing.push('simpler alternatives (altTargets with an id) on the recorded steps');
   if (has((a) => a.action === 'click' && /option/i.test(String(a.code || ''))))
     missing.push('nothing but the change for an <option> click (it recorded the click too)');
   return missing;

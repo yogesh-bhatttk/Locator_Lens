@@ -46,6 +46,7 @@ const OPTIONAL = [
   'viewport',
   'values',
   'sensitiveOnScreen',
+  'altTargets',
 ];
 
 describe('checkout-flow fixture', () => {
@@ -108,6 +109,12 @@ describe('checkout-flow fixture', () => {
     ).toBe(true);
     expect(state.actions.some((a) => Array.isArray(a.values) && a.values.length > 1)).toBe(true);
     expect(state.actions.some((a) => Array.isArray(a.target?.shadowHosts) && a.target.shadowCss)).toBe(true);
+    // Simpler equivalents (C9) on some role/label steps, none on others: the exports
+    // run both the alternative and the helper lookup.
+    expect(state.actions.some((a) => Array.isArray(a.altTargets) && a.altTargets.length)).toBe(true);
+    expect(
+      state.actions.some((a) => a.target?.kind === 'role' && !a.altTargets && a.action !== 'assert')
+    ).toBe(true);
     expect(expectation.order.interests).toEqual(['books', 'music']);
     expect(expectation.order.promo).toBe('SPRING-10');
     expect(state.actions.filter((a) => a.action === 'press').map((a) => a.value)).toEqual([

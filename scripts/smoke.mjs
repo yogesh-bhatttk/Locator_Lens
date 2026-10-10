@@ -13,6 +13,7 @@
 // Needs a display. Uses Playwright's Chromium because Chrome 137 dropped support
 // for --load-extension.
 
+/* global LLCodegen, CSS -- used in page-context evaluate() bodies */
 import { createHash } from 'node:crypto';
 import { existsSync, readdirSync, readFileSync, rmSync } from 'node:fs';
 import { createServer } from 'node:http';
@@ -20,6 +21,9 @@ import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 import { chromium } from 'playwright';
+
+// The decoder the codegen unit tests use for the emitted helper calls.
+import { helperCallSpan } from '../tests/codegen-helper-calls.mjs';
 
 // The panel generates test-data variables by default, so a recorded value appears
 // either inline — .fill('Ada') — or as testData.<name> with `<name>: 'Ada'` declared.
@@ -332,32 +336,61 @@ async function main() {
       );
     }
 
-    // Selenium can't reuse Playwright's getBy* engine, so its locators are XPath/CSS
-    // translations — and those once matched nothing for any labelled form field.
-    // Evaluate exactly what the Selenium export says, against the same live page.
+    // Selenium can't reuse Playwright's getBy* engine: a step is exported with a
+    // simpler equivalent the recorder found (By.id / By.name / css / a short xpath)
+    // or, when there is none, a one-line call to the emitted locatra helper. Evaluate
+    // exactly what the Selenium export says, against the same live page — the helper
+    // calls through the codegen's own in-page matcher (MATCH_JS).
     console.log('\nselenium locators actually resolve');
     panel.on('dialog', (d) => d.accept().catch(() => {}));
     await panel.selectOption('#fwSelect', 'selenium');
     await panel.selectOption('#langSelect', 'javascript');
-    await until(async () => /By\.(xpath|css)/.test(await preview()), {
+    await until(async () => /By\.\w+\(|locatraFind\(/.test(await preview()), {
       timeout: 5000,
       what: 'the Selenium script',
     }).catch(() => {});
     const seleniumScript = await preview();
+    // The test itself, after the helper declarations (which hold no locators).
+    const bodyAt = seleniumScript.indexOf('new Builder()');
+    const body = bodyAt === -1 ? seleniumScript : seleniumScript.slice(bodyAt);
     const seleniumLocators = [
-      ...seleniumScript.matchAll(/By\.(xpath|css)\(((['"])(?:\\.|(?!\3)[^\\])*\3)\)/g),
+      ...body.matchAll(/By\.(id|name|xpath|css)\(((['"])(?:\\.|(?!\3)[^\\])*\3)\)/g),
     ].map(([, by, literal]) => ({
       by,
       // eslint-disable-next-line no-new-func -- decoding our own generated string literal
       selector: new Function(`return ${literal}`)(),
     }));
+    for (let rest = body, span; (span = helperCallSpan(rest, 'javascript')); rest = rest.slice(span.end)) {
+      seleniumLocators.push({
+        by: 'helper',
+        call: span.call,
+        selector: `${span.call.kind} ${span.call.value}`,
+      });
+    }
     check('Selenium locators were found', seleniumLocators.length >= 5, `found ${seleniumLocators.length}`);
-    for (const { by, selector } of seleniumLocators) {
+    check(
+      'every Selenium locator line is short (no inlined accessible-name XPath)',
+      body.split('\n').every((line) => line.length <= 220 || /^\s*(\/\/|\*)/.test(line)),
+      body
+        .split('\n')
+        .filter((line) => line.length > 220)[0]
+        ?.slice(0, 120)
+    );
+    const matchJs = await panel.evaluate(() => LLCodegen._internals.MATCH_JS);
+    for (const lookup of seleniumLocators) {
       const count = await page.evaluate(
-        ({ by, selector }) => {
-          if (by === 'css') return document.querySelectorAll(selector).length;
+        ({ lookup, matchJs }) => {
+          if (lookup.by === 'helper') {
+            const c = lookup.call;
+            const hits = new Function(matchJs)(c.kind, c.value, c.name, !!c.exact, c.level || 0, document);
+            return c.nth >= 0 ? hits.slice(c.nth, c.nth + 1).length : hits.length;
+          }
+          if (lookup.by === 'id') return document.querySelectorAll('#' + CSS.escape(lookup.selector)).length;
+          if (lookup.by === 'name')
+            return document.querySelectorAll(`[name="${CSS.escape(lookup.selector)}"]`).length;
+          if (lookup.by === 'css') return document.querySelectorAll(lookup.selector).length;
           const r = document.evaluate(
-            selector,
+            lookup.selector,
             document,
             null,
             7 /* XPathResult.ORDERED_NODE_SNAPSHOT_TYPE */,
@@ -365,9 +398,13 @@ async function main() {
           );
           return r.snapshotLength;
         },
-        { by, selector }
+        { lookup, matchJs }
       );
-      check(`By.${by}(${selector.slice(0, 50)}) matches exactly 1 element`, count === 1, `matched ${count}`);
+      check(
+        `${lookup.by} ${String(lookup.selector).slice(0, 50)} matches exactly 1 element`,
+        count === 1,
+        `matched ${count}`
+      );
     }
     await panel.selectOption('#fwSelect', 'playwright');
     await panel.selectOption('#langSelect', 'typescript');

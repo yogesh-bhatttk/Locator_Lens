@@ -54,7 +54,13 @@
         "value": "First name"
       },
       "assertType": null,
-      "inputType": "text"
+      "inputType": "text",
+      "altTargets": [
+        {
+          "kind": "id",
+          "value": "first-name"
+        }
+      ]
     },
     {
       "eventId": "e2e-05",
@@ -71,7 +77,17 @@
         "name": "Last name"
       },
       "assertType": null,
-      "inputType": "text"
+      "inputType": "text",
+      "altTargets": [
+        {
+          "kind": "id",
+          "value": "last-name"
+        },
+        {
+          "kind": "name",
+          "value": "lastName"
+        }
+      ]
     },
     {
       "eventId": "e2e-06",
@@ -120,7 +136,13 @@
         "role": "checkbox",
         "name": "Create an account for faster checkout"
       },
-      "assertType": null
+      "assertType": null,
+      "altTargets": [
+        {
+          "kind": "id",
+          "value": "create-account"
+        }
+      ]
     },
     {
       "eventId": "e2e-09",
@@ -173,7 +195,13 @@
         "role": "combobox",
         "name": "Country"
       },
-      "assertType": null
+      "assertType": null,
+      "altTargets": [
+        {
+          "kind": "id",
+          "value": "country"
+        }
+      ]
     },
     {
       "eventId": "e2e-10a",
