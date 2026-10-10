@@ -138,10 +138,10 @@ describe('locators', () => {
     expect(loc(testid('v', 'data:qa'))).toBe(String.raw`$('[data\\:qa="v"]')`);
     expect(loc(role('button'))).toBe(
       `$('button:not([role]), input[type="button"]:not([role]), input[type="submit"]:not([role]), ` +
-        `input[type="reset"]:not([role]), input[type="image"]:not([role]), input[type="file"]:not([role]), [role="button"]')`
+        `input[type="reset"]:not([role]), input[type="image"]:not([role]), input[type="file"]:not([role]), [role~="button"]')`
     );
     expect(loc(role('heading', null, { level: 2 }))).toBe(
-      `$('h2:not([role]), [role="heading"][aria-level="2"]')`
+      `$('h2:not([role]), [role~="heading"][aria-level="2"]')`
     );
     expect(loc({ kind: 'placeholder', value: 'Search' })).toBe(`$('[placeholder*="Search"]')`);
     expect(loc({ kind: 'placeholder', value: 'Search', exact: true })).toBe(`$('[placeholder="Search"]')`);
@@ -191,20 +191,25 @@ describe('locators', () => {
   it('renders role names, exact, nth and level through the shared XPath', () => {
     const I = C._internals;
     const node = I.roleNodeXpath('button');
+    // The XPath is quoted like any literal (its no-break spaces as \xa0 escapes).
+    const $ = (xpath) => `$(${C.q(xpath, 'typescript')})`;
     expect(loc(role('button', 'Save', { exact: true }))).toBe(
-      `$('//*[(${node}) and (${I.nameXpath('Save', true, 'button')})]')`
+      $(`//*[(${node}) and (${I.nameXpath('Save', true, 'button')})]`)
     );
     expect(loc(role('button', null, { nth: 1 }))).toBe(`$('(//*[${node}])[2]')`);
     expect(loc(role('button', 'Save', { nth: 0 }), 'typescript', true)).toBe(
-      `$('(.//*[(${node}) and (${I.nameXpath('Save', undefined, 'button')})])[1]')`
+      $(`(.//*[(${node}) and (${I.nameXpath('Save', undefined, 'button')})])[1]`)
     );
   });
 
   it('scopes a chained child under its parent with a relative XPath', () => {
     const t = { kind: 'chain', parent: css('tr.b'), child: { kind: 'text', value: 'Row B', exact: true } };
-    expect(loc(t)).toBe(`$('tr.b').$('${C._internals.textXpath('Row B', true, true)}')`);
+    const q = (s) => C.q(s, 'typescript');
+    expect(loc(t)).toBe(`$('tr.b').$(${q(C._internals.textXpath('Row B', true, true))})`);
     expect(loc(t)).toContain(`.$('.//*[`);
-    expect(loc(label('Email'), 'typescript', true)).toBe(`$('.//*[${C._internals.labelXpath('Email')}]')`);
+    expect(loc(label('Email'), 'typescript', true)).toBe(
+      `$(${q(`.//*[${C._internals.labelXpath('Email')}]`)})`
+    );
   });
 
   it('falls back sensibly for malformed chains and frames', () => {
@@ -478,10 +483,10 @@ describe('assertions', () => {
     expect(a(undefined)).toBe(`await expect(${L}).toBeDisplayed();`);
     expect(a('toBeSomethingNew')).toBe(`await expect(${L}).toBeDisplayed();`);
     expect(a('toHaveText', '  Ada \n  Lovelace ')).toBe(
-      `await expect(${L}).toHaveText('Ada Lovelace', { replace: [/\\s+/g, ' '] });`
+      `await expect(${L}).toHaveText('Ada Lovelace', { replace: [[/[\\u00ad\\u200b]/g, ''], [/\\s+/g, ' ']] });`
     );
     expect(a('toContainText', 'Card   ending')).toBe(
-      `await expect(${L}).toHaveText('Card ending', { containing: true, replace: [/\\s+/g, ' '] });`
+      `await expect(${L}).toHaveText('Card ending', { containing: true, replace: [[/[\\u00ad\\u200b]/g, ''], [/\\s+/g, ' ']] });`
     );
     expect(a('toHaveValue', ' raw  value ')).toBe(`await expect(${L}).toHaveValue(' raw  value ');`);
     expect(a('toBeEnabled')).toBe(`await expect(${L}).toBeEnabled();`);
@@ -1125,6 +1130,22 @@ const RICH_PO = {
 };
 const FLAT_PO = { ...RICH_PO, elements: RICH_PO.elements.filter((e) => e.target.kind !== 'frame') };
 
+// The fields the recorder added (scratchpad contracts C1–C4).
+const CONTRACT_STEPS = [
+  { action: 'selectOption', target: id('m'), value: 'A', values: ['A', 'B'] },
+  { action: 'assert', target: id('pw'), assertType: 'toHaveValue', sensitive: true, secretName: 'PW' },
+  { action: 'click', target: { ...id('go'), shadowHosts: ['x-a', 'x-b'], shadowCss: '.go' } },
+  { action: 'fill', target: { ...id('in'), shadowHosts: ['x-a'] }, value: 'v' },
+  { action: 'click', target: { kind: 'frame', selector: null, index: 1, framesIndex: 2, child: id('f') } },
+];
+const SHADOW_PO = {
+  className: 'Shadow',
+  elements: [
+    { name: 'go', kind: 'button', target: { ...id('go'), shadowHosts: ['x-a'], shadowCss: '.go' } },
+    { name: 'pick', kind: 'select', target: id('pick') },
+  ],
+};
+
 function writeFiles(files) {
   const out = {};
   for (const [name, text] of Object.entries(files)) {
@@ -1169,6 +1190,8 @@ describe('generated code parses', () => {
         'spec-vars.ts': C.testScript(ALL_STEPS, FW, 'typescript', { variables: true }),
         'RichPage.ts': C.pageObject({ ...RICH_PO, className: 'Rich' }, FW, 'typescript'),
         'FlatPage.ts': C.pageObject({ ...FLAT_PO, className: 'Flat' }, FW, 'typescript'),
+        'contract.ts': C.testScript(CONTRACT_STEPS, FW, 'typescript'),
+        'ShadowPage.ts': C.pageObject(SHADOW_PO, FW, 'typescript'),
         'uses-po.ts': [
           "import { RichPage } from './RichPage.js';",
           "import { FlatPage } from './FlatPage.js';",
@@ -1274,7 +1297,7 @@ function fakeWdio() {
               `expect(${subject === browser ? 'browser' : subject.desc}).${String(matcher)}(${args
                 .map((a) =>
                   a && typeof a === 'object' && a.replace
-                    ? `{replace:${a.replace[0]}${a.containing ? ',containing' : ''}}`
+                    ? `{replace:${a.replace.map((r) => r[0]).join('|')}${a.containing ? ',containing' : ''}}`
                     : JSON.stringify(a)
                 )
                 .join(', ')})`
@@ -1368,8 +1391,8 @@ describe('generated code runs against WDIO stand-ins', () => {
         '#xo.click()',
         'switchFrame(null)',
         'tr.b.$(button).click()',
-        'expect(#name).toHaveText("Ada L", {replace:/\\s+/g})',
-        'expect(#name).toHaveText("Ada", {replace:/\\s+/g,containing})',
+        'expect(#name).toHaveText("Ada L", {replace:/[\\u00ad\\u200b]/g|/\\s+/g})',
+        'expect(#name).toHaveText("Ada", {replace:/[\\u00ad\\u200b]/g|/\\s+/g,containing})',
         'expect(#country).toHaveValue("Ireland")',
         'expect(#go).toBeEnabled()',
         'expect(#go).toBeDisplayed()',

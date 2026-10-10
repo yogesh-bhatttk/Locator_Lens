@@ -37,11 +37,14 @@ const id = (value) => ({ kind: 'id', value });
 // ── Selenium parity: the Python expression, rewritten into C# syntax ─────────────
 // Python and C# regular literals escape quotes and backslashes the same way, so the
 // selector inside every By is decoded from the Python output and re-quoted for C#.
+// Python's \xNN escapes (no-break spaces, soft hyphens) are not JSON: they become \u00NN.
 const PY_BY = { XPATH: 'XPath', CSS_SELECTOR: 'CssSelector', ID: 'Id', NAME: 'Name' };
+const pyString = (lit) =>
+  JSON.parse(lit.replace(/\\(x([0-9a-f]{2})|.)/g, (m, e, hex) => (hex ? `\\u00${hex}` : m)));
 function pyToCs(expr) {
   return expr.replace(
     /(driver)?\.find_element\(By\.(XPATH|CSS_SELECTOR|ID|NAME), ("(?:[^"\\]|\\.)*")\)/g,
-    (m, root, by, lit) => `${root ?? ''}.FindElement(By.${PY_BY[by]}(${X.q(JSON.parse(lit))}))`
+    (m, root, by, lit) => `${root ?? ''}.FindElement(By.${PY_BY[by]}(${X.q(pyString(lit))}))`
   );
 }
 
@@ -207,11 +210,11 @@ describe('Playwright for .NET locators', () => {
   });
 
   it('falls back to the role selector for a role AriaRole lacks', () => {
-    expect(PW(role('mark'))).toBe('Page.Locator("mark:not([role]), [role=\\"mark\\"]")');
+    expect(PW(role('mark'))).toBe('Page.Locator("mark:not([role]), [role~=\\"mark\\"]")');
     expect(PW(role('x-widget', 'Go', { nth: 2 }))).toBe(
-      'Page.Locator("[role=\\"x-widget\\"]").Filter(new() { HasText = "Go" }).Nth(2)'
+      'Page.Locator("[role~=\\"x-widget\\"]").Filter(new() { HasText = "Go" }).Nth(2)'
     );
-    expect(PW({ kind: 'role' })).toBe('Page.Locator("[role=\\"\\"]")');
+    expect(PW({ kind: 'role' })).toBe('Page.Locator("[role~=\\"\\"]")');
   });
 
   it('escapes hostile values in every literal', () => {
@@ -357,8 +360,12 @@ describe('Playwright for .NET statements', () => {
     expect(a('toBeVisible')).toBe(`await Expect(${L}).ToBeVisibleAsync();`);
     expect(a(undefined)).toBe(`await Expect(${L}).ToBeVisibleAsync();`);
     expect(a('toBeSomethingNew')).toBe(`await Expect(${L}).ToBeVisibleAsync();`);
-    expect(a('toHaveText', 'Ada  Lovelace')).toBe(`await Expect(${L}).ToHaveTextAsync("Ada  Lovelace");`);
-    expect(a('toContainText', 'Ada')).toBe(`await Expect(${L}).ToContainTextAsync("Ada");`);
+    expect(a('toHaveText', 'Ada  Lovelace')).toBe(
+      `await Expect(${L}).ToHaveTextAsync("Ada  Lovelace", new() { UseInnerText = true });`
+    );
+    expect(a('toContainText', 'Ada')).toBe(
+      `await Expect(${L}).ToContainTextAsync("Ada", new() { UseInnerText = true });`
+    );
     expect(a('toHaveValue', 'x"y')).toBe(`await Expect(${L}).ToHaveValueAsync("x\\"y");`);
     expect(a('toBeEnabled')).toBe(`await Expect(${L}).ToBeEnabledAsync();`);
     expect(a('toBeChecked', 'true')).toBe(`await Expect(${L}).ToBeCheckedAsync();`);
@@ -459,9 +466,11 @@ describe('Selenium for C# locators', () => {
     expect(SEL(testid('save'))).toBe('driver.FindElement(By.CssSelector("[data-testid=\\"save\\"]"))');
     expect(SEL(id('main'))).toBe('driver.FindElement(By.Id("main"))');
     expect(SEL({ kind: 'name', value: 'q' })).toBe('driver.FindElement(By.Name("q"))');
-    expect(SEL(role('row'))).toBe('driver.FindElement(By.CssSelector("tr:not([role]), [role=\\"row\\"]"))');
+    expect(SEL(role('row'))).toBe('driver.FindElement(By.CssSelector("tr:not([role]), [role~=\\"row\\"]"))');
     expect(SEL({ kind: 'text', value: 'Go', exact: true })).toBe(
-      'driver.FindElement(By.XPath("//*[not(ancestor-or-self::head or self::script or self::style or self::noscript or self::template) and normalize-space(.)=\\"Go\\" and not(.//*[not(self::script or self::style or self::noscript or self::template) and normalize-space(.)=\\"Go\\"])]"))'
+      'driver.FindElement(By.XPath("//*[not(ancestor-or-self::head or self::script or self::style or self::noscript or self::template) and ' +
+        'normalize-space(translate(., \\"\\u00A0\\u202F\\u00AD\\u200B\\", \\"  \\"))=\\"Go\\" and not(.//*[not(self::script or self::style or ' +
+        'self::noscript or self::template) and normalize-space(translate(., \\"\\u00A0\\u202F\\u00AD\\u200B\\", \\"  \\"))=\\"Go\\"])]"))'
     );
     expect(SEL(id('a:b'))).toBe('driver.FindElement(By.Id("a:b"))');
     expect(SEL(null)).toBe('');
@@ -638,7 +647,7 @@ describe('Selenium for C# statements', () => {
 
   it('renders every assertion with NUnit constraints, normalising text like Playwright', () => {
     const a = (assertType, value) => sel({ action: 'assert', assertType, target: t, value });
-    const TEXT = `Regex.Replace(${L}.Text, @"\\s+", " ").Trim()`;
+    const TEXT = `Regex.Replace(Regex.Replace(${L}.Text, @"[\\u00AD\\u200B]", ""), @"\\s+", " ").Trim()`;
     expect(a('toBeVisible')).toBe(`Assert.That(${L}.Displayed, Is.True);`);
     expect(a(undefined)).toBe(`Assert.That(${L}.Displayed, Is.True);`);
     expect(a('toBeSomethingNew')).toBe(`Assert.That(${L}.Displayed, Is.True);`);
@@ -672,7 +681,7 @@ describe('Selenium for C# statements', () => {
   it('notes an unnamed role locator that may match several elements', () => {
     expect(sel({ action: 'click', target: role('button') })).toBe(
       '// NOTE: this role locator has no accessible name and may match several elements; the first match is used.\n' +
-        'driver.FindElement(By.CssSelector("button:not([role]), input[type=\\"button\\"]:not([role]), input[type=\\"submit\\"]:not([role]), input[type=\\"reset\\"]:not([role]), input[type=\\"image\\"]:not([role]), input[type=\\"file\\"]:not([role]), [role=\\"button\\"]")).Click();'
+        'driver.FindElement(By.CssSelector("button:not([role]), input[type=\\"button\\"]:not([role]), input[type=\\"submit\\"]:not([role]), input[type=\\"reset\\"]:not([role]), input[type=\\"image\\"]:not([role]), input[type=\\"file\\"]:not([role]), [role~=\\"button\\"]")).Click();'
     );
     expect(sel({ action: 'click', target: role('button', null, { matchCount: 1 }) })).not.toContain('NOTE');
     expect(sel({ action: 'click', target: role('button', null, { unique: true }) })).not.toContain('NOTE');
@@ -760,7 +769,7 @@ describe('Selenium for C# frames', () => {
     expect(out.split('\n')).toEqual([
       'driver.SwitchTo().Frame(driver.FindElement(By.CssSelector("#f")));',
       '// NOTE: this role locator has no accessible name and may match several elements; the first match is used.',
-      'driver.FindElement(By.CssSelector("tr:not([role]), [role=\\"row\\"]")).Click();',
+      'driver.FindElement(By.CssSelector("tr:not([role]), [role~=\\"row\\"]")).Click();',
       'driver.SwitchTo().DefaultContent();',
     ]);
   });
@@ -1663,6 +1672,12 @@ describe.skipIf(!DOTNET)('dotnet build of the generated code', () => {
         target: role(r, 'n', { level: 1, exact: true, nth: 0 }),
       })),
       { action: 'click', target: role('mark', 'Hi') },
+      // Contract fields: multi-select, sensitive assertion, shadow DOM, frame indices.
+      { action: 'selectOption', target: t, value: 'A', values: ['A', 'B "b"'] },
+      { action: 'assert', assertType: 'toHaveValue', target: t, sensitive: true, secretName: 'PW' },
+      { action: 'click', target: { ...testid('s'), shadowHosts: ['x-a', 'x-b'], shadowCss: '.go' } },
+      { action: 'fill', target: { ...testid('s'), shadowHosts: ['x-a'] }, value: 'v' },
+      { action: 'click', target: { kind: 'frame', selector: null, index: 1, framesIndex: 2, child: t } },
     ];
     const vars = [
       { name: 'firstName', value: 'Ada' },
@@ -1681,6 +1696,24 @@ describe.skipIf(!DOTNET)('dotnet build of the generated code', () => {
           'csharp'
         ),
         fw + 'Odd'
+      );
+      add(
+        C.pageObject(
+          {
+            className: 'Shadow',
+            elements: [
+              {
+                name: 'go',
+                kind: 'button',
+                target: { ...testid('s'), shadowHosts: ['x-a'], shadowCss: '.go' },
+              },
+              { name: 'lost', kind: 'input', target: { ...testid('l'), shadowHosts: ['x-a'] } },
+            ],
+          },
+          fw,
+          'csharp'
+        ),
+        fw + 'Shadow'
       );
     }
     // The literals, read back by the compiler: one line of UTF-16 code units each.

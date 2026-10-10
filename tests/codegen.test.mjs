@@ -15,6 +15,9 @@ beforeAll(async () => {
   C = globalThis.LLCodegen;
 });
 
+/** The value of a single-quoted JS string literal's body, escapes (\\xa0, \\u200b, …) decoded. */
+const jsString = (body) => new Function(`return '${body}';`)();
+
 const FRAMEWORKS = ['playwright', 'selenium', 'cypress'];
 const LANGUAGES = ['typescript', 'javascript', 'python'];
 
@@ -723,7 +726,7 @@ describe('Selenium/Cypress accessible-name matching (DOM)', () => {
     let ctx = doc;
     let all = [];
     while ((m = re.exec(expr))) {
-      const sel = m[2].replace(/\\(.)/g, '$1');
+      const sel = jsString(m[2]);
       if (m[1] === 'css') all = [...ctx.querySelectorAll(sel)];
       else {
         const it = doc.evaluate(sel, ctx, null, 7, null);
@@ -855,7 +858,7 @@ describe('role selector tables', () => {
   it('narrows a heading to its level', () => {
     const h = { kind: 'role', role: 'heading', name: 'T', level: 2 };
     expect(C.locatorExpr(h, 'cypress', 'javascript')).toContain(
-      'h2:not([role]), [role="heading"][aria-level="2"]'
+      'h2:not([role]), [role~="heading"][aria-level="2"]'
     );
     expect(C.locatorExpr(h, 'cypress', 'javascript')).not.toContain('h1');
   });
@@ -1210,13 +1213,13 @@ describe('text assertions (C6)', () => {
   it('supports toContainText everywhere', () => {
     const step = { action: 'assert', assertType: 'toContainText', target: t, value: 'lorem' };
     expect(C.actionStatement(step, 'playwright', 'typescript')).toBe(
-      "await expect(page.locator('#total')).toContainText('lorem');"
+      "await expect(page.locator('#total')).toContainText('lorem', { useInnerText: true });"
     );
     expect(C.actionStatement(step, 'playwright', 'python')).toBe(
-      'expect(page.locator("#total")).to_contain_text("lorem")'
+      'expect(page.locator("#total")).to_contain_text("lorem", use_inner_text=True)'
     );
     expect(C.actionStatement(step, 'selenium', 'python')).toBe(
-      'assert "lorem" in " ".join(driver.find_element(By.ID, "total").text.split())'
+      'assert "lorem" in " ".join(driver.find_element(By.ID, "total").text.replace("\\u00ad", "").replace("\\u200b", "").split())'
     );
     expect(C.actionStatement(step, 'cypress', 'javascript')).toContain('.to.contain(');
   });
@@ -1224,10 +1227,10 @@ describe('text assertions (C6)', () => {
   it('compares whitespace-normalised text for toHaveText in Cypress and Selenium', () => {
     const step = { action: 'assert', assertType: 'toHaveText', target: t, value: '  Total\n 42 ' };
     expect(C.actionStatement(step, 'cypress', 'javascript')).toBe(
-      "cy.get('#total').should(($el) => { expect($el.text().replace(/\\s+/g, ' ').trim()).to.equal('Total 42'); });"
+      "cy.get('#total').should(($el) => { expect($el[0].innerText.replace(/[\\u00ad\\u200b]/g, '').replace(/\\s+/g, ' ').trim()).to.equal('Total 42'); });"
     );
     expect(C.actionStatement(step, 'selenium', 'javascript')).toBe(
-      "assert.strictEqual((await driver.findElement(By.id('total')).getText()).replace(/\\s+/g, ' ').trim(), 'Total 42');"
+      "assert.strictEqual((await driver.findElement(By.id('total')).getText()).replace(/[\\u00ad\\u200b]/g, '').replace(/\\s+/g, ' ').trim(), 'Total 42');"
     );
   });
 });
@@ -1449,7 +1452,7 @@ describe('Selenium accessible-name precedence', () => {
   function count(target) {
     const m = /By\.xpath\('((?:[^'\\]|\\.)*)'\)/.exec(C.locatorExpr(target, 'selenium', 'javascript'));
     const d = doc();
-    return d.evaluate(m[1].replace(/\\(.)/g, '$1'), d, null, 7, null).snapshotLength;
+    return d.evaluate(jsString(m[1]), d, null, 7, null).snapshotLength;
   }
 
   it('lets the first present name source decide, like Playwright', () => {
@@ -1618,7 +1621,7 @@ describe('suggested steps', () => {
 
   it('still render on their own, for the timeline preview', () => {
     expect(C.actionStatement(steps[3], 'playwright', 'typescript')).toBe(
-      "await expect(page.locator('#msg')).toContainText('Thanks');"
+      "await expect(page.locator('#msg')).toContainText('Thanks', { useInnerText: true });"
     );
   });
 });
@@ -1640,11 +1643,15 @@ describe('remaining edge cases', () => {
 
   it('maps img roles to non-empty alt and SVG by local name', () => {
     expect(C.locatorExpr({ kind: 'role', role: 'img' }, 'cypress', 'javascript')).toBe(
-      'cy.get(\'img:not([alt=""]):not([role]), svg:not([role]), [role="img"]\').first()'
+      'cy.get(\'img:not([alt=""]):not([role]), img[title]:not([title=""]):not([role]), ' +
+        'img:is([tabindex], [aria-atomic], [aria-busy], [aria-controls], [aria-current], [aria-describedby], ' +
+        '[aria-details], [aria-dropeffect], [aria-flowto], [aria-grabbed], [aria-hidden], [aria-keyshortcuts], ' +
+        '[aria-label], [aria-labelledby], [aria-live], [aria-owns], [aria-relevant], [aria-roledescription])' +
+        ':not([role]), svg:not([role]), [role~="img"]\').first()'
     );
     const xp = C.locatorExpr({ kind: 'role', role: 'img', name: 'Logo' }, 'selenium', 'javascript');
-    expect(xp).toContain('(self::img and not(@role) and not(@alt=""))');
-    expect(xp).toContain('(local-name()="svg" and not(@role))');
+    expect(xp).toContain('(self::img and not(@role) and (not(@alt) or @alt!=""))');
+    expect(xp).toContain('(local-name(.)="svg" and not(@role))');
   });
 
   it('chains without a parent fall back to the child; frames without one render nothing', () => {
@@ -1701,7 +1708,7 @@ describe('remaining edge cases', () => {
         'javascript'
       )
     ).toBe(
-      "assert.ok((await driver.findElement(By.id('f')).getText()).replace(/\\s+/g, ' ').trim().includes('a b'));"
+      "assert.ok((await driver.findElement(By.id('f')).getText()).replace(/[\\u00ad\\u200b]/g, '').replace(/\\s+/g, ' ').trim().includes('a b'));"
     );
   });
 

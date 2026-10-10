@@ -1,0 +1,860 @@
+// Regression tests for the codegen audit findings and the cross-file contract fields
+// the recorder now produces (scratchpad contracts C1–C4):
+//   H1  text / name / label XPath must match text holding no-break spaces, soft
+//       hyphens and zero-width spaces, as the engine (and Playwright) normalise them
+//   H2  text assertions compare rendered text (innerText), like the recorder read it
+//   M1  aria-labelledby with several ids names an element by all of them, in order
+//   M6  numeric target fields (level, frame indices, viewport) can never become code
+//   C1  multi-select steps (`values`)       C2  sensitive toHaveValue assertions
+//   C3  open shadow DOM (`shadowHosts` / `shadowCss`)     C4  frame indices
+// Every Selenium-family selector is decoded from the emitted string literal of each
+// language and evaluated against a real DOM (jsdom), so the escapes are checked too.
+import { execFileSync } from 'node:child_process';
+import assert from 'node:assert';
+import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { stripTypeScriptTypes } from 'node:module';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
+import { JSDOM } from 'jsdom';
+import { beforeAll, describe, expect, it } from 'vitest';
+
+let C;
+beforeAll(async () => {
+  await import('../src/codegen.js');
+  await import('../src/codegen-java.js');
+  await import('../src/codegen-csharp.js');
+  await import('../src/codegen-wdio.js');
+  C = globalThis.LLCodegen;
+});
+
+const ALL = [
+  ['playwright', 'typescript'],
+  ['playwright', 'javascript'],
+  ['playwright', 'python'],
+  ['playwright', 'java'],
+  ['playwright', 'csharp'],
+  ['selenium', 'typescript'],
+  ['selenium', 'javascript'],
+  ['selenium', 'python'],
+  ['selenium', 'java'],
+  ['selenium', 'csharp'],
+  ['cypress', 'typescript'],
+  ['cypress', 'javascript'],
+  ['webdriverio', 'typescript'],
+  ['webdriverio', 'javascript'],
+];
+const SELENIUM_FAMILY = [
+  ['selenium', 'javascript'],
+  ['selenium', 'python'],
+  ['selenium', 'java'],
+  ['selenium', 'csharp'],
+  ['webdriverio', 'typescript'],
+];
+
+const testid = (value) => ({ kind: 'testid', attr: 'data-testid', value });
+const role = (r, name, o = {}) => ({ kind: 'role', role: r, ...(name != null ? { name } : {}), ...o });
+const stmt = (step, fw, lang) => C.actionStatement(step, fw, lang);
+
+// ── string literals, decoded the way each compiler reads them ──────────────────
+/** Python \xNN is not JSON; everything else the generators emit is. */
+const fromPython = (body) =>
+  JSON.parse(`"${body.replace(/\\(x([0-9a-f]{2})|.)/g, (m, e, hex) => (hex ? `\\u00${hex}` : m))}"`);
+const fromJs = (body) => new Function(`return '${body}';`)();
+const LITERAL = {
+  javascript: [/By\.(css|xpath)\('((?:[^'\\]|\\.)*)'\)/, (m) => [m[1], fromJs(m[2])]],
+  python: [/By\.(CSS_SELECTOR|XPATH), "((?:[^"\\]|\\.)*)"/, (m) => [m[1], fromPython(m[2])]],
+  java: [/By\.(cssSelector|xpath)\("((?:[^"\\]|\\.)*)"\)/, (m) => [m[1], JSON.parse(`"${m[2]}"`)]],
+  csharp: [
+    /By\.(CssSelector|XPath)\((?:@"((?:[^"]|"")*)"|"((?:[^"\\]|\\.)*)")\)/,
+    (m) => [m[1], m[2] != null ? m[2].replace(/""/g, '"') : JSON.parse(`"${m[3]}"`)],
+  ],
+  typescript: [/\$\('((?:[^'\\]|\\.)*)'\)/, (m) => [null, fromJs(m[1]).replace(/^css selector:/, '')]],
+};
+
+/** The selector one Selenium-family locator expression carries, decoded. */
+function selectorOf(target, fw, lang) {
+  const code = C.locatorExpr(target, fw, lang);
+  const [re, decode] = LITERAL[lang];
+  const m = re.exec(code);
+  if (!m) throw new Error(`no selector in ${code}`);
+  const [by, sel] = decode(m);
+  const xpath = by ? /xpath/i.test(by) : /^[/(.]/.test(sel);
+  return { code, xpath, sel };
+}
+
+/** data-k of every element a selector matches (XPath through jsdom's document.evaluate). */
+function matches(doc, { xpath, sel }) {
+  if (!xpath) return [...doc.querySelectorAll(sel)].map((e) => e.getAttribute('data-k'));
+  const r = doc.evaluate(sel, doc, null, 7, null);
+  return Array.from({ length: r.snapshotLength }, (_, i) => r.snapshotItem(i).getAttribute('data-k'));
+}
+
+const dom = (html) =>
+  new JSDOM(`<!doctype html><html><head><title>t</title></head><body>${html}</body></html>`).window;
+
+// ════════════════════════════════════════════════════════════════════════════
+describe('H1: no-break spaces, soft hyphens and zero-width spaces (Selenium / WebdriverIO XPath)', () => {
+  const HTML = `
+    <button data-k="cart">Add&nbsp;to&nbsp;cart</button>
+    <button data-k="wish">Add to wishlist</button>
+    <p data-k="total">Total:&nbsp;$42.00</p>
+    <p data-k="bundes">Bundes&shy;regierung</p>
+    <p data-k="zw">zero&#8203;width</p>
+    <p data-k="time">10:00&#8239;AM</p>
+    <label for="fn">First&nbsp;name</label><input id="fn" data-k="first">
+    <button data-k="gear" title="Settings">&nbsp;</button>
+    <span id="st">Ship&nbsp;to</span><input data-k="ship" aria-labelledby="st">
+    <button data-k="shy">Bundes&shy;tag</button>`;
+  let doc;
+  beforeAll(() => {
+    doc = dom(HTML).document;
+  });
+
+  it.each([
+    [role('button', 'Add to cart', { exact: true }), 'cart'],
+    [role('button', 'to cart'), 'cart'],
+    [{ kind: 'text', value: 'Total: $42.00', exact: true }, 'total'],
+    [{ kind: 'text', value: 'Bundesregierung', exact: true }, 'bundes'],
+    [{ kind: 'text', value: 'zerowidth' }, 'zw'],
+    [{ kind: 'text', value: '10:00 AM', exact: true }, 'time'],
+    [{ kind: 'label', value: 'First name', exact: true }, 'first'],
+    [role('textbox', 'First name', { exact: true }), 'first'],
+    // A name of only no-break spaces is empty: the title names the button.
+    [role('button', 'Settings', { exact: true }), 'gear'],
+    [{ kind: 'label', value: 'Ship to', exact: true }, 'ship'],
+    [role('button', 'Bundestag', { exact: true }), 'shy'],
+  ])('%j finds the element in every language', (target, want) => {
+    for (const [fw, lang] of SELENIUM_FAMILY) {
+      const s = selectorOf(target, fw, lang);
+      expect(matches(doc, s)[0], `${fw}/${lang}`).toBe(want);
+    }
+  });
+
+  it('writes the characters as escapes in every language, never raw', () => {
+    const t = { kind: 'text', value: 'x' };
+    for (const [fw, lang] of SELENIUM_FAMILY) {
+      const code = C.locatorExpr(t, fw, lang);
+      expect(code, `${fw}/${lang}`).not.toMatch(/[\u00a0\u00ad\u200b\u202f]/);
+      expect(code).toContain('translate(');
+    }
+    expect(C.locatorExpr(t, 'selenium', 'javascript')).toContain('"\\xa0\\u202f\\xad\\u200b", "  "');
+    expect(C.locatorExpr(t, 'selenium', 'python')).toContain('\\"\\xa0\\u202f\\xad\\u200b\\", \\"  \\"');
+    expect(C.locatorExpr(t, 'selenium', 'java')).toContain('\\"\\u00a0\\u202f\\u00ad\\u200b\\", \\"  \\"');
+    expect(C.locatorExpr(t, 'selenium', 'csharp')).toContain('\\"\\u00A0\\u202F\\u00AD\\u200B\\", \\"  \\"');
+    // A recorded value holding them is escaped too (a pasted test never hides text).
+    expect(C.q('a\u00a0b\u00adc\u200bd\ufeff', 'python')).toBe('"a\\xa0b\\xadc\\u200bd\\ufeff"');
+    expect(C._csharp.q('a\u00a0b\u202fc')).toBe('"a\\u00A0b\\u202Fc"');
+  });
+
+  it('drops soft hyphens and zero-width spaces from the needle too', () => {
+    const t = { kind: 'text', value: 'Bundes\u00adregierung\u200b', exact: true };
+    expect(matches(doc, selectorOf(t, 'selenium', 'javascript'))).toEqual(['bundes']);
+  });
+
+  it('the Cypress name helper normalises the same way', () => {
+    const target = role('button', 'Bundestag', { exact: true });
+    const expr = C.locatorExpr(target, 'cypress', 'javascript');
+    const helper = C.wrapScript([expr], 'cypress', 'javascript').split('describe(')[0];
+    const wrap = (els) => ({ els, filter: (fn) => wrap(els.filter((e, i) => fn(i, e))) });
+    const cy = { get: (s) => wrap([...doc.querySelectorAll(s)]) };
+    const res = new Function('cy', `${helper}\nreturn ${expr};`)(cy);
+    expect(res.els.map((e) => e.getAttribute('data-k'))).toEqual(['shy']);
+  });
+});
+
+// ════════════════════════════════════════════════════════════════════════════
+describe('H2: text assertions compare the rendered text', () => {
+  const t = testid('total');
+  const has = { action: 'assert', assertType: 'toHaveText', target: t, value: 'Total 42' };
+  const contains = { ...has, assertType: 'toContainText', value: 'Total' };
+
+  it('asks Playwright for innerText in every language', () => {
+    expect(stmt(has, 'playwright', 'typescript')).toBe(
+      "await expect(page.getByTestId('total')).toHaveText('Total 42', { useInnerText: true });"
+    );
+    expect(stmt(contains, 'playwright', 'javascript')).toBe(
+      "await expect(page.getByTestId('total')).toContainText('Total', { useInnerText: true });"
+    );
+    expect(stmt(has, 'playwright', 'python')).toBe(
+      'expect(page.get_by_test_id("total")).to_have_text("Total 42", use_inner_text=True)'
+    );
+    expect(stmt(contains, 'playwright', 'python')).toBe(
+      'expect(page.get_by_test_id("total")).to_contain_text("Total", use_inner_text=True)'
+    );
+    expect(stmt(has, 'playwright', 'java')).toBe(
+      'assertThat(page.getByTestId("total")).hasText("Total 42", new LocatorAssertions.HasTextOptions().setUseInnerText(true));'
+    );
+    expect(stmt(contains, 'playwright', 'java')).toBe(
+      'assertThat(page.getByTestId("total")).containsText("Total", new LocatorAssertions.ContainsTextOptions().setUseInnerText(true));'
+    );
+    expect(C.testScript([has], 'playwright', 'java')).toContain(
+      'import com.microsoft.playwright.assertions.LocatorAssertions;'
+    );
+    expect(C.testScript([{ action: 'click', target: t }], 'playwright', 'java')).not.toContain(
+      'LocatorAssertions'
+    );
+    expect(stmt(has, 'playwright', 'csharp')).toBe(
+      'await Expect(Page.GetByTestId("total")).ToHaveTextAsync("Total 42", new() { UseInnerText = true });'
+    );
+    expect(stmt(contains, 'playwright', 'csharp')).toBe(
+      'await Expect(Page.GetByTestId("total")).ToContainTextAsync("Total", new() { UseInnerText = true });'
+    );
+  });
+
+  it('suggested assertions render the same way in the timeline preview', () => {
+    expect(stmt({ ...has, suggested: true }, 'playwright', 'typescript')).toContain('{ useInnerText: true }');
+  });
+
+  // The rendered text of an element with a no-break space, a soft hyphen, a
+  // zero-width space and markup indentation.
+  const RENDERED = ' Total\u00a0\n 4\u00ad2\u200b ';
+
+  it('Cypress compares innerText inside a retried should() callback', async () => {
+    const code = stmt(has, 'cypress', 'typescript');
+    expect(code).toContain('$el[0].innerText');
+    expect(code).not.toContain('.text()');
+    const run = (innerText) => {
+      const cy = { get: () => ({ should: (fn) => fn([{ innerText, textContent: 'hidden junk' }]) }) };
+      new Function('cy', 'expect', code)(cy, expect);
+    };
+    expect(() => run(RENDERED)).not.toThrow();
+    expect(() => run('Total 43')).toThrow();
+    const part = stmt(contains, 'cypress', 'javascript');
+    expect(() =>
+      new Function('cy', 'expect', part)(
+        { get: () => ({ should: (fn) => fn([{ innerText: RENDERED }]) }) },
+        expect
+      )
+    ).not.toThrow();
+  });
+
+  it('Selenium JS normalises getText() like the recording', async () => {
+    const driver = { findElement: () => ({ getText: async () => RENDERED }) };
+    const By = { css: (s) => s };
+    const run = (step) =>
+      new Function(
+        'driver',
+        'By',
+        'assert',
+        `return (async () => { ${stmt(step, 'selenium', 'javascript')} })();`
+      )(driver, By, assert);
+    await expect(run(has)).resolves.toBeUndefined();
+    await expect(run(contains)).resolves.toBeUndefined();
+    await expect(run({ ...has, value: 'Total 43' })).rejects.toThrow();
+  });
+
+  it('Selenium Python normalises .text like the recording', () => {
+    const py = (step) =>
+      [
+        'class E:',
+        `    text = ${JSON.stringify(RENDERED)}`,
+        'class D:',
+        '    def find_element(self, *a): return E()',
+        'class By: CSS_SELECTOR = "css"',
+        'driver = D()',
+        stmt(step, 'selenium', 'python'),
+      ].join('\n');
+    const runs = (step) => {
+      try {
+        execFileSync('python3', ['-I', '-c', py(step)], { stdio: 'pipe' });
+        return true;
+      } catch {
+        return false;
+      }
+    };
+    expect(runs(has)).toBe(true);
+    expect(runs(contains)).toBe(true);
+    expect(runs({ ...has, value: 'Total 43' })).toBe(false);
+  });
+
+  it('Java, C# and WebdriverIO strip the same characters before comparing', () => {
+    expect(stmt(has, 'selenium', 'java')).toBe(
+      'assertEquals("Total 42", driver.findElement(By.cssSelector("[data-testid=\\"total\\"]")).getText()' +
+        '.replaceAll("[\\\\u00ad\\\\u200b]", "").replaceAll("(?U)\\\\s+", " ").trim());'
+    );
+    expect(stmt(has, 'selenium', 'csharp')).toBe(
+      'Assert.That(Regex.Replace(Regex.Replace(driver.FindElement(By.CssSelector("[data-testid=\\"total\\"]")).Text, ' +
+        '@"[\\u00AD\\u200B]", ""), @"\\s+", " ").Trim(), Is.EqualTo("Total 42"));'
+    );
+    expect(stmt({ ...has, value: ' Total\u00ad 42 ' }, 'webdriverio', 'typescript')).toBe(
+      "await expect($('[data-testid=\"total\"]')).toHaveText('Total 42', " +
+        "{ replace: [[/[\\u00ad\\u200b]/g, ''], [/\\s+/g, ' ']] });"
+    );
+  });
+});
+
+// ════════════════════════════════════════════════════════════════════════════
+describe('M1: aria-labelledby with several ids (Selenium / WebdriverIO XPath)', () => {
+  const HTML = `
+    <h2 id="t">Delete file</h2><p id="d">This cannot be undone</p>
+    <div role="dialog" data-k="dlg" aria-labelledby="t d"><button>OK</button></div>
+    <span id="a">Amount</span><span id="ab">USD</span>
+    <input data-k="amt" aria-labelledby="a ab">
+    <input data-k="pref" aria-labelledby="ab">
+    <span id="one">Single</span><input data-k="single" aria-labelledby=" one ">
+    <input data-k="missing" aria-labelledby="nope" aria-label="Fallback">
+    <span id="w1">w1</span><span id="w2">w2</span><span id="w3">w3</span><span id="w4">w4</span>
+    <input data-k="four" aria-labelledby="w4 w3 w2 w1">`;
+  let doc;
+  beforeAll(() => {
+    doc = dom(HTML).document;
+  });
+
+  it.each([
+    [role('dialog', 'Delete file This cannot be undone', { exact: true }), ['dlg']],
+    [role('dialog', 'Delete file'), ['dlg']],
+    [role('textbox', 'Amount USD', { exact: true }), ['amt']],
+    [{ kind: 'label', value: 'Amount USD', exact: true }, ['amt']],
+    [{ kind: 'label', value: 'Amount' }, ['amt']],
+    // "a" is a prefix of "ab": only the whole id counts.
+    [role('textbox', 'USD', { exact: true }), ['pref']],
+    [role('textbox', 'Amount', { exact: true }), []],
+    [role('textbox', 'Single', { exact: true }), ['single']],
+    // An id that points nowhere leaves the name to the next source.
+    [role('textbox', 'Fallback', { exact: true }), ['missing']],
+    // Attribute order, not document order.
+    [role('textbox', 'w4 w3 w2 w1', { exact: true }), ['four']],
+    [role('textbox', 'w1 w2 w3 w4', { exact: true }), []],
+  ])('%j matches %j', (target, want) => {
+    for (const [fw, lang] of SELENIUM_FAMILY) {
+      expect(matches(doc, selectorOf(target, fw, lang)), `${fw}/${lang}`).toEqual(want);
+    }
+  });
+});
+
+// ════════════════════════════════════════════════════════════════════════════
+describe('M6 / C4: numeric target fields never become code', () => {
+  const HOSTILE = [
+    '1 }); PWNED(); ({ a: 1',
+    '1"]);PWNED();//',
+    NaN,
+    Infinity,
+    -1,
+    0,
+    7,
+    2.5,
+    '',
+    null,
+    {},
+    '3x',
+  ];
+
+  it('emits a heading level only when it is an integer 1-6', () => {
+    for (const level of HOSTILE) {
+      for (const [fw, lang] of ALL) {
+        for (const t of [role('heading', 'x', { level }), role('heading', null, { level })]) {
+          const code = C.locatorExpr(t, fw, lang);
+          expect(code, `${fw}/${lang} ${String(level)}`).not.toMatch(
+            /PWNED|NaN|Infinity|aria-level|level|Level/
+          );
+        }
+      }
+    }
+    expect(C.locatorExpr(role('heading', 'x', { level: 3 }), 'playwright', 'typescript')).toBe(
+      "page.getByRole('heading', { name: 'x', level: 3 })"
+    );
+    expect(C.locatorExpr(role('heading', 'x', { level: '2' }), 'playwright', 'python')).toBe(
+      'page.get_by_role("heading", name="x", level=2)'
+    );
+    expect(C.locatorExpr(role('heading', 'x', { level: 6 }), 'playwright', 'csharp')).toBe(
+      'Page.GetByRole(AriaRole.Heading, new() { Name = "x", Level = 6 })'
+    );
+    expect(C.locatorExpr(role('heading', null, { level: 4 }), 'playwright', 'java')).toBe(
+      'page.getByRole(AriaRole.HEADING, new Page.GetByRoleOptions().setLevel(4))'
+    );
+    expect(C.locatorExpr(role('heading', null, { level: 2 }), 'cypress', 'javascript')).toBe(
+      'cy.get(\'h2:not([role]), [role~="heading"][aria-level="2"]\').first()'
+    );
+  });
+
+  it('coerces frame indices to non-negative integers', () => {
+    const BAD = ['0); PWNED(); (0', NaN, Infinity, -1, 2.5, '', null, {}, '3x'];
+    for (const index of BAD) {
+      for (const framesIndex of [undefined, ...BAD]) {
+        const target = { kind: 'frame', selector: null, index, framesIndex, child: testid('x') };
+        for (const [fw, lang] of ALL) {
+          const code = stmt({ action: 'click', target }, fw, lang);
+          expect(code, `${fw}/${lang}`).not.toMatch(/PWNED|NaN|Infinity|-1|2\.5|\[object/);
+          expect(code).toMatch(
+            /nth=0|eq\(0\)|frame\(0\)|Frame\(0\)|\[0\]|frame_locator|FrameLocator|frameLocator/
+          );
+        }
+      }
+    }
+  });
+
+  it('switches Selenium by framesIndex when known, everything else by index (C4)', () => {
+    const target = { kind: 'frame', selector: null, index: 1, framesIndex: 3, child: testid('x') };
+    const click = (fw, lang) => stmt({ action: 'click', target }, fw, lang).split('\n');
+    expect(click('selenium', 'javascript')[0]).toBe('await driver.switchTo().frame(3);');
+    expect(click('selenium', 'python')[0]).toBe('driver.switch_to.frame(3)');
+    expect(click('selenium', 'java')[0]).toBe('driver.switchTo().frame(3);');
+    expect(click('selenium', 'csharp')[0]).toBe('driver.SwitchTo().Frame(3);');
+    expect(click('playwright', 'typescript')[0]).toContain("frameLocator('iframe >> nth=1')");
+    expect(click('cypress', 'javascript').pop()).toContain("cy.get('iframe').eq(1)");
+    expect(click('webdriverio', 'javascript')[0]).toBe("await browser.switchFrame($$('iframe')[1]);");
+    // A string of digits is a number; anything else falls back to index.
+    const t2 = { ...target, framesIndex: '2' };
+    expect(stmt({ action: 'click', target: t2 }, 'selenium', 'python').split('\n')[0]).toBe(
+      'driver.switch_to.frame(2)'
+    );
+    const t3 = { ...target, framesIndex: -2 };
+    expect(stmt({ action: 'click', target: t3 }, 'selenium', 'python').split('\n')[0]).toBe(
+      'driver.switch_to.frame(1)'
+    );
+    // A frame with a selector is still entered by its element.
+    const t4 = { ...target, selector: '#pay' };
+    expect(stmt({ action: 'click', target: t4 }, 'selenium', 'java').split('\n')[0]).toBe(
+      'driver.switchTo().frame(driver.findElement(By.cssSelector("#pay")));'
+    );
+    // Page objects use the same switch.
+    const po = C.pageObject({ elements: [{ name: 'x', kind: 'button', target }] }, 'selenium', 'python');
+    expect(po).toContain('self.driver.switch_to.frame(3)');
+  });
+
+  it('falls back to the default viewport for anything but a positive finite size', () => {
+    for (const bad of ['1); PWNED(); (1', NaN, Infinity, -5, 0, 'abc']) {
+      for (const [fw, lang] of ALL) {
+        const code = stmt({ action: 'viewport', width: bad, height: bad }, fw, lang);
+        expect(code, `${fw}/${lang}`).not.toMatch(/PWNED|NaN|Infinity|-5/);
+        expect(code).toContain('1280');
+      }
+    }
+    expect(stmt({ action: 'viewport', width: 390.6, height: '844' }, 'playwright', 'csharp')).toBe(
+      'await Page.SetViewportSizeAsync(391, 844);'
+    );
+  });
+});
+
+// ════════════════════════════════════════════════════════════════════════════
+describe('C1: multi-select steps', () => {
+  const step = { action: 'selectOption', target: testid('s'), value: 'Red', values: ['Red', 'Blue "B"'] };
+
+  it('selects every recorded label, in each framework', () => {
+    expect(stmt(step, 'playwright', 'typescript')).toBe(
+      "await page.getByTestId('s').selectOption(['Red', 'Blue \"B\"']);"
+    );
+    expect(stmt(step, 'playwright', 'python')).toBe(
+      'page.get_by_test_id("s").select_option(["Red", "Blue \\"B\\""])'
+    );
+    expect(stmt(step, 'playwright', 'java')).toBe(
+      'page.getByTestId("s").selectOption(new String[] {"Red", "Blue \\"B\\""});'
+    );
+    expect(stmt(step, 'playwright', 'csharp')).toBe(
+      'await Page.GetByTestId("s").SelectOptionAsync(new[] { "Red", "Blue \\"B\\"" });'
+    );
+    expect(stmt(step, 'cypress', 'javascript')).toBe(
+      "cy.get('[data-testid=\"s\"]').select(['Red', 'Blue \"B\"']);"
+    );
+    expect(stmt(step, 'selenium', 'javascript')).toBe(
+      [
+        '{',
+        '  const select = new Select(driver.findElement(By.css(\'[data-testid="s"]\')));',
+        '  await select.deselectAll();',
+        "  await select.selectByVisibleText('Red');",
+        '  await select.selectByVisibleText(\'Blue "B"\');',
+        '}',
+      ].join('\n')
+    );
+    expect(stmt(step, 'selenium', 'python')).toBe(
+      [
+        'select = Select(driver.find_element(By.CSS_SELECTOR, "[data-testid=\\"s\\"]"))',
+        'select.deselect_all()',
+        'select.select_by_visible_text("Red")',
+        'select.select_by_visible_text("Blue \\"B\\"")',
+      ].join('\n')
+    );
+    expect(stmt(step, 'selenium', 'java')).toBe(
+      [
+        '{',
+        '    Select select = new Select(driver.findElement(By.cssSelector("[data-testid=\\"s\\"]")));',
+        '    select.deselectAll();',
+        '    select.selectByVisibleText("Red");',
+        '    select.selectByVisibleText("Blue \\"B\\"");',
+        '}',
+      ].join('\n')
+    );
+    expect(stmt(step, 'selenium', 'csharp')).toBe(
+      [
+        '{',
+        '    var select = new SelectElement(driver.FindElement(By.CssSelector("[data-testid=\\"s\\"]")));',
+        '    select.DeselectAll();',
+        '    select.SelectByText("Red");',
+        '    select.SelectByText("Blue \\"B\\"");',
+        '}',
+      ].join('\n')
+    );
+    expect(stmt(step, 'webdriverio', 'typescript')).toBe(
+      [
+        '{',
+        '  const el = await $(\'[data-testid="s"]\');',
+        "  await browser.execute('for (const o of arguments[0].options) o.selected = false;', el);",
+        "  await el.selectByVisibleText('Red');",
+        '  await el.selectByVisibleText(\'Blue "B"\');',
+        '}',
+      ].join('\n')
+    );
+  });
+
+  it('keeps the single-value form for one value, and imports Select', () => {
+    const one = { ...step, values: ['Red'] };
+    expect(stmt(one, 'playwright', 'typescript')).toBe("await page.getByTestId('s').selectOption('Red');");
+    expect(C.testScript([step], 'selenium', 'python')).toContain(
+      'from selenium.webdriver.support.ui import Select'
+    );
+    expect(C.testScript([step], 'selenium', 'javascript')).toContain('Select } = require');
+  });
+
+  it('never turns a multi-select into test data', () => {
+    expect(C.extractVariables([step])).toEqual([]);
+    const code = C.testScript([{ ...step, varRef: 'colour' }], 'playwright', 'typescript', {
+      variables: true,
+    });
+    expect(code).not.toContain('testData');
+    expect(code).toContain("selectOption(['Red', 'Blue \"B\"'])");
+  });
+});
+
+// ════════════════════════════════════════════════════════════════════════════
+describe('C2: sensitive toHaveValue assertions', () => {
+  const step = {
+    action: 'assert',
+    assertType: 'toHaveValue',
+    target: testid('pw'),
+    sensitive: true,
+    secretName: 'MY_PW',
+    value: 'hunter2',
+  };
+
+  it('reads the environment variable, never the value, in every target', () => {
+    const want = {
+      'playwright/typescript': "await expect(page.getByTestId('pw')).toHaveValue(process.env.MY_PW ?? '');",
+      'playwright/python': 'expect(page.get_by_test_id("pw")).to_have_value(os.environ.get("MY_PW", ""))',
+      'playwright/java':
+        'assertThat(page.getByTestId("pw")).hasValue(System.getenv().getOrDefault("MY_PW", ""));',
+      'playwright/csharp':
+        'await Expect(Page.GetByTestId("pw")).ToHaveValueAsync(Environment.GetEnvironmentVariable("MY_PW") ?? "");',
+      'selenium/javascript':
+        "assert.ok((await driver.findElement(By.css('[data-testid=\"pw\"]')).getAttribute('value')) === " +
+        "(process.env.MY_PW ?? ''), 'the value does not match MY_PW');",
+      'selenium/python':
+        'assert driver.find_element(By.CSS_SELECTOR, "[data-testid=\\"pw\\"]").get_attribute("value") == ' +
+        'os.environ.get("MY_PW", ""), "the value does not match MY_PW"',
+      'selenium/java':
+        'assertTrue(System.getenv().getOrDefault("MY_PW", "").equals(driver.findElement(By.cssSelector(' +
+        '"[data-testid=\\"pw\\"]")).getDomProperty("value")), "the value does not match MY_PW");',
+      'selenium/csharp':
+        'Assert.That(driver.FindElement(By.CssSelector("[data-testid=\\"pw\\"]")).GetDomProperty("value") == ' +
+        '(Environment.GetEnvironmentVariable("MY_PW") ?? ""), Is.True, "the value does not match MY_PW");',
+      'cypress/javascript':
+        "locatraSecret('MY_PW').then((secret) => {\n" +
+        '  cy.get(\'[data-testid="pw"]\').should(($el) => { expect($el.val() === secret, ' +
+        "'the value does not match MY_PW').to.equal(true); });\n});",
+      'webdriverio/typescript':
+        'await browser.waitUntil(async () => (await $(\'[data-testid="pw"]\').getValue()) === ' +
+        "(process.env.MY_PW ?? ''), { timeoutMsg: 'the value does not match MY_PW' });",
+    };
+    for (const [key, code] of Object.entries(want)) {
+      const [fw, lang] = key.split('/');
+      expect(stmt(step, fw, lang), key).toBe(code);
+    }
+    for (const [fw, lang] of ALL) {
+      expect(C.testScript([step], fw, lang), `${fw}/${lang}`).not.toContain('hunter2');
+    }
+  });
+
+  it('falls back to LOCATRA_PASSWORD for an unusable secret name, like a sensitive fill', () => {
+    const bad = { ...step, secretName: 'x; PWNED()' };
+    for (const [fw, lang] of ALL) {
+      const code = stmt(bad, fw, lang);
+      expect(code, `${fw}/${lang}`).toContain('LOCATRA_PASSWORD');
+      expect(code).not.toContain('PWNED');
+    }
+  });
+
+  it('brings in what the env read needs (os, the Cypress secret helper)', () => {
+    expect(C.testScript([step], 'playwright', 'python')).toMatch(/^import os\n/);
+    expect(C.testScript([step], 'selenium', 'python')).toMatch(/^import os\n/);
+    expect(C.testScript([step], 'cypress', 'typescript')).toContain('function locatraSecret(name: string)');
+    expect(C.testScript([step], 'selenium', 'csharp')).toContain('using System;');
+  });
+
+  it('a Selenium JS failure never prints the secret', async () => {
+    const run = (actual) =>
+      new Function(
+        'driver',
+        'By',
+        'assert',
+        'process',
+        `return (async () => { ${stmt(step, 'selenium', 'javascript')} })();`
+      )({ findElement: () => ({ getAttribute: async () => actual }) }, { css: (s) => s }, assert, {
+        env: { MY_PW: 'hunter2' },
+      });
+    await expect(run('hunter2')).resolves.toBeUndefined();
+    const err = await run('wrong').catch((e) => e);
+    expect(String(err.message)).toBe('the value does not match MY_PW');
+  });
+
+  it('leaves non-sensitive toHaveValue and a sensitive non-value assertion alone', () => {
+    const plain = { ...step, sensitive: false };
+    expect(stmt(plain, 'playwright', 'typescript')).toBe(
+      "await expect(page.getByTestId('pw')).toHaveValue('hunter2');"
+    );
+    const vis = { ...step, assertType: 'toBeVisible' };
+    expect(stmt(vis, 'selenium', 'python')).toBe(
+      'assert driver.find_element(By.CSS_SELECTOR, "[data-testid=\\"pw\\"]").is_displayed()'
+    );
+  });
+});
+
+// ════════════════════════════════════════════════════════════════════════════
+describe('C3: open shadow DOM', () => {
+  const inShadow = (o = {}) => ({
+    ...role('button', 'Go'),
+    shadowHosts: ['x-app', 'x-panel[data-k="p"]'],
+    shadowCss: 'button.go',
+    ...o,
+  });
+  const click = (target, fw, lang) => stmt({ action: 'click', target }, fw, lang);
+
+  it('leaves Playwright alone: its locators pierce shadow roots', () => {
+    for (const lang of ['typescript', 'python', 'java', 'csharp']) {
+      expect(C.locatorExpr(inShadow(), 'playwright', lang)).toBe(
+        C.locatorExpr(role('button', 'Go'), 'playwright', lang)
+      );
+    }
+  });
+
+  it('walks host by host and finishes with shadowCss everywhere else', () => {
+    expect(C.locatorExpr(inShadow(), 'selenium', 'javascript')).toBe(
+      "(await (await (await (await driver.findElement(By.css('x-app')).getShadowRoot())" +
+        ".findElement(By.css('x-panel[data-k=\"p\"]'))).getShadowRoot()).findElement(By.css('button.go')))"
+    );
+    expect(C.locatorExpr(inShadow(), 'selenium', 'python')).toBe(
+      'driver.find_element(By.CSS_SELECTOR, "x-app").shadow_root.find_element(By.CSS_SELECTOR, ' +
+        '"x-panel[data-k=\\"p\\"]").shadow_root.find_element(By.CSS_SELECTOR, "button.go")'
+    );
+    expect(C.locatorExpr(inShadow(), 'selenium', 'java')).toBe(
+      'driver.findElement(By.cssSelector("x-app")).getShadowRoot().findElement(By.cssSelector(' +
+        '"x-panel[data-k=\\"p\\"]")).getShadowRoot().findElement(By.cssSelector("button.go"))'
+    );
+    expect(C.locatorExpr(inShadow(), 'selenium', 'csharp')).toBe(
+      'driver.FindElement(By.CssSelector("x-app")).GetShadowRoot().FindElement(By.CssSelector(' +
+        '"x-panel[data-k=\\"p\\"]")).GetShadowRoot().FindElement(By.CssSelector("button.go"))'
+    );
+    expect(C.locatorExpr(inShadow(), 'cypress', 'javascript')).toBe(
+      "cy.get('x-app').shadow().find('x-panel[data-k=\"p\"]').shadow().find('button.go')"
+    );
+    expect(C.locatorExpr(inShadow(), 'webdriverio', 'typescript')).toBe(
+      "$('x-app').shadow$('x-panel[data-k=\"p\"]').shadow$('button.go')"
+    );
+    // A selector WebdriverIO would read as another strategy keeps its css prefix.
+    expect(C.locatorExpr(inShadow({ shadowCss: 'id=x' }), 'webdriverio', 'typescript')).toBe(
+      "$('x-app').shadow$('x-panel[data-k=\"p\"]').shadow$('css selector:id=x')"
+    );
+    // No note: the element is reachable.
+    for (const [fw, lang] of ALL) expect(click(inShadow(), fw, lang), `${fw}/${lang}`).not.toContain('NOTE');
+  });
+
+  it('enters frames first, and starts a chained child from the document', () => {
+    const framed = { kind: 'frame', selector: '#f', index: 0, child: inShadow() };
+    expect(click(framed, 'selenium', 'python').split('\n')).toEqual([
+      'driver.switch_to.frame(driver.find_element(By.CSS_SELECTOR, "#f"))',
+      `${C.locatorExpr(inShadow(), 'selenium', 'python')}.click()`,
+      'driver.switch_to.default_content()',
+    ]);
+    expect(C.locatorExpr(framed, 'cypress', 'javascript')).toBe(
+      "cy.get('#f').its('0.contentDocument.body').should('not.be.empty').then(cy.wrap)" +
+        ".find('x-app').shadow().find('x-panel[data-k=\"p\"]').shadow().find('button.go')"
+    );
+    const chained = { kind: 'chain', parent: testid('row'), child: inShadow() };
+    for (const [fw, lang] of ALL) {
+      if (fw === 'playwright') continue;
+      expect(C.locatorExpr(chained, fw, lang), `${fw}/${lang}`).toBe(C.locatorExpr(inShadow(), fw, lang));
+    }
+    // A shadow chain whose parent is the shadow target continues from the element.
+    const outer = { kind: 'chain', parent: inShadow(), child: testid('in') };
+    expect(C.locatorExpr(outer, 'selenium', 'python')).toBe(
+      `${C.locatorExpr(inShadow(), 'selenium', 'python')}.find_element(By.CSS_SELECTOR, "[data-testid=\\"in\\"]")`
+    );
+  });
+
+  it('keeps the target own locator with a NOTE when shadowCss is missing', () => {
+    const noCss = inShadow({ shadowCss: undefined });
+    const note = 'NOTE: this element is inside shadow DOM but no CSS selector was recorded for it there';
+    for (const [fw, lang] of ALL) {
+      const code = click(noCss, fw, lang);
+      if (fw === 'playwright') expect(code, `${fw}/${lang}`).not.toContain('NOTE');
+      else {
+        expect(code, `${fw}/${lang}`).toContain(note);
+        expect(code).toContain(click(role('button', 'Go'), fw, lang).split('\n').pop());
+      }
+    }
+    // Unusable shadowHosts are ignored entirely.
+    for (const shadowHosts of [[], ['x-app', ''], ['x-app', 3], 'x-app', null]) {
+      for (const [fw, lang] of ALL) {
+        expect(click(inShadow({ shadowHosts }), fw, lang)).toBe(click(role('button', 'Go'), fw, lang));
+      }
+    }
+  });
+
+  it('page objects reach shadow elements too (Selenium JS methods become async)', () => {
+    const model = {
+      elements: [
+        { name: 'go', kind: 'button', target: inShadow() },
+        { name: 'plain', kind: 'button', target: testid('p') },
+        { name: 'lost', kind: 'button', target: inShadow({ shadowCss: '' }) },
+      ],
+    };
+    const ts = C.pageObject(model, 'selenium', 'typescript');
+    expect(ts).toContain(
+      "import { By, type WebDriver, type WebElement, type WebElementPromise } from 'selenium-webdriver';"
+    );
+    expect(ts).toContain(
+      'async go(): Promise<WebElement> {\n    return (await (await (await (await this.driver.findElement('
+    );
+    expect(ts).toContain('plain(): WebElementPromise {');
+    expect(ts).toContain('  // NOTE: this element is inside shadow DOM');
+    const allShadow = C.pageObject({ elements: [model.elements[0]] }, 'selenium', 'javascript');
+    expect(allShadow).toContain('async go() {');
+    expect(C.pageObject({ elements: [model.elements[0]] }, 'selenium', 'typescript')).toContain(
+      'import { By, type WebDriver, type WebElement }'
+    );
+    expect(C.pageObject(model, 'selenium', 'python')).toContain(
+      'return self.driver.find_element(By.CSS_SELECTOR, "x-app").shadow_root'
+    );
+    expect(C.pageObject(model, 'selenium', 'java')).toContain(
+      'return driver.findElement(By.cssSelector("x-app")).getShadowRoot()'
+    );
+    expect(C.pageObject(model, 'selenium', 'java')).toContain('// NOTE: this element is inside shadow DOM');
+    expect(C.pageObject(model, 'selenium', 'csharp')).toContain(
+      'public IWebElement Go => Driver.FindElement(By.CssSelector("x-app")).GetShadowRoot()'
+    );
+    expect(C.pageObject(model, 'selenium', 'csharp')).toContain('// NOTE: this element is inside shadow DOM');
+    expect(C.pageObject(model, 'cypress', 'typescript')).toContain(
+      "return cy.get('x-app').shadow().find('x-panel[data-k=\"p\"]').shadow().find('button.go');"
+    );
+    expect(C.pageObject(model, 'cypress', 'typescript')).toContain(
+      '// NOTE: this element is inside shadow DOM'
+    );
+    expect(C.pageObject(model, 'webdriverio', 'typescript')).toContain(
+      "return $('x-app').shadow$('x-panel[data-k=\"p\"]').shadow$('button.go');"
+    );
+    expect(C.pageObject(model, 'webdriverio', 'typescript')).toContain(
+      '// NOTE: this element is inside shadow DOM'
+    );
+    // Playwright page objects need neither the walk nor the note.
+    for (const lang of ['typescript', 'python', 'java', 'csharp']) {
+      expect(C.pageObject(model, 'playwright', lang), lang).not.toMatch(/shadow|NOTE: this element/i);
+    }
+  });
+
+  describe('runs against a real shadow tree', () => {
+    let doc;
+    beforeAll(() => {
+      doc = dom('<x-app></x-app>').document;
+      const app = doc.querySelector('x-app').attachShadow({ mode: 'open' });
+      app.innerHTML = '<x-panel data-k="p"></x-panel>';
+      const panel = app.querySelector('x-panel').attachShadow({ mode: 'open' });
+      panel.innerHTML = '<button class="go" data-k="go">Go</button>';
+    });
+
+    it('Selenium JS: every hop awaited, as selenium-webdriver needs', async () => {
+      const clicked = [];
+      // selenium-webdriver's shapes: findElement() on the driver gives a thenable
+      // WebElementPromise; getShadowRoot() and a ShadowRoot's findElement() give
+      // plain promises.
+      const element = (node) => ({
+        getShadowRoot: async () => ({
+          findElement: async (sel) => element(node.shadowRoot.querySelector(sel)),
+        }),
+        click: async () => clicked.push(node.getAttribute('data-k')),
+      });
+      const driver = { findElement: (sel) => element(doc.querySelector(sel)) };
+      const code = click(inShadow(), 'selenium', 'typescript');
+      await new Function('driver', 'By', `return (async () => { ${code} })();`)(driver, { css: (s) => s });
+      expect(clicked).toEqual(['go']);
+    });
+
+    it('Cypress: .shadow().find() from host to element', () => {
+      const wrap = (node) => ({
+        node,
+        shadow: () => ({ find: (sel) => wrap(node.shadowRoot.querySelector(sel)) }),
+      });
+      const cy = { get: (sel) => wrap(doc.querySelector(sel)) };
+      const res = new Function('cy', `return ${C.locatorExpr(inShadow(), 'cypress', 'javascript')};`)(cy);
+      expect(res.node.getAttribute('data-k')).toBe('go');
+    });
+  });
+});
+
+// ════════════════════════════════════════════════════════════════════════════
+describe('the new shapes parse in every language', () => {
+  const steps = [
+    { action: 'goto', value: 'https://e.example/' },
+    { action: 'selectOption', target: testid('s'), value: 'A', values: ['A', "B 'b'"] },
+    { action: 'assert', assertType: 'toHaveValue', target: testid('pw'), sensitive: true, secretName: 'PW' },
+    { action: 'assert', assertType: 'toHaveText', target: testid('t'), value: 'a\u00a0b' },
+    { action: 'assert', assertType: 'toContainText', target: testid('t'), value: 'a' },
+    { action: 'click', target: { ...testid('x'), shadowHosts: ['x-a', 'x-b'], shadowCss: '.go' } },
+    { action: 'fill', target: { ...testid('y'), shadowHosts: ['x-a'], shadowCss: 'input' }, value: 'v' },
+    { action: 'check', target: { ...testid('z'), shadowHosts: ['x-a'] } },
+    {
+      action: 'assert',
+      assertType: 'toHaveText',
+      target: {
+        kind: 'frame',
+        selector: null,
+        index: 0,
+        framesIndex: 1,
+        child: { ...testid('w'), shadowHosts: ['x-a'], shadowCss: 'p' },
+      },
+      value: 'w',
+    },
+    { action: 'click', target: role('heading', 'T', { level: '2' }) },
+  ];
+  const po = {
+    pageUrl: 'https://e.example/',
+    elements: [
+      { name: 'go', kind: 'button', target: { ...testid('x'), shadowHosts: ['x-a'], shadowCss: '.go' } },
+      { name: 'field', kind: 'input', target: testid('f') },
+    ],
+  };
+
+  it('node --check (JS/TS) and ast.parse (Python)', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'locatra-audit-'));
+    try {
+      for (const [fw, lang] of ALL) {
+        if (lang === 'java' || lang === 'csharp') continue; // compiled in their own suites
+        for (const [kind, code] of [
+          ['spec', C.testScript(steps, fw, lang)],
+          ['po', C.pageObject(po, fw, lang)],
+        ]) {
+          if (lang === 'python') {
+            const file = join(dir, `${fw}-${kind}.py`);
+            writeFileSync(file, code);
+            expect(() =>
+              execFileSync(
+                'python3',
+                ['-I', '-c', 'import ast, sys; ast.parse(open(sys.argv[1]).read())', file],
+                {
+                  stdio: 'pipe',
+                }
+              )
+            ).not.toThrow();
+            continue;
+          }
+          const module = fw === 'selenium' && kind === 'spec' ? 'cjs' : 'mjs';
+          const file = join(dir, `${fw}-${lang}-${kind}.${module}`);
+          writeFileSync(file, lang === 'typescript' ? stripTypeScriptTypes(code) : code);
+          expect(
+            () => execFileSync(process.execPath, ['--check', file], { stdio: 'pipe' }),
+            `${fw}/${lang}/${kind}`
+          ).not.toThrow();
+        }
+      }
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+});

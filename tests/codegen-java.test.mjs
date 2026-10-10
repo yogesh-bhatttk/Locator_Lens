@@ -428,9 +428,9 @@ describe('Selenium for Java locators', () => {
     expect(se(testid('go'))).toBe('driver.findElement(By.cssSelector("[data-testid=\\"go\\"]"))');
     expect(se({ kind: 'id', value: 'a:b' })).toBe('driver.findElement(By.id("a:b"))');
     expect(se({ kind: 'name', value: 'notes' })).toBe('driver.findElement(By.name("notes"))');
-    expect(se(role('row'))).toBe('driver.findElement(By.cssSelector("tr:not([role]), [role=\\"row\\"]"))');
+    expect(se(role('row'))).toBe('driver.findElement(By.cssSelector("tr:not([role]), [role~=\\"row\\"]"))');
     expect(se(role('link', null, { nth: 1 }))).toBe(
-      'driver.findElement(By.xpath("(//*[(self::a and not(@role) and @href) or (self::area and not(@role) and @href) or (@role=\\"link\\")])[2]"))'
+      'driver.findElement(By.xpath("(//*[(self::a and not(@role) and @href) or (self::area and not(@role) and @href) or (contains(concat(\\" \\", normalize-space(@role), \\" \\"), \\" link \\"))])[2]"))'
     );
     expect(se({ kind: 'placeholder', value: 'P' })).toBe(
       'driver.findElement(By.cssSelector("[placeholder*=\\"P\\"]"))'
@@ -529,8 +529,12 @@ describe('Playwright for Java statements', () => {
     expect(a('toBeVisible')).toBe(`assertThat(${loc}).isVisible();`);
     expect(a(undefined)).toBe(`assertThat(${loc}).isVisible();`);
     expect(a('toBeSomethingNew')).toBe(`assertThat(${loc}).isVisible();`);
-    expect(a('toHaveText', 'Ada  Lovelace')).toBe(`assertThat(${loc}).hasText("Ada  Lovelace");`);
-    expect(a('toContainText', 'Ada')).toBe(`assertThat(${loc}).containsText("Ada");`);
+    expect(a('toHaveText', 'Ada  Lovelace')).toBe(
+      `assertThat(${loc}).hasText("Ada  Lovelace", new LocatorAssertions.HasTextOptions().setUseInnerText(true));`
+    );
+    expect(a('toContainText', 'Ada')).toBe(
+      `assertThat(${loc}).containsText("Ada", new LocatorAssertions.ContainsTextOptions().setUseInnerText(true));`
+    );
     expect(a('toHaveValue', 'Ireland')).toBe(`assertThat(${loc}).hasValue("Ireland");`);
     expect(a('toHaveValue', null)).toBe(`assertThat(${loc}).hasValue("");`);
     expect(a('toBeEnabled')).toBe(`assertThat(${loc}).isEnabled();`);
@@ -672,7 +676,7 @@ describe('Selenium for Java statements', () => {
 
   it('asserts with JUnit, comparing whitespace-normalised text', () => {
     const a = (assertType, value) => seStep({ action: 'assert', target: t, assertType, value });
-    const text = `${loc}.getText().replaceAll("(?U)\\\\s+", " ").trim()`;
+    const text = `${loc}.getText().replaceAll("[\\\\u00ad\\\\u200b]", "").replaceAll("(?U)\\\\s+", " ").trim()`;
     expect(a('toBeVisible')).toBe(`assertTrue(${loc}.isDisplayed());`);
     expect(a('somethingNew')).toBe(`assertTrue(${loc}.isDisplayed());`);
     expect(a('toHaveText', '  Ada\n Lovelace ')).toBe(`assertEquals("Ada Lovelace", ${text});`);
@@ -756,7 +760,7 @@ describe('Selenium for Java statements', () => {
     const note =
       '// NOTE: this role locator has no accessible name and may match several elements; the first match is used.';
     expect(seStep({ action: 'click', target: role('row') })).toBe(
-      `${note}\ndriver.findElement(By.cssSelector("tr:not([role]), [role=\\"row\\"]")).click();`
+      `${note}\ndriver.findElement(By.cssSelector("tr:not([role]), [role~=\\"row\\"]")).click();`
     );
     expect(seStep({ action: 'click', target: frame('#f', role('row')) }).split('\n')[1]).toBe(note);
     expect(seStep({ action: 'click', target: role('row', null, { matchCount: 1 }) })).not.toContain('NOTE');
@@ -787,6 +791,7 @@ describe('Playwright for Java test file', () => {
     expect(C.testScript(SMALL_FLOW, 'playwright', 'java')).toBe(
       [
         'import com.microsoft.playwright.Page;',
+        'import com.microsoft.playwright.assertions.LocatorAssertions;',
         'import com.microsoft.playwright.junit.UsePlaywright;',
         'import com.microsoft.playwright.options.AriaRole;',
         'import org.junit.jupiter.api.Test;',
@@ -800,7 +805,7 @@ describe('Playwright for Java test file', () => {
         '        page.navigate("https://shop.example/");',
         '        page.getByLabel("First name").fill("Ada");',
         '        page.getByRole(AriaRole.BUTTON, new Page.GetByRoleOptions().setName("Save")).click();',
-        '        assertThat(page.getByTestId("done")).hasText("Saved");',
+        '        assertThat(page.getByTestId("done")).hasText("Saved", new LocatorAssertions.HasTextOptions().setUseInnerText(true));',
         '    }',
         '}',
         '',
@@ -915,7 +920,8 @@ describe('Selenium for Java test file', () => {
     expect(
       out.endsWith(
         [
-          '        assertEquals("Saved", driver.findElement(By.cssSelector("[data-testid=\\"done\\"]")).getText().replaceAll("(?U)\\\\s+", " ").trim());',
+          '        assertEquals("Saved", driver.findElement(By.cssSelector("[data-testid=\\"done\\"]")).getText()' +
+            '.replaceAll("[\\\\u00ad\\\\u200b]", "").replaceAll("(?U)\\\\s+", " ").trim());',
           '    }',
           '}',
           '',
@@ -1529,7 +1535,22 @@ describe.skipIf(!JAVA)('javac compiles every generated file (-Xlint:all -Werror)
       { action: 'zap\\u000D C:\\users é', target: testid('x') },
       { action: 'fill', value: 'x' },
       { action: 'check', target: { kind: 'chain' } },
-      { action: 'click' }
+      { action: 'click' },
+      // Contract fields: multi-select, sensitive assertion, shadow DOM, frame indices.
+      { action: 'selectOption', target: testid('m'), value: 'A', values: ['A', 'B "b"'] },
+      {
+        action: 'assert',
+        assertType: 'toHaveValue',
+        target: testid('pw'),
+        sensitive: true,
+        secretName: 'PW',
+      },
+      { action: 'click', target: { ...testid('s'), shadowHosts: ['x-a', 'x-b'], shadowCss: '.go' } },
+      { action: 'fill', target: { ...testid('s'), shadowHosts: ['x-a'] }, value: 'v' },
+      {
+        action: 'click',
+        target: { kind: 'frame', selector: null, index: 1, framesIndex: 2, child: testid('f') },
+      }
     );
     const refSteps = [
       { action: 'fill', target: testid('a'), value: 'Ada', varRef: 'firstName' },
@@ -1555,6 +1576,20 @@ describe.skipIf(!JAVA)('javac compiles every generated file (-Xlint:all -Werror)
       );
       for (const [i, model] of [SMALL, RICH, {}].entries())
         addPo({ ...model, className: `${fw} ${i} ${model.title ? 'x' : 'y'}` }, fw);
+      addPo(
+        {
+          className: `${fw} shadow`,
+          elements: [
+            {
+              name: 'go',
+              kind: 'button',
+              target: { ...testid('s'), shadowHosts: ['x-a'], shadowCss: '.go' },
+            },
+            { name: 'lost', kind: 'input', target: { ...testid('l'), shadowHosts: ['x-a'] } },
+          ],
+        },
+        fw
+      );
       addPo(
         {
           className: `${fw} keywords`,
@@ -1595,6 +1630,6 @@ describe.skipIf(!JAVA)('javac compiles every generated file (-Xlint:all -Werror)
       throw new Error(`javac failed:\n${err.stdout}${err.stderr}`);
     }
     expect(output).toBe('');
-    expect(files.length).toBe(n + 9);
+    expect(files.length).toBe(n + 11);
   }, 180_000);
 });

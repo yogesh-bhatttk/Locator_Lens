@@ -99,18 +99,27 @@
   // A chain continues the parent element's search: `$(parent).$(child)`, the child
   // rendered relative (a leading "./" XPath) so it stays inside the parent.
   // A frame renders its innermost target: entering the frame is a statement
-  // (browser.switchFrame), as in Selenium.
+  // (browser.switchFrame), as in Selenium. An element in open shadow DOM is reached
+  // host by host with .shadow$(), ending with its shadowCss (C3): `$()` does not
+  // search shadow roots with XPath or plain CSS.
   function locatorExpr(target, lang, rel) {
     if (!target) return '';
     if (target.kind === 'frame') {
       var inner = I.unwrapFrames(target).inner;
       return inner ? locatorExpr(inner, lang, rel) : '';
     }
+    var sh = I.shadowOf(target);
+    if (sh) {
+      return find('css', sh.hosts[0], lang) + sh.hosts.slice(1).concat(sh.css).map(function (sel) {
+        return '.shadow$(' + q(cssArg(sel), lang) + ')';
+      }).join('');
+    }
     if (target.kind === 'chain') {
       var parent = locatorExpr(target.parent, lang, rel);
       if (!target.child) return parent;
       var child = locatorExpr(target.child, lang, true);
-      if (!parent) return child;
+      // A child reached through shadow roots starts from the document.
+      if (!parent || I.shadowOf(target.child)) return child;
       // A child that is no element search (an empty frame) cannot narrow the parent.
       return /^\$\(/.test(child) ? parent + '.' + child : parent;
     }
@@ -129,7 +138,7 @@
     }
     if (frame.selector) return find('css', frame.selector, lang);
     // A cross-origin frame has no readable selector: address it by position.
-    return "$$('iframe')[" + (frame.index || 0) + ']';
+    return "$$('iframe')[" + frame.index + ']';
   }
 
   function frameSwitch(frame, lang) {
@@ -199,8 +208,12 @@
 
   // ── statements ─────────────────────────────────────────────────────────────
   function notes(step) {
-    if (!I.hasAmbiguousRole(step.target)) return [];
-    return [comment('NOTE: this role locator has no accessible name and may match several elements; the first match is used.')];
+    var out = [];
+    if (I.hasAmbiguousRole(step.target)) {
+      out.push(comment('NOTE: this role locator has no accessible name and may match several elements; the first match is used.'));
+    }
+    if (I.lacksShadowCss(step.target)) out.push(comment(I.SHADOW_NOTE));
+    return out;
   }
 
   function withNotes(list, stmt) { return list.length ? list.join('\n') + '\n' + stmt : stmt; }
@@ -211,6 +224,8 @@
     return '((await ' + el + '.isSelected()) || (await ' + el + ".getAttribute('aria-checked')) === 'true')";
   }
 
+  var DESELECT_ALL_JS = 'for (const o of arguments[0].options) o.selected = false;';
+
   function withEl(loc, lines) {
     return '{\n  const el = await ' + loc + ';\n' + lines.map(function (l) { return '  ' + l; }).join('\n') + '\n}';
   }
@@ -219,18 +234,26 @@
     return withEl(loc, ['if (' + (desired ? '!' : '') + checkedExpr('el') + ') await el.click();']);
   }
 
-  // Normalise whitespace like Playwright's toHaveText: expect-webdriverio trims the
-  // element text, then `replace` collapses every inner run of whitespace.
-  var NORM_TEXT = "replace: [/\\s+/g, ' ']";
+  // Normalise the text like the recorder and Playwright's toHaveText: expect-webdriverio
+  // trims the element text (getText(), already the rendered text), then `replace`
+  // drops soft hyphens and zero-width spaces and collapses every run of whitespace.
+  var NORM_TEXT = "replace: [[/[\\u00ad\\u200b]/g, ''], [/\\s+/g, ' ']]";
 
   function assertStatement(step, lang) {
     var loc = locatorExpr(step.target, lang);
     var v = step.value;
     switch (step.assertType || 'toBeVisible') {
-      case 'toHaveText': return 'await expect(' + loc + ').toHaveText(' + q(I.normWs(v), lang) + ', { ' + NORM_TEXT + ' });';
+      case 'toHaveText': return 'await expect(' + loc + ').toHaveText(' + q(I.normText(v), lang) + ', { ' + NORM_TEXT + ' });';
       case 'toContainText':
-        return 'await expect(' + loc + ').toHaveText(' + q(I.normWs(v), lang) + ', { containing: true, ' + NORM_TEXT + ' });';
-      case 'toHaveValue': return 'await expect(' + loc + ').toHaveValue(' + q(v, lang) + ');';
+        return 'await expect(' + loc + ').toHaveText(' + q(I.normText(v), lang) + ', { containing: true, ' + NORM_TEXT + ' });';
+      case 'toHaveValue':
+        // A secret (C2) is compared without ever being printed: toHaveValue's failure
+        // message would show the expected value.
+        if (I.sensitiveAssert(step)) {
+          return 'await browser.waitUntil(async () => (await ' + loc + '.getValue()) === (' + valueExpr(step, lang) + '), ' +
+            '{ timeoutMsg: ' + q(I.secretMismatch(step), lang) + ' });';
+        }
+        return 'await expect(' + loc + ').toHaveValue(' + q(v, lang) + ');';
       case 'toBeEnabled': return 'await expect(' + loc + ').toBeEnabled();';
       case 'toBeChecked': {
         // expect-webdriverio's toBeChecked() reads isSelected() only; wait for the
@@ -276,8 +299,15 @@
         return comment('NOTE: these file paths must exist relative to where the test runs') + '\n' +
           'await ' + loc + '.addValue(' + listLiteral(files, lang) + ".map((p) => path.resolve(p)).join('\\n'));";
       }
-      case 'selectOption':
-        return 'await ' + loc + '.selectByVisibleText(' + valueExpr(step, lang) + ');';
+      case 'selectOption': {
+        var many = I.multiValues(step);
+        if (!many) return 'await ' + loc + '.selectByVisibleText(' + valueExpr(step, lang) + ');';
+        // WebdriverIO has no deselectAll(), and clicking an option of a multi-select
+        // toggles it: clear the selection first, then pick each label (C1).
+        return withEl(loc, ['await browser.execute(' + q(DESELECT_ALL_JS, lang) + ', el);'].concat(many.map(function (label) {
+          return 'await el.selectByVisibleText(' + q(label, lang) + ');';
+        })));
+      }
       default: return todo('unsupported step "' + I.commentSafe(step.action) + '"');
     }
   }
@@ -400,6 +430,7 @@
     if (I.hasAmbiguousRole(el.target) && !(typeof n === 'number' && n !== 1)) {
       out.push(comment('NOTE: this role locator has no accessible name and may match several elements.'));
     }
+    if (I.lacksShadowCss(el.target)) out.push(comment(I.SHADOW_NOTE));
     return out;
   }
 

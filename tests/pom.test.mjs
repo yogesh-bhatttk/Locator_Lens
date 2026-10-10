@@ -235,7 +235,7 @@ describe('pageObject: exact output', () => {
     );
     expect(code).toContain("  visit() {\n    cy.visit('https://shop.example/checkout');\n  }");
     expect(code).toContain(
-      '  placeOrderButton() {\n    return cy.get(\'button:not([role]), input[type="button"]:not([role]), input[type="submit"]:not([role]), input[type="reset"]:not([role]), input[type="image"]:not([role]), input[type="file"]:not([role]), [role="button"]\').filter((_, el) => locatraMatch(el, \'name\', \'Place order\'));\n  }'
+      '  placeOrderButton() {\n    return cy.get(\'button:not([role]), input[type="button"]:not([role]), input[type="submit"]:not([role]), input[type="reset"]:not([role]), input[type="image"]:not([role]), input[type="file"]:not([role]), [role~="button"]\').filter((_, el) => locatraMatch(el, \'name\', \'Place order\'));\n  }'
     );
     expect(code).toContain(
       "  fillEmailAddressInput(value) {\n    if (value === '') this.emailAddressInput().clear();\n    else this.emailAddressInput().clear().type(value, { parseSpecialCharSequences: false });\n  }"

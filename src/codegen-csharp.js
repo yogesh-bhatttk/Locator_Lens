@@ -18,9 +18,9 @@
   // ── string literals ───────────────────────────────────────────────────────
   // A regular literal escapes the quote, the backslash, every C0/C1 control and DEL,
   // the characters C# itself treats as line breaks (U+0085, U+2028, U+2029 — a raw
-  // one ends the literal), invisible format characters (zero-width, bidi controls:
-  // a pasted test should never hide text) and lone surrogates (not encodable as
-  // UTF-8). \x is never used: C#'s \x takes 1–4 hex digits, so "\x1Fa" would
+  // one ends the literal), invisible format characters and spaces (zero-width, bidi
+  // controls, no-break spaces: a pasted test should never hide text) and lone
+  // surrogates (not encodable as UTF-8). \x is never used: C#'s \x takes 1–4 hex digits, so "\x1Fa" would
   // swallow the "a". A value with backslashes and nothing to escape is written
   // verbatim (@"…", where only the quote doubles), which keeps CSS escapes readable.
   var NAMED = { '\0': '\\0', '\x07': '\\a', '\b': '\\b', '\f': '\\f', '\n': '\\n', '\r': '\\r', '\t': '\\t', '\v': '\\v' };
@@ -29,8 +29,8 @@
     var hex = function (n) { return '\\u' + ('000' + n.toString(16)).slice(-4); };
     return new RegExp('[' + ranges.map(function (r) { return hex(r[0]) + '-' + hex(r[1]); }).join('') + ']', 'g');
   }
-  var SPECIAL_G = charClass([[0x00, 0x1f], [0x7f, 0x9f], [0xad, 0xad], [0x61c, 0x61c], [0x180e, 0x180e],
-    [0x200b, 0x200f], [0x2028, 0x202e], [0x2060, 0x206f], [0xfeff, 0xfeff], [0xfff9, 0xfffb]]);
+  var SPECIAL_G = charClass([[0x00, 0x1f], [0x7f, 0xa0], [0xad, 0xad], [0x61c, 0x61c], [0x180e, 0x180e],
+    [0x200b, 0x200f], [0x2028, 0x202f], [0x2060, 0x206f], [0xfeff, 0xfeff], [0xfff9, 0xfffb]]);
   var SPECIAL = new RegExp(SPECIAL_G.source);
   var CS_NEWLINES = charClass([[0x85, 0x85], [0x2028, 0x2029]]);
   var LINE_BREAKERS = charClass([[0x00, 0x1f], [0x7f, 0x7f], [0x85, 0x85], [0x2028, 0x2029]]);
@@ -126,7 +126,8 @@
         var opts = [];
         if (t.name) opts.push('Name = ' + q(t.name));
         if (t.name && t.exact) opts.push('Exact = true');
-        if (t.level) opts.push('Level = ' + Number(t.level));
+        var level = I.headingLevel(t.level);
+        if (level) opts.push('Level = ' + level);
         return root + '.GetByRole(' + enumRole + (opts.length ? ', new() { ' + opts.join(', ') + ' }' : '') + ')' + nth;
       }
       case 'label': return root + '.GetByLabel(' + q(t.value) + exactOpt(t) + ')';
@@ -150,7 +151,7 @@
       var expr = root;
       peeled.frames.forEach(function (f) {
         // Without a selector the frame is cross-origin; address it positionally.
-        expr += '.FrameLocator(' + q(f.selector ? f.selector : 'iframe >> nth=' + (f.index || 0)) + ')';
+        expr += '.FrameLocator(' + q(f.selector ? f.selector : 'iframe >> nth=' + f.index) + ')';
       });
       return pwExpr(peeled.inner, expr);
     }
@@ -198,9 +199,18 @@
 
   // Switching into a frame is a statement in Selenium, so a frame target's
   // expression is its inner element's lookup (selStatement() does the switching).
+  // An element in open shadow DOM is reached host by host from the driver — a
+  // shadow root is searched with CSS only — ending with its shadowCss (C3).
   function selExpr(t, root, rel) {
     if (!t) return '';
     if (t.kind === 'frame') return selExpr(I.unwrapFrames(t).inner, root, rel);
+    var sh = I.shadowOf(t);
+    if (sh) {
+      var driver = /^Driver\b/.test(root) ? 'Driver' : 'driver';
+      return sh.hosts.slice(1).concat(sh.css).reduce(function (el, sel) {
+        return el + '.GetShadowRoot().FindElement(By.CssSelector(' + q(sel) + '))';
+      }, selFind('css', sh.hosts[0], driver));
+    }
     if (t.kind === 'chain') {
       var parent = selExpr(t.parent, root, rel);
       if (!t.child) return parent;
@@ -219,6 +229,8 @@
   function secretExpr(step) {
     return 'Environment.GetEnvironmentVariable(' + q(I.secretName(step)) + ') ?? ""';
   }
+
+  function stringArray(items) { return 'new[] { ' + items.map(q).join(', ') + ' }'; }
 
   var VAR_NAME = /^[A-Za-z_][A-Za-z0-9_]*$/;
 
@@ -254,7 +266,7 @@
 
   function fileArray(files) {
     if (!files.length) return 'new string[0]';
-    return 'new[] { ' + files.map(q).join(', ') + ' }';
+    return stringArray(files);
   }
 
   function uploadNote() { return comment('NOTE: these file paths must exist relative to where the test runs'); }
@@ -267,14 +279,16 @@
   //  Playwright statements
   // ════════════════════════════════════════════════════════════════════════════
 
+  // Text is compared as rendered (innerText), the way the recorder read it; a
+  // sensitive field's value is compared against its environment variable (C2).
   function pwAssert(step, loc) {
     var t = step.assertType || 'toBeVisible';
     var v = step.value;
     var map = {
       toBeVisible: 'ToBeVisibleAsync()',
-      toHaveText: 'ToHaveTextAsync(' + q(v) + ')',
-      toContainText: 'ToContainTextAsync(' + q(v) + ')',
-      toHaveValue: 'ToHaveValueAsync(' + q(v) + ')',
+      toHaveText: 'ToHaveTextAsync(' + q(v) + ', new() { UseInnerText = true })',
+      toContainText: 'ToContainTextAsync(' + q(v) + ', new() { UseInnerText = true })',
+      toHaveValue: 'ToHaveValueAsync(' + (I.sensitiveAssert(step) ? secretExpr(step) : q(v)) + ')',
       toBeEnabled: 'ToBeEnabledAsync()',
       toBeChecked: String(v) === 'false' ? 'Not.ToBeCheckedAsync()' : 'ToBeCheckedAsync()'
     };
@@ -297,7 +311,10 @@
       case 'uncheck': return 'await ' + loc + '.UncheckAsync();';
       // FillAsync also sets range/color/date inputs, so inputType needs no special case.
       case 'fill': return 'await ' + loc + '.FillAsync(' + valueExpr(step) + ');';
-      case 'selectOption': return 'await ' + loc + '.SelectOptionAsync(' + valueExpr(step) + ');';
+      case 'selectOption': {
+        var many = I.multiValues(step);
+        return 'await ' + loc + '.SelectOptionAsync(' + (many ? stringArray(many) : valueExpr(step)) + ');';
+      }
       case 'upload':
         return uploadNote() + '\nawait ' + loc + '.SetInputFilesAsync(' + fileArray(I.uploadFiles(step.value)) + ');';
       default: return todo('unsupported step "' + commentSafe(a) + '"');
@@ -353,19 +370,30 @@
       return root + '.SwitchTo().Frame(' + host + ');';
     }
     if (frame.selector) return root + '.SwitchTo().Frame(' + selFind('css', frame.selector, root) + ');';
-    return root + '.SwitchTo().Frame(' + (frame.index || 0) + ');';
+    // By position in window.frames (C4: framesIndex when the recorder knew it).
+    return root + '.SwitchTo().Frame(' + I.seleniumFrameIndex(frame) + ');';
   }
 
   var SET_VALUE = '((IJavaScriptExecutor)driver).ExecuteScript(' + q(I.SET_VALUE_JS);
-  var NORM_TEXT = function (loc) { return 'Regex.Replace(' + loc + '.Text, @"\\s+", " ").Trim()'; };
+  // The rendered text, normalised as the recorder normalised it: soft hyphens and
+  // zero-width spaces dropped, white space (\s is Unicode-aware in .NET) collapsed.
+  var NORM_TEXT = function (loc) {
+    return 'Regex.Replace(Regex.Replace(' + loc + '.Text, @"[\\u00AD\\u200B]", ""), @"\\s+", " ").Trim()';
+  };
 
   function selAssert(step, loc) {
     var t = step.assertType || 'toBeVisible';
     var v = step.value;
     switch (t) {
-      case 'toHaveText': return 'Assert.That(' + NORM_TEXT(loc) + ', Is.EqualTo(' + q(I.normWs(v)) + '));';
-      case 'toContainText': return 'Assert.That(' + NORM_TEXT(loc) + ', Does.Contain(' + q(I.normWs(v)) + '));';
-      case 'toHaveValue': return 'Assert.That(' + loc + '.GetDomProperty("value"), Is.EqualTo(' + q(v) + '));';
+      case 'toHaveText': return 'Assert.That(' + NORM_TEXT(loc) + ', Is.EqualTo(' + q(I.normText(v)) + '));';
+      case 'toContainText': return 'Assert.That(' + NORM_TEXT(loc) + ', Does.Contain(' + q(I.normText(v)) + '));';
+      case 'toHaveValue':
+        // A secret is compared without ever being printed in a failure message.
+        if (I.sensitiveAssert(step)) {
+          return 'Assert.That(' + loc + '.GetDomProperty("value") == (' + secretExpr(step) + '), Is.True, ' +
+            q(I.secretMismatch(step)) + ');';
+        }
+        return 'Assert.That(' + loc + '.GetDomProperty("value"), Is.EqualTo(' + q(v) + '));';
       case 'toBeEnabled': return 'Assert.That(' + loc + '.Enabled, Is.True);';
       case 'toBeChecked':
         return withEl(loc, ['Assert.That(' + checkedExpr('el') + ', ' + (String(v) === 'false' ? 'Is.False' : 'Is.True') + ');']);
@@ -390,7 +418,14 @@
         }
         // Clear first so a pre-filled field is replaced, not appended to.
         return withEl(loc, ['el.Clear();', 'el.SendKeys(' + valueExpr(step) + ');']);
-      case 'selectOption': return 'new SelectElement(' + loc + ').SelectByText(' + valueExpr(step) + ');';
+      case 'selectOption': {
+        var many = I.multiValues(step);
+        if (!many) return 'new SelectElement(' + loc + ').SelectByText(' + valueExpr(step) + ');';
+        // A multi-select keeps earlier choices: clear them, then pick each label.
+        return '{\n    var select = new SelectElement(' + loc + ');\n    select.DeselectAll();\n' + many.map(function (v) {
+          return '    select.SelectByText(' + q(v) + ');';
+        }).join('\n') + '\n}';
+      }
       case 'upload': {
         var files = I.uploadFiles(step.value);
         if (!files.length) return loc + '.Clear();';
@@ -433,6 +468,7 @@
     if (I.hasAmbiguousRole(step.target)) {
       notes.push(comment('NOTE: this role locator has no accessible name and may match several elements; the first match is used.'));
     }
+    if (I.lacksShadowCss(step.target)) notes.push(comment(I.SHADOW_NOTE));
     var stmt = selTargetStatement(step);
     return notes.length ? notes.join('\n') + '\n' + stmt : stmt;
   }
@@ -599,7 +635,7 @@
     return { members: members, skipped: skipped };
   }
 
-  function poNotes(el) {
+  function poNotes(el, selenium) {
     var notes = [];
     var n = el.matchCount;
     if (typeof n === 'number' && n !== 1) {
@@ -612,6 +648,7 @@
     if (I.hasAmbiguousRole(el.target) && !(typeof n === 'number' && n !== 1)) {
       notes.push(comment('NOTE: this role locator has no accessible name and may match several elements.'));
     }
+    if (selenium && I.lacksShadowCss(el.target)) notes.push(comment(I.SHADOW_NOTE));
     return notes;
   }
 
@@ -673,7 +710,7 @@
     }
     info.members.forEach(function (m) {
       body.push('');
-      body = body.concat(poNotes(m.el));
+      body = body.concat(poNotes(m.el, true));
       var find = selExpr(m.el.target, 'Driver');
       if (!anyFrames) {
         body.push('public IWebElement ' + m.id + ' => ' + find + ';');

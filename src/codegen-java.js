@@ -78,19 +78,16 @@
   /** Remove string literals, so import detection only looks at code. */
   function codeOnly(text) { return String(text).replace(/"(?:[^"\\\n]|\\.)*"/g, '""'); }
 
-  function toInt(value, fallback) {
-    var n = Math.round(Number(value));
-    return isFinite(n) ? n : fallback;
-  }
-
   // ── shared step helpers ─────────────────────────────────────────────────────
   /**
    * The value a fill / selectOption types: an environment secret (never test data),
    * a TEST_DATA reference (step.varRef, by the same rules as the built-in targets),
    * or the literal.
    */
+  function secretExpr(step) { return 'System.getenv().getOrDefault(' + jq(I.secretName(step)) + ', "")'; }
+
   function valueExpr(step) {
-    if (step.sensitive) return 'System.getenv().getOrDefault(' + jq(I.secretName(step)) + ', "")';
+    if (step.sensitive) return secretExpr(step);
     var ref = I.variableRefName(step);
     return ref ? 'TEST_DATA.get(' + jq(ref) + ')' : jq(step.value);
   }
@@ -100,9 +97,11 @@
   function withNotes(notes, stmt) { return notes.length ? notes.join('\n') + '\n' + stmt : stmt; }
 
   function ambiguousNote(target) {
-    return I.hasAmbiguousRole(target)
+    var notes = I.hasAmbiguousRole(target)
       ? [comment('NOTE: this role locator has no accessible name and may match several elements; the first match is used.')]
       : [];
+    if (I.lacksShadowCss(target)) notes.push(comment(I.SHADOW_NOTE));
+    return notes;
   }
 
   function urlOf(step) {
@@ -160,11 +159,6 @@
     return sel;
   }
 
-  function positiveInt(value) {
-    var n = Number(value);
-    return n > 0 && Math.floor(n) === n ? n : 0;
-  }
-
   /**
    * One target as a Playwright for Java expression rooted at `page.`. `recv` is the
    * type the root call is made on (Page, Locator, FrameLocator) — it decides which
@@ -182,7 +176,7 @@
         if (t.attr === 'data-testid') return 'page.getByTestId(' + jq(t.value) + ')';
         return 'page.locator(' + jq('[' + I.cssIdent(t.attr) + '="' + I.attrSel(t.value) + '"]') + ')';
       case 'role': {
-        var level = positiveInt(t.level);
+        var level = I.headingLevel(t.level);
         var nth = I.hasNth(t) ? '.nth(' + t.nth + ')' : '';
         if (ARIA_ROLES.indexOf(t.role) === -1) return 'page.locator(' + jq(internalRoleSelector(t, level)) + ')' + nth;
         var setters = '';
@@ -224,7 +218,7 @@
     var expr = '';
     peeled.frames.forEach(function (f) {
       // Without a selector the frame is cross-origin; address it positionally.
-      var arg = f.selector ? jq(f.selector) : jq('iframe >> nth=' + toInt(f.index || 0, 0));
+      var arg = f.selector ? jq(f.selector) : jq('iframe >> nth=' + f.index);
       expr = continueFrom(expr, 'page.frameLocator(' + arg + ')');
     });
     return continueFrom(expr, pwExpr(peeled.inner, 'FrameLocator', pageType));
@@ -232,14 +226,16 @@
 
   function pwLocator(target) { return pwExpr(target, 'Page', 'Page'); }
 
+  // Text is compared as rendered (innerText), the way the recorder read it; a
+  // sensitive field's value is compared against its environment variable (C2).
   function pwAssert(step, loc) {
     var t = step.assertType || 'toBeVisible';
     var v = step.value;
     var map = {
       toBeVisible: 'isVisible()',
-      toHaveText: 'hasText(' + jq(v) + ')',
-      toContainText: 'containsText(' + jq(v) + ')',
-      toHaveValue: 'hasValue(' + jq(v) + ')',
+      toHaveText: 'hasText(' + jq(v) + ', new LocatorAssertions.HasTextOptions().setUseInnerText(true))',
+      toContainText: 'containsText(' + jq(v) + ', new LocatorAssertions.ContainsTextOptions().setUseInnerText(true))',
+      toHaveValue: 'hasValue(' + (I.sensitiveAssert(step) ? secretExpr(step) : jq(v)) + ')',
       toBeEnabled: 'isEnabled()',
       toBeChecked: String(v) === 'false' ? 'not().isChecked()' : 'isChecked()'
     };
@@ -257,7 +253,7 @@
     if (a === 'assert' && step.assertType === 'toHaveURL') return 'assertThat(page).hasURL(' + jq(urlOf(step)) + ');';
     if (a === 'goto') return 'page.navigate(' + jq(step.value || step.url || '') + ');';
     if (a === 'press') return 'page.keyboard().press(' + jq(step.value || step.key || 'Enter') + ');';
-    if (a === 'viewport') return 'page.setViewportSize(' + toInt(I.vpW(step), 1280) + ', ' + toInt(I.vpH(step), 720) + ');';
+    if (a === 'viewport') return 'page.setViewportSize(' + I.vpW(step) + ', ' + I.vpH(step) + ');';
     var loc = pwLocator(step.target);
     if (!loc) return todo('"' + I.commentSafe(a) + '" step has no element locator');
     switch (a) {
@@ -267,7 +263,10 @@
       // fill() also sets range/color/date inputs, so inputType needs no special case.
       case 'fill': return loc + '.fill(' + valueExpr(step) + ');';
       case 'upload': return uploadNote() + '\n' + loc + '.setInputFiles(' + pathsArg(I.uploadFiles(step.value)) + ');';
-      case 'selectOption': return loc + '.selectOption(' + valueExpr(step) + ');';
+      case 'selectOption': {
+        var many = I.multiValues(step);
+        return loc + '.selectOption(' + (many ? 'new String[] {' + many.map(jq).join(', ') + '}' : valueExpr(step)) + ');';
+      }
       default: return todo('unsupported step "' + I.commentSafe(a) + '"');
     }
   }
@@ -280,6 +279,7 @@
     if (/\bAriaRole\./.test(code)) imports.push('com.microsoft.playwright.options.AriaRole');
     if (/\bLocator\./.test(code)) imports.push('com.microsoft.playwright.Locator');
     if (/\bFrameLocator\./.test(code)) imports.push('com.microsoft.playwright.FrameLocator');
+    if (/\bLocatorAssertions\./.test(code)) imports.push('com.microsoft.playwright.assertions.LocatorAssertions');
     if (/\bnew Path\[/.test(code)) imports.push('java.nio.file.Path');
     if (/\bPaths\.get\(/.test(code)) imports.push('java.nio.file.Paths');
     if (field) imports.push('java.util.Map');
@@ -315,15 +315,28 @@
     return xp;
   }
 
-  /** One target as a `driver.findElement(...)` expression (frames are statements, not part of it). */
+  /**
+   * One target as a `driver.findElement(...)` expression (frames are statements, not
+   * part of it). An element in open shadow DOM is reached host by host — a shadow
+   * root is searched with CSS only — ending with its shadowCss (C3).
+   */
   function selExpr(t, rel) {
     if (!t) return '';
     if (t.kind === 'frame') return selExpr(I.unwrapFrames(t).inner, false);
+    var sh = I.shadowOf(t);
+    if (sh) {
+      var el = selFind('css', sh.hosts[0]);
+      sh.hosts.slice(1).concat(sh.css).forEach(function (sel) {
+        el += '.getShadowRoot().findElement(By.cssSelector(' + jq(sel) + '))';
+      });
+      return el;
+    }
     if (t.kind === 'chain') {
       var parent = selExpr(t.parent, rel);
       if (!t.child) return parent;
       var child = selExpr(t.child, true);
-      if (!parent) return child;
+      // A child reached through shadow roots starts from the document.
+      if (!parent || I.shadowOf(t.child)) return child;
       return parent + child.replace(/^driver\./, '.');
     }
     var axis = rel ? './/*' : '//*';
@@ -354,7 +367,8 @@
       return 'driver.switchTo().frame(' + el + ');';
     }
     if (frame.selector) return 'driver.switchTo().frame(' + selFind('css', frame.selector) + ');';
-    return 'driver.switchTo().frame(' + Math.max(0, toInt(frame.index || 0, 0)) + ');';
+    // By position in window.frames (C4: framesIndex when the recorder knew it).
+    return 'driver.switchTo().frame(' + I.seleniumFrameIndex(frame) + ');';
   }
 
   /** A block that looks the element up once: `WebElement el = …;` (scoped, so steps can repeat). */
@@ -387,8 +401,9 @@
   // The recorded size is the viewport (innerWidth x innerHeight); Selenium sizes the
   // whole window, so the browser chrome measured at run time is added.
   function selViewport(step) {
-    var w = toInt(I.vpW(step), 1280);
-    var h = toInt(I.vpH(step), 720);
+    // vpW/vpH are always positive integers (codegen.js validates them).
+    var w = I.vpW(step);
+    var h = I.vpH(step);
     return '{\n' +
       '    JavascriptExecutor js = (JavascriptExecutor) driver;\n' +
       '    int width = ((Number) js.executeScript(' + jq('return ' + w + ' + window.outerWidth - window.innerWidth;') + ')).intValue();\n' +
@@ -398,16 +413,25 @@
   }
 
   // Normalised visible text, compared like Playwright's toHaveText. (?U) makes \s
-  // match Unicode white space (e.g. no-break spaces), as JavaScript's \s does.
-  function selText(loc) { return loc + '.getText().replaceAll("(?U)\\\\s+", " ").trim()'; }
+  // match Unicode white space (e.g. no-break spaces), as JavaScript's \s does; soft
+  // hyphens and zero-width spaces are dropped, as the recorder drops them.
+  function selText(loc) {
+    return loc + '.getText().replaceAll("[\\\\u00ad\\\\u200b]", "").replaceAll("(?U)\\\\s+", " ").trim()';
+  }
 
   function selAssert(step, loc) {
     var t = step.assertType || 'toBeVisible';
     var v = step.value;
     switch (t) {
-      case 'toHaveText': return 'assertEquals(' + jq(I.normWs(v)) + ', ' + selText(loc) + ');';
-      case 'toContainText': return 'assertTrue(' + selText(loc) + '.contains(' + jq(I.normWs(v)) + '));';
-      case 'toHaveValue': return 'assertEquals(' + jq(v) + ', ' + loc + '.getDomProperty("value"));';
+      case 'toHaveText': return 'assertEquals(' + jq(I.normText(v)) + ', ' + selText(loc) + ');';
+      case 'toContainText': return 'assertTrue(' + selText(loc) + '.contains(' + jq(I.normText(v)) + '));';
+      case 'toHaveValue':
+        // A secret is compared without ever being printed in a failure message.
+        if (I.sensitiveAssert(step)) {
+          return 'assertTrue(' + secretExpr(step) + '.equals(' + loc + '.getDomProperty("value")), ' +
+            jq(I.secretMismatch(step)) + ');';
+        }
+        return 'assertEquals(' + jq(v) + ', ' + loc + '.getDomProperty("value"));';
       case 'toBeEnabled': return 'assertTrue(' + loc + '.isEnabled());';
       case 'toBeChecked':
         return selWithEl(loc, [(String(v) === 'false' ? 'assertFalse(' : 'assertTrue(') + selChecked('el') + ');']);
@@ -445,7 +469,14 @@
         var paths = files.map(function (f) { return 'Paths.get(' + jq(f) + ').toAbsolutePath().toString()'; });
         return uploadNote() + '\n' + loc + '.sendKeys(' + paths.join(' + "\\n" + ') + ');';
       }
-      case 'selectOption': return 'new Select(' + loc + ').selectByVisibleText(' + valueExpr(step) + ');';
+      case 'selectOption': {
+        var many = I.multiValues(step);
+        if (!many) return 'new Select(' + loc + ').selectByVisibleText(' + valueExpr(step) + ');';
+        // A multi-select keeps earlier choices: clear them, then pick each label.
+        return '{\n    Select select = new Select(' + loc + ');\n    select.deselectAll();\n' + many.map(function (v) {
+          return '    select.selectByVisibleText(' + jq(v) + ');';
+        }).join('\n') + '\n}';
+      }
       default: return todo('unsupported step "' + I.commentSafe(a) + '"');
     }
   }
@@ -584,7 +615,7 @@
     return { members: members, skipped: skipped };
   }
 
-  function poNotes(el) {
+  function poNotes(el, selenium) {
     var notes = [];
     var n = el.matchCount;
     if (typeof n === 'number' && n !== 1) {
@@ -597,6 +628,7 @@
     if (I.hasAmbiguousRole(el.target) && !(typeof n === 'number' && n !== 1)) {
       notes.push(comment('NOTE: this role locator has no accessible name and may match several elements.'));
     }
+    if (selenium && I.lacksShadowCss(el.target)) notes.push(comment(I.SHADOW_NOTE));
     return notes;
   }
 
@@ -657,7 +689,7 @@
     info.members.forEach(function (m) {
       var lines = reset.concat(I.unwrapFrames(m.el.target).frames.map(selFrameSwitch), ['return ' + render(m.el.target) + ';']);
       out.push('');
-      out = out.concat(poNotes(m.el));
+      out = out.concat(poNotes(m.el, true));
       out.push('public WebElement ' + m.id + '() {', I.indent(lines, '    '), '}');
     });
     info.members.forEach(function (m) {

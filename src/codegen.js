@@ -18,10 +18,15 @@
 //       host in the previous host's shadow root, the <iframe> in the last root.
 //       Selenium and Cypress walk it host by host, since neither one's CSS pierces
 //       shadow roots; Playwright keeps using `selector`, which its CSS resolves
-//       across the composed tree.
+//       across the composed tree. Optional `framesIndex`: the frame's position in
+//       window.frames, which Selenium's switchTo().frame(i) takes (C4).
+// The innermost (non-frame) target may carry `shadowHosts` and `shadowCss` when its
+// element is inside open shadow DOM (C3, see shadowOf()).
 //
 // An `action` step is: { action, target?, value?, key?, url?, width?, height? }
 //   action ∈ click | dblclick | check | uncheck | fill | selectOption | press | goto | viewport
+//   A selectOption on a <select multiple> may carry `values` (C1); an assert step
+//   may be `sensitive` with a `secretName` (C2).
 
 (function (global) {
   'use strict';
@@ -33,15 +38,17 @@
   // correctly for whichever language is active.
   // Every C0 control, DEL and the two Unicode line separators are written as escapes:
   // Python rejects a raw NUL in source outright, and a raw control character in a
-  // pasted test is invisible at best. \xNN and \uNNNN mean the same thing in JS/TS
-  // and Python string literals.
+  // pasted test is invisible at best. So are the invisible spaces and format
+  // characters a page's text routinely holds (no-break spaces, soft hyphens,
+  // zero-width characters, the BOM): a pasted literal should never hide them. \xNN
+  // and \uNNNN mean the same thing in JS/TS and Python string literals.
   var NAMED_ESCAPES = { '\n': '\\n', '\r': '\\r', '\t': '\\t' };
   function escapeControls(s) {
     // eslint-disable-next-line no-control-regex
-    return s.replace(/[\x00-\x1f\x7f\u2028\u2029]/g, function (c) {
+    return s.replace(/[\x00-\x1f\x7f\u00a0\u00ad\u200b-\u200f\u2028\u2029\u202f\u2060\ufeff]/g, function (c) {
       if (NAMED_ESCAPES[c]) return NAMED_ESCAPES[c];
       var code = c.charCodeAt(0);
-      if (code > 0xff) return '\\u' + code.toString(16);
+      if (code > 0xff) return '\\u' + ('000' + code.toString(16)).slice(-4);
       return '\\x' + (code < 16 ? '0' : '') + code.toString(16);
     });
   }
@@ -72,6 +79,29 @@
   // do, so Selenium/Cypress compare like with like.
   function normWs(value) {
     return String(value == null ? '' : value).replace(/\s+/g, ' ').trim();
+  }
+
+  // Playwright's normalizeWhiteSpace (and the engine's) also drops soft hyphens and
+  // zero-width spaces, which render as nothing: "Bundes\u00adregierung" reads, and
+  // is recorded, as "Bundesregierung".
+  function normText(value) {
+    return normWs(String(value == null ? '' : value).replace(/[\u00ad\u200b]/g, ''));
+  }
+
+  // ── numeric target fields ───────────────────────────────────────────────────
+  // Every number a target or step carries is emitted as code, never inside a string
+  // literal, so it is validated first: a recording is data, and a hand-edited or
+  // corrupted one must not be able to write code into the test.
+  /** A heading level: an integer 1–6 (a number or its digit string), else 0 (= none). */
+  function headingLevel(value) {
+    var n = typeof value === 'string' && /^\s*\d+\s*$/.test(value) ? Number(value) : value;
+    return typeof n === 'number' && n >= 1 && n <= 6 && Math.floor(n) === n ? n : 0;
+  }
+
+  /** A non-negative integer (a number or its digit string), else `fallback`. */
+  function nonNegInt(value, fallback) {
+    var n = typeof value === 'string' && /^\s*\d+\s*$/.test(value) ? Number(value) : value;
+    return typeof n === 'number' && n >= 0 && Math.floor(n) === n && isFinite(n) ? n : fallback;
   }
 
   // Escape a value for use as a CSS identifier (the "foo" in #foo). Uses the platform
@@ -184,16 +214,39 @@
 
   // ── implicit ARIA role → selector helpers (for Selenium/Cypress) ────────────
   // One table drives both the CSS (Cypress, unnamed Selenium) and the XPath (named
-  // Selenium) form, so the two can never disagree. It mirrors Playwright's implicit
-  // role mapping (injected roleUtils): a native element only carries its implicit
-  // role when it has no explicit role attribute, hence the :not([role]) on each.
+  // Selenium) form, so the two can never disagree. It mirrors the engine's role table
+  // (content-locator-engine.js, itself a port of Playwright's getAriaRole): a native
+  // element only carries its implicit role when it has no explicit role attribute,
+  // hence the :not([role]) on each.
   //   tag        element name
   //   typeIn     input types (any listed; 'text' also covers a missing type)
   //   typeNotIn  input types excluded
+  //   typeAttr   the attribute typeIn/typeNotIn test (default 'type')
   //   has/lacks  attributes that must be present / absent
   //   notEmpty   attribute that, when present, must not be ""
+  //   anyAttr    at least one of these attributes is present (CSS :is())
   //   inGrid     only inside a [role=grid]/[role=treegrid] table
+  //   pre/css    CSS before / after the element's own selector; xpath: the same
+  //              condition as an XPath predicate (used together, never alone)
+  // Known gaps, where CSS cannot say what the engine checks: role=none/presentation
+  // on a focusable element, a role attribute holding only unknown tokens, the
+  // <datalist> a list= attribute must point at, landmarks inside sectioning content
+  // and a lone <th> in a one-row table.
   var TEXTBOX_EXCLUDED = ['hidden', 'file', 'button', 'submit', 'reset', 'image', 'checkbox', 'radio', 'number', 'range', 'search'];
+  // A select is a listbox when it is multiple or its size is above 1; size is
+  // compared as written ("", "0" and "1" are the single-line values).
+  var SELECT_SINGLE_SIZES = ['', '0', '1'];
+  // A <th> without a usable scope is a row header when a cell beside it has content
+  // (and a column header otherwise) — the engine's and Playwright's heuristic.
+  var TH_SCOPES = ['col', 'colgroup', 'row', 'rowgroup'];
+  var FILLED_TD_CSS = 'td:not(:empty)';
+  var FILLED_TD_XPATH = 'self::td and (normalize-space(.)!="" or *)';
+  var TH_BESIDE_FILLED_XPATH = '(following-sibling::*[1][' + FILLED_TD_XPATH + '] or preceding-sibling::*[1][' + FILLED_TD_XPATH + '])';
+  // The global ARIA attributes: any of them keeps an alt="" image in the
+  // accessibility tree (role img instead of presentation), as does a tabindex.
+  var GLOBAL_ARIA = ['aria-atomic', 'aria-busy', 'aria-controls', 'aria-current', 'aria-describedby', 'aria-details',
+    'aria-dropeffect', 'aria-flowto', 'aria-grabbed', 'aria-hidden', 'aria-keyshortcuts', 'aria-label',
+    'aria-labelledby', 'aria-live', 'aria-owns', 'aria-relevant', 'aria-roledescription'];
   var ROLE_NATIVE = {
     button: [{ tag: 'button' }, { tag: 'input', typeIn: ['button', 'submit', 'reset', 'image', 'file'] }],
     link: [{ tag: 'a', has: ['href'] }, { tag: 'area', has: ['href'] }],
@@ -201,13 +254,24 @@
     radio: [{ tag: 'input', typeIn: ['radio'] }],
     textbox: [{ tag: 'textarea' }, { tag: 'input', typeNotIn: TEXTBOX_EXCLUDED, lacks: ['list'] }],
     searchbox: [{ tag: 'input', typeIn: ['search'], lacks: ['list'] }],
-    combobox: [{ tag: 'select', lacks: ['multiple'] }, { tag: 'input', typeIn: ['text', 'email', 'tel', 'url', 'search'], has: ['list'] }],
-    listbox: [{ tag: 'select', has: ['multiple'] }, { tag: 'datalist' }],
+    combobox: [
+      { tag: 'select', lacks: ['multiple', 'size'] },
+      { tag: 'select', lacks: ['multiple'], typeAttr: 'size', typeIn: SELECT_SINGLE_SIZES },
+      { tag: 'input', typeIn: ['text', 'email', 'tel', 'url', 'search'], has: ['list'] }
+    ],
+    listbox: [
+      { tag: 'select', has: ['multiple'] },
+      { tag: 'select', has: ['size'], typeAttr: 'size', typeNotIn: SELECT_SINGLE_SIZES },
+      { tag: 'datalist' }
+    ],
     option: [{ tag: 'option' }],
     spinbutton: [{ tag: 'input', typeIn: ['number'] }],
     slider: [{ tag: 'input', typeIn: ['range'] }],
     heading: [{ tag: 'h1' }, { tag: 'h2' }, { tag: 'h3' }, { tag: 'h4' }, { tag: 'h5' }, { tag: 'h6' }],
-    img: [{ tag: 'img', notEmpty: 'alt' }, { tag: 'svg' }],
+    // alt="" marks a decorative image, unless a title, tabindex or global ARIA
+    // attribute makes it interesting again.
+    img: [{ tag: 'img', notEmpty: 'alt' }, { tag: 'img', has: ['title'], notEmpty: 'title' },
+      { tag: 'img', anyAttr: ['tabindex'].concat(GLOBAL_ARIA) }, { tag: 'svg' }],
     list: [{ tag: 'ul' }, { tag: 'ol' }, { tag: 'menu' }],
     listitem: [{ tag: 'li' }],
     table: [{ tag: 'table' }],
@@ -215,8 +279,16 @@
     rowgroup: [{ tag: 'thead' }, { tag: 'tbody' }, { tag: 'tfoot' }],
     cell: [{ tag: 'td' }],
     gridcell: [{ tag: 'td', inGrid: true }],
-    columnheader: [{ tag: 'th', typeAttr: 'scope', typeNotIn: ['row', 'rowgroup'] }],
-    rowheader: [{ tag: 'th', typeAttr: 'scope', typeIn: ['row', 'rowgroup'] }],
+    columnheader: [
+      { tag: 'th', typeAttr: 'scope', typeIn: ['col', 'colgroup'] },
+      { tag: 'th', typeAttr: 'scope', typeNotIn: TH_SCOPES,
+        css: ':not(:has(+ ' + FILLED_TD_CSS + ')):not(' + FILLED_TD_CSS + ' + th)', xpath: 'not' + TH_BESIDE_FILLED_XPATH }
+    ],
+    rowheader: [
+      { tag: 'th', typeAttr: 'scope', typeIn: ['row', 'rowgroup'] },
+      { tag: 'th', typeAttr: 'scope', typeNotIn: TH_SCOPES, css: ':has(+ ' + FILLED_TD_CSS + ')', xpath: TH_BESIDE_FILLED_XPATH },
+      { tag: 'th', typeAttr: 'scope', typeNotIn: TH_SCOPES, pre: FILLED_TD_CSS + ' + ', xpath: TH_BESIDE_FILLED_XPATH }
+    ],
     navigation: [{ tag: 'nav' }],
     main: [{ tag: 'main' }],
     dialog: [{ tag: 'dialog' }],
@@ -243,12 +315,18 @@
     deletion: [{ tag: 'del' }],
     insertion: [{ tag: 'ins' }],
     mark: [{ tag: 'mark' }],
-    search: [{ tag: 'search' }]
+    search: [{ tag: 'search' }],
+    time: [{ tag: 'time' }],
+    subscript: [{ tag: 'sub' }],
+    superscript: [{ tag: 'sup' }],
+    math: [{ tag: 'math' }],
+    document: [{ tag: 'html' }]
   };
 
   /** The native alternatives for a role, narrowed to one heading level if given. */
   function roleNatives(role, level) {
-    var natives = ROLE_NATIVE[role] || [];
+    var natives = Object.prototype.hasOwnProperty.call(ROLE_NATIVE, role) ? ROLE_NATIVE[role] : [];
+    level = headingLevel(level);
     if (role === 'heading' && level) {
       natives = natives.filter(function (n) { return n.tag === 'h' + level; });
     }
@@ -262,13 +340,14 @@
     if (n.notEmpty) attrPart += ':not([' + n.notEmpty + '=""])';
     var typeAttr = n.typeAttr || 'type';
     (n.typeNotIn || []).forEach(function (t) { attrPart += ':not([' + typeAttr + '="' + t + '"])'; });
-    attrPart += ':not([role])';
+    attrPart += (n.css || '') + ':not([role])';
     var heads = [n.tag];
     if (n.typeIn) {
       heads = n.typeIn.map(function (t) { return n.tag + '[' + typeAttr + '="' + t + '"]'; });
       if (n.typeIn.indexOf('text') !== -1) heads.unshift(n.tag + ':not([' + typeAttr + '])');
     }
-    var prefixes = n.inGrid ? ['[role="grid"] ', '[role="treegrid"] '] : [''];
+    if (n.anyAttr) heads = [n.tag + ':is(' + n.anyAttr.map(function (a) { return '[' + a + ']'; }).join(', ') + ')'];
+    var prefixes = n.inGrid ? ['[role="grid"] ', '[role="treegrid"] '] : [n.pre || ''];
     var out = [];
     prefixes.forEach(function (p) { heads.forEach(function (h) { out.push(p + h + attrPart); }); });
     return out;
@@ -276,7 +355,8 @@
 
   function nativeXpath(n) {
     var parts = ['self::' + n.tag, 'not(@role)'];
-    if (n.tag === 'svg') parts[0] = 'local-name()="svg"'; // SVG namespace: self::svg misses it
+    // SVG and MathML elements are in their own namespaces: self::svg misses them.
+    if (n.tag === 'svg' || n.tag === 'math') parts[0] = 'local-name(.)="' + n.tag + '"';
     var typeAttr = '@' + (n.typeAttr || 'type');
     if (n.typeIn) {
       var any = n.typeIn.map(function (t) { return typeAttr + '="' + t + '"'; });
@@ -286,14 +366,24 @@
     (n.typeNotIn || []).forEach(function (t) { parts.push('not(' + typeAttr + '="' + t + '")'); });
     (n.has || []).forEach(function (a) { parts.push('@' + a); });
     (n.lacks || []).forEach(function (a) { parts.push('not(@' + a + ')'); });
-    if (n.notEmpty) parts.push('not(@' + n.notEmpty + '="")');
+    // Spelled so that a missing attribute counts as "not empty" whether a node-set is
+    // compared existentially (XPath 1.0) or as its string value (jsdom, in tests).
+    if (n.notEmpty) parts.push('(not(@' + n.notEmpty + ') or @' + n.notEmpty + '!="")');
+    if (n.anyAttr) parts.push('(' + n.anyAttr.map(function (a) { return '@' + a; }).join(' or ') + ')');
     if (n.inGrid) parts.push('ancestor::table[@role="grid" or @role="treegrid"]');
+    if (n.xpath) parts.push(n.xpath);
     return '(' + parts.join(' and ') + ')';
   }
 
+  // An explicit role is matched as one token of the role attribute, so a fallback
+  // list (role="doc-tip note", role="foo checkbox") still matches. The engine takes
+  // the first *valid* token; CSS cannot tell a valid token from an unknown one, so an
+  // element listing an earlier valid role (role="switch checkbox") matches both.
   function explicitRole(role, level) {
-    return { css: '[role="' + attrSel(role) + '"]' + (level ? '[aria-level="' + level + '"]' : ''),
-      xpath: '(@role=' + xpathLiteral(role) + (level ? ' and @aria-level="' + level + '"' : '') + ')' };
+    level = headingLevel(level);
+    return { css: '[role~="' + attrSel(role) + '"]' + (level ? '[aria-level="' + level + '"]' : ''),
+      xpath: '(contains(concat(" ", normalize-space(@role), " "), ' + xpathLiteral(' ' + role + ' ') + ')' +
+        (level ? ' and @aria-level="' + level + '"' : '') + ')' };
   }
 
   function roleCss(role, level) {
@@ -316,8 +406,36 @@
   // case-sensitive here — the recorded name comes from the element itself, so it is
   // never missed, and it can only match fewer elements than Playwright's
   // case-insensitive default.
+  // XPath's normalize-space() only knows ASCII white space, while the recorded text
+  // went through JavaScript's \s (no-break spaces included) and lost its soft hyphens
+  // and zero-width spaces. translate() maps the no-break spaces (U+00A0, U+202F) to
+  // spaces and deletes the other two (no counterpart in the replacement string), so
+  // "Add&nbsp;to&nbsp;cart" matches "Add to cart".
+  var XP_SPACES_FROM = '"\u00a0\u202f\u00ad\u200b"';
+  var XP_SPACES_TO = '"  "';
+  function xpNorm(expr) {
+    return 'normalize-space(translate(' + expr + ', ' + XP_SPACES_FROM + ', ' + XP_SPACES_TO + '))';
+  }
+
   function xpMatch(expr, lit, exact) {
-    return exact ? 'normalize-space(' + expr + ')=' + lit : 'contains(normalize-space(' + expr + '), ' + lit + ')';
+    return exact ? xpNorm(expr) + '=' + lit : 'contains(' + xpNorm(expr) + ', ' + lit + ')';
+  }
+
+  function xpHas(expr) { return xpNorm(expr) + '!=""'; }
+
+  // aria-labelledby names an element by the text of every element it lists, joined
+  // in attribute order. XPath 1.0 cannot loop, so the first ARIA_LABELLEDBY_MAX ids
+  // are cut out of the attribute one by one and looked up with id(); comparing the
+  // whole attribute against one @id (as before) never matched a list of two.
+  var ARIA_LABELLEDBY_MAX = 4;
+  function labelledbyText() {
+    var rest = 'normalize-space(@aria-labelledby)';
+    var parts = [];
+    for (var i = 0; i < ARIA_LABELLEDBY_MAX; i++) {
+      parts.push('id(substring-before(concat(' + rest + ', " "), " "))');
+      rest = 'substring-after(' + rest + ', " ")';
+    }
+    return 'concat(' + parts.join(', " ", ') + ')';
   }
 
   // Only the name sources a role can actually use are emitted, which keeps the
@@ -332,13 +450,14 @@
   // source that is present decides the name, so a later source can never add a
   // match (a button with aria-label="Close" is not also named by its text).
   // Each source is a [present, matches] pair; a match implies presence.
+  // aria-labelledby is present when it points at an element that exists.
   function nameXpath(name, exact, role) {
-    var lit = xpathLiteral(normWs(name));
+    var lit = xpathLiteral(normText(name));
     var m = function (e) { return xpMatch(e, lit, exact); };
-    var has = function (e) { return 'normalize-space(' + e + ')!=""'; };
+    var has = xpHas;
     var formish = LABELLED_ROLES.indexOf(role) !== -1;
     var sources = [
-      ['@aria-labelledby', '@aria-labelledby = //*[@id][' + m('.') + ']/@id'],
+      ['id(@aria-labelledby)', m(labelledbyText())],
       [has('@aria-label'), m('@aria-label')]
     ];
     if (formish) {
@@ -371,9 +490,9 @@
   var LABELABLE_CSS = 'input:not([type="hidden"]), textarea, select, button, meter, output, progress, [aria-label], [aria-labelledby]';
 
   function labelXpath(text, exact) {
-    var lit = xpathLiteral(normWs(text));
+    var lit = xpathLiteral(normText(text));
     var m = function (e) { return xpMatch(e, lit, exact); };
-    return '(@aria-labelledby and @aria-labelledby = //*[@id][' + m('.') + ']/@id)' +
+    return '(@aria-labelledby and ' + m(labelledbyText()) + ')' +
       ' or ' + m('@aria-label') +
       ' or ((' + LABELABLE_XPATH + ') and ((@id and @id = //label[' + m('.') + ']/@for) or ancestor::label[' + m('.') + ']))';
   }
@@ -382,7 +501,7 @@
   // first, because every ancestor's string-value contains the text too.
   var TEXT_SKIP = 'self::script or self::style or self::noscript or self::template';
   function textXpath(text, exact, rel) {
-    var lit = xpathLiteral(normWs(text));
+    var lit = xpathLiteral(normText(text));
     var m = xpMatch('.', lit, exact);
     return (rel ? './/*' : '//*') + '[not(ancestor-or-self::head or ' + TEXT_SKIP + ') and ' + m +
       ' and not(.//*[not(' + TEXT_SKIP + ') and ' + m + '])]';
@@ -397,7 +516,8 @@
     '// Locatra: match an element by its accessible name (kind \'name\') or by its label',
     '// (kind \'label\') the way Playwright\'s getByRole / getByLabel do.',
     'function locatraMatch(el$T{: HTMLElement}, kind$T{: string}, text$T{: string}, exact$T{?: boolean})$T{: boolean} {',
-    '  const norm = (s$T{?: string | null})$T{: string} => String(s == null ? \'\' : s).replace(/\\s+/g, \' \').trim();',
+    '  const norm = (s$T{?: string | null})$T{: string} =>',
+    '    String(s == null ? \'\' : s).replace(/[\\u00ad\\u200b]/g, \'\').replace(/\\s+/g, \' \').trim();',
     '  const hit = (s$T{?: string | null})$T{: boolean} => {',
     '    const v = norm(s);',
     '    return exact ? v === text : v !== \'\' && v.indexOf(text) !== -1;',
@@ -473,7 +593,7 @@
   }
 
   function cyFilter(kind, text, exact, lang) {
-    return '.filter((_, el) => ' + CY_HELPER_NAME + '(el, ' + q(kind, lang) + ', ' + q(normWs(text), lang) +
+    return '.filter((_, el) => ' + CY_HELPER_NAME + '(el, ' + q(kind, lang) + ', ' + q(normText(text), lang) +
       (exact ? ', true' : '') + '))';
   }
 
@@ -553,7 +673,8 @@
         var opts = [];
         if (t.name) opts.push(py ? 'name=' + q(t.name, lang) : 'name: ' + q(t.name, lang));
         if (t.name && t.exact) opts.push(py ? 'exact=True' : 'exact: true');
-        if (t.level) opts.push(py ? 'level=' + t.level : 'level: ' + t.level);
+        var level = headingLevel(t.level);
+        if (level) opts.push(py ? 'level=' + level : 'level: ' + level);
         var optStr = '';
         if (opts.length) optStr = py ? ', ' + opts.join(', ') : ', { ' + opts.join(', ') + ' }';
         return 'page.' + m('getByRole', 'get_by_role') + '(' + q(t.role, lang) + optStr + ')' +
@@ -661,7 +782,9 @@
     var parent = locatorExpr(t.parent, fw, lang);
     if (!t.child) return parent;
     var child = locatorExpr(t.child, fw, lang, true);
-    if (!parent) return child;
+    // A child reached through its shadow roots starts from the document: its first
+    // host is unique there, and need not be inside the parent.
+    if (!parent || (fw !== 'playwright' && shadowOf(t.child))) return child;
     var rules = CHAIN_ROOT[fw] || CHAIN_ROOT.playwright;
     for (var i = 0; i < rules.length; i++) {
       if (rules[i][0].test(child)) return parent + child.replace(rules[i][0], rules[i][1]);
@@ -684,12 +807,21 @@
     var frames = [];
     var t = target;
     while (t && t.kind === 'frame') {
-      var f = { selector: t.selector, index: t.index };
+      // index: position among the parent's <iframe> elements (Playwright, Cypress,
+      // WebdriverIO); framesIndex: position in window.frames (Selenium), when known.
+      var f = { selector: t.selector, index: nonNegInt(t.index, 0) };
+      var framesIndex = nonNegInt(t.framesIndex, -1);
+      if (framesIndex >= 0) f.framesIndex = framesIndex;
       if (t.selector && validShadowPath(t.shadowPath)) f.shadowPath = t.shadowPath;
       frames.push(f);
       t = t.child;
     }
     return { frames: frames, inner: t || null };
+  }
+
+  /** The frame index Selenium's switchTo().frame(i) takes: window.frames order when known. */
+  function seleniumFrameIndex(frame) {
+    return frame.framesIndex != null ? frame.framesIndex : frame.index;
   }
 
   function validShadowPath(p) {
@@ -703,7 +835,7 @@
     if (fw === 'cypress') {
       var base = sel
         ? 'cy.get(' + q(sel, lang) + ')'
-        : "cy.get('iframe').eq(" + (frame.index || 0) + ')';
+        : "cy.get('iframe').eq(" + frame.index + ')';
       if (frame.shadowPath) {
         // cy.get/find stay inside one tree (and includeShadowDom matches a selector
         // within a single root, not a path across several), so step host by host.
@@ -718,7 +850,7 @@
     var py = lang === 'python';
     var fl = py ? 'frame_locator' : 'frameLocator';
     // Without a selector the frame is cross-origin; address it positionally.
-    var arg = sel ? q(sel, lang) : q('iframe >> nth=' + (frame.index || 0), lang);
+    var arg = sel ? q(sel, lang) : q('iframe >> nth=' + frame.index, lang);
     return 'page.' + fl + '(' + arg + ')';
   }
 
@@ -742,12 +874,64 @@
     return child;
   }
 
+  // ── open shadow DOM (C3) ────────────────────────────────────────────────────
+  // A target inside open shadow roots carries `shadowHosts` (one CSS selector per
+  // host, outermost first, each unique in the tree that holds it) and `shadowCss`
+  // (unique inside the innermost root). Playwright's locators pierce shadow roots and
+  // need neither. Selenium and Cypress search one tree at a time, and a shadow root
+  // takes CSS only, so they walk host by host and finish with shadowCss — whatever
+  // kind the target's own locator is. Without shadowCss the target's own locator is
+  // kept, with a NOTE that it may not find the element.
+  function shadowHostsOf(t) {
+    if (!t || !Array.isArray(t.shadowHosts) || !t.shadowHosts.length) return null;
+    for (var i = 0; i < t.shadowHosts.length; i++) {
+      if (typeof t.shadowHosts[i] !== 'string' || !t.shadowHosts[i]) return null;
+    }
+    return t.shadowHosts;
+  }
+
+  /** { hosts, css } when a target can be reached through its shadow roots, else null. */
+  function shadowOf(t) {
+    var hosts = shadowHostsOf(t);
+    return hosts && typeof t.shadowCss === 'string' && t.shadowCss ? { hosts: hosts, css: t.shadowCss } : null;
+  }
+
+  /** Whether a step's element is in shadow DOM with no shadowCss to reach it by. */
+  function lacksShadowCss(target) {
+    var inner = unwrapFrames(target).inner;
+    return !!shadowHostsOf(inner) && !shadowOf(inner);
+  }
+
+  var SHADOW_NOTE = 'NOTE: this element is inside shadow DOM but no CSS selector was recorded for it there; ' +
+    'this locator does not search shadow roots and may not find it.';
+
+  // Selenium JS/TS: a shadow root's findElement returns a plain promise, so every hop
+  // is awaited (see selShadowFrameSwitch); the result is a WebElement expression.
+  function selShadowExpr(sh, lang) {
+    var expr = selFind('css', sh.hosts[0], lang);
+    var rest = sh.hosts.slice(1).concat(sh.css);
+    rest.forEach(function (sel) {
+      expr = lang === 'python'
+        ? expr + '.shadow_root.find_element(By.CSS_SELECTOR, ' + q(sel, lang) + ')'
+        : '(await (await ' + expr + '.getShadowRoot()).findElement(By.css(' + q(sel, lang) + ')))';
+    });
+    return expr;
+  }
+
+  function cyShadowExpr(sh, lang) {
+    return 'cy.get(' + q(sh.hosts[0], lang) + ')' + sh.hosts.slice(1).concat(sh.css).map(function (sel) {
+      return '.shadow().find(' + q(sel, lang) + ')';
+    }).join('');
+  }
+
   function locatorExpr(target, fw, lang, rel) {
     if (!target) return '';
     lang = pluginLang(fw, lang);
     var plug = targetFor(fw, lang);
     if (plug) return plug.locatorExpr(target, lang, rel);
     if (target.kind === 'frame') return frameExpr(target, fw, lang);
+    var sh = fw === 'selenium' || fw === 'cypress' ? shadowOf(target) : null;
+    if (sh) return fw === 'selenium' ? selShadowExpr(sh, lang) : cyShadowExpr(sh, lang);
     if (target.kind === 'chain') return chainExpr(target, fw, lang);
     if (fw === 'selenium') return selLocator(target, lang, rel);
     if (fw === 'cypress') return cyLocator(target, lang);
@@ -788,6 +972,15 @@
 
   function fillValueExpr(step, fw, lang) {
     return step.sensitive ? secretExpr(step, fw, lang) : valueExpr(step, lang);
+  }
+
+  /**
+   * The labels a selectOption step on a <select multiple> chose, when it chose more
+   * than one (C1: `value` keeps the first label for older consumers); else null.
+   */
+  function multiValues(step) {
+    if (!step || step.action !== 'selectOption' || !Array.isArray(step.values) || step.values.length < 2) return null;
+    return step.values.map(function (v) { return String(v == null ? '' : v); });
   }
 
   /** A typed or selected value: its test-data reference when it has one, else the literal. */
@@ -910,16 +1103,19 @@
     return VAR_RESERVED.indexOf(name) === -1 ? name : name + 'Value';
   }
 
-  /** A step whose value can be test data: a non-sensitive, accepted fill/select with a value and a locator. */
+  /**
+   * A step whose value can be test data: a non-sensitive, accepted fill/select with a
+   * value and a locator. A multi-select's several labels are not one value.
+   */
   function varEligible(step) {
-    return !!step && typeof step === 'object' && !isSuggested(step) &&
+    return !!step && typeof step === 'object' && !isSuggested(step) && !multiValues(step) &&
       (step.action === 'fill' || step.action === 'selectOption') && !step.sensitive &&
       typeof step.value === 'string' && step.value !== '' && !!unwrapFrames(step.target).inner;
   }
 
   /** The variable a step's statement references, or null when it renders a literal. */
   function variableRefName(step) {
-    if (!step || (step.action !== 'fill' && step.action !== 'selectOption') || step.sensitive) return null;
+    if (!step || (step.action !== 'fill' && step.action !== 'selectOption') || step.sensitive || multiValues(step)) return null;
     return isValidVariableName(step.varRef) ? step.varRef : null;
   }
 
@@ -1087,6 +1283,7 @@
       notes.push(comment(lang, 'NOTE: this iframe is cross-origin, so contentDocument is null and Cypress cannot reach into it.'));
       notes.push(comment(lang, 'Test that page in its own spec (cy.visit/cy.origin) or set chromeWebSecurity: false (Chromium only).'));
     }
+    if (lacksShadowCss(step.target)) notes.push(comment(lang, SHADOW_NOTE));
     return notes;
   }
 
@@ -1129,9 +1326,12 @@
       case 'upload':
         return uploadNote(lang) + '\n' + aw + loc + (py ? '.set_input_files(' : '.setInputFiles(') +
           listLiteral(uploadFiles(step.value), lang) + ')' + semi;
-      case 'selectOption':
-        if (py) return loc + '.select_option(' + valueExpr(step, lang) + ')';
-        return 'await ' + loc + '.selectOption(' + valueExpr(step, lang) + ');';
+      case 'selectOption': {
+        var many = multiValues(step);
+        var opt = many ? listLiteral(many, lang) : valueExpr(step, lang);
+        if (py) return loc + '.select_option(' + opt + ')';
+        return 'await ' + loc + '.selectOption(' + opt + ');';
+      }
       default: return todo(lang, 'unsupported step "' + commentSafe(a) + '"');
     }
   }
@@ -1220,7 +1420,10 @@
         if (!files.length) return todo(lang, 'upload step with no files (Cypress cannot clear a file input)');
         return uploadNote(lang) + '\n' + loc + '.selectFile(' + listLiteral(files, lang) + ');';
       }
-      case 'selectOption': return loc + '.select(' + valueExpr(step, lang) + ');';
+      case 'selectOption': {
+        var many = multiValues(step);
+        return loc + '.select(' + (many ? listLiteral(many, lang) : valueExpr(step, lang)) + ');';
+      }
       default: return todo(lang, 'unsupported step "' + commentSafe(a) + '"');
     }
   }
@@ -1257,7 +1460,7 @@
       var el = selFind('css', frame.selector, lang);
       return py ? 'driver.switch_to.frame(' + el + ')' : 'await driver.switchTo().frame(' + el + ');';
     }
-    var idx = frame.index || 0;
+    var idx = seleniumFrameIndex(frame);
     return py ? 'driver.switch_to.frame(' + idx + ')' : 'await driver.switchTo().frame(' + idx + ');';
   }
 
@@ -1374,15 +1577,35 @@
         return uploadNote(lang) + '\nawait ' + loc + '.sendKeys(' + listLiteral(files, lang) +
           ".map((p) => require('path').resolve(p)).join('\\n'));";
       }
-      case 'selectOption':
+      case 'selectOption': {
+        var many = multiValues(step);
+        if (many) {
+          // A multi-select keeps earlier choices: clear them, then pick each label, so
+          // the selection ends up exactly as recorded (as Playwright's selectOption).
+          if (py) {
+            return ['select = Select(' + loc + ')', 'select.deselect_all()'].concat(many.map(function (v) {
+              return 'select.select_by_visible_text(' + q(v, lang) + ')';
+            })).join('\n');
+          }
+          return '{\n  const select = new Select(' + loc + ');\n  await select.deselectAll();\n' + many.map(function (v) {
+            return '  await select.selectByVisibleText(' + q(v, lang) + ');';
+          }).join('\n') + '\n}';
+        }
         if (py) return 'Select(' + loc + ').select_by_visible_text(' + valueExpr(step, lang) + ')';
         return 'await new Select(' + loc + ').selectByVisibleText(' + valueExpr(step, lang) + ');';
+      }
       default: return todo(lang, 'unsupported step "' + commentSafe(a) + '"');
     }
   }
 
-  function vpW(step) { return Number(step.width != null ? step.width : (parseViewport(step.value).w)) || 1280; }
-  function vpH(step) { return Number(step.height != null ? step.height : (parseViewport(step.value).h)) || 720; }
+  // A viewport size is emitted as a number in code: anything but a positive, finite
+  // number (NaN, Infinity, a string of code) falls back to the default.
+  function vpSize(raw, fallback) {
+    var n = Math.round(Number(raw));
+    return n > 0 && isFinite(n) ? n : fallback;
+  }
+  function vpW(step) { return vpSize(step.width != null ? step.width : parseViewport(step.value).w, 1280); }
+  function vpH(step) { return vpSize(step.height != null ? step.height : parseViewport(step.value).h, 720); }
   function parseViewport(v) {
     var parts = String(v || '').split('x');
     return { w: parts[0] || '', h: parts[1] || parts[0] || '' };
@@ -1405,18 +1628,27 @@
     return py ? 'expect(page).to_have_url(' + url + ')' : 'await expect(page).toHaveURL(' + url + ');';
   }
 
+  // C2: a toHaveValue recorded on a sensitive field carries no value; it compares
+  // against the same environment variable the field's fill reads.
+  function sensitiveAssert(step) { return !!step.sensitive && step.assertType === 'toHaveValue'; }
+
+  // Text assertions: the recorder takes an element's text from innerText (what is
+  // rendered, white space normalised), while Playwright's toHaveText/toContainText
+  // compare textContent unless told otherwise — hidden text, <script> content and the
+  // spacing between block elements made a recorded assertion fail.
   function pwAssert(step, lang) {
     var py = lang === 'python';
     var loc = locatorExpr(step.target, 'playwright', lang);
     var t = step.assertType || 'toBeVisible';
     var v = step.value;
     var unchecked = t === 'toBeChecked' && String(v) === 'false';
+    var expectedValue = sensitiveAssert(step) ? secretExpr(step, 'playwright', lang) : q(v, lang);
     if (py) {
       var pmap = {
         toBeVisible: 'to_be_visible()',
-        toHaveText: 'to_have_text(' + q(v, lang) + ')',
-        toContainText: 'to_contain_text(' + q(v, lang) + ')',
-        toHaveValue: 'to_have_value(' + q(v, lang) + ')',
+        toHaveText: 'to_have_text(' + q(v, lang) + ', use_inner_text=True)',
+        toContainText: 'to_contain_text(' + q(v, lang) + ', use_inner_text=True)',
+        toHaveValue: 'to_have_value(' + expectedValue + ')',
         toBeEnabled: 'to_be_enabled()',
         toBeChecked: unchecked ? 'not_to_be_checked()' : 'to_be_checked()'
       };
@@ -1424,27 +1656,36 @@
     }
     var jmap = {
       toBeVisible: 'toBeVisible()',
-      toHaveText: 'toHaveText(' + q(v, lang) + ')',
-      toContainText: 'toContainText(' + q(v, lang) + ')',
-      toHaveValue: 'toHaveValue(' + q(v, lang) + ')',
+      toHaveText: 'toHaveText(' + q(v, lang) + ', { useInnerText: true })',
+      toContainText: 'toContainText(' + q(v, lang) + ', { useInnerText: true })',
+      toHaveValue: 'toHaveValue(' + expectedValue + ')',
       toBeEnabled: 'toBeEnabled()',
       toBeChecked: unchecked ? 'not.toBeChecked()' : 'toBeChecked()'
     };
     return 'await expect(' + loc + ').' + (jmap[t] || 'toBeVisible()') + ';';
   }
 
+  // A sensitive comparison never prints the secret: not in an assertion's failure
+  // message, and not in Cypress's command log (which also lands in videos).
+  function secretMismatch(step) { return 'the value does not match ' + secretName(step); }
+
   // Cypress's have.text compares raw textContent, so indentation and newlines in the
-  // markup failed a text the user can see is identical. Compare normalised text, as
-  // Playwright's toHaveText does.
+  // markup failed a text the user can see is identical. Compare the rendered text
+  // (innerText), normalised as Playwright's toHaveText does, inside a retried
+  // should() callback.
   function cyAssert(step, lang) {
     var loc = locatorExpr(step.target, 'cypress', lang);
     var t = step.assertType || 'toBeVisible';
     var v = step.value;
-    var normText = "$el.text().replace(/\\s+/g, ' ').trim()";
+    if (sensitiveAssert(step)) {
+      return secretExpr(step, 'cypress', lang) + '.then((secret) => {\n' +
+        '  ' + loc + '.should(($el) => { expect($el.val() === secret, ' + q(secretMismatch(step), lang) + ').to.equal(true); });\n});';
+    }
+    var rendered = "$el[0].innerText.replace(/[\\u00ad\\u200b]/g, '').replace(/\\s+/g, ' ').trim()";
     var map = {
       toBeVisible: ".should('be.visible')",
-      toHaveText: '.should(($el) => { expect(' + normText + ').to.equal(' + q(normWs(v), lang) + '); })',
-      toContainText: '.should(($el) => { expect(' + normText + ').to.contain(' + q(normWs(v), lang) + '); })',
+      toHaveText: '.should(($el) => { expect(' + rendered + ').to.equal(' + q(normText(v), lang) + '); })',
+      toContainText: '.should(($el) => { expect(' + rendered + ').to.contain(' + q(normText(v), lang) + '); })',
       toHaveValue: ".should('have.value', " + q(v, lang) + ')',
       toBeEnabled: ".should('be.enabled')",
       toBeChecked: String(v) === 'false' ? ".should('not.be.checked')" : ".should('be.checked')"
@@ -1452,28 +1693,41 @@
     return loc + (map[t] || map.toBeVisible) + ';';
   }
 
+  // getText() is already the rendered text; it is normalised like the recording
+  // (white space collapsed, soft hyphens and zero-width spaces dropped).
   function selAssert(step, lang) {
     var py = lang === 'python';
     var loc = locatorExpr(step.target, 'selenium', lang);
     var t = step.assertType || 'toBeVisible';
     var v = step.value;
     var unchecked = String(v) === 'false';
+    var sensitive = sensitiveAssert(step);
     if (py) {
-      var pyText = '" ".join(' + loc + '.text.split())';
+      var pyText = '" ".join(' + loc + '.text.replace("\\u00ad", "").replace("\\u200b", "").split())';
       switch (t) {
-        case 'toHaveText': return 'assert ' + pyText + ' == ' + q(normWs(v), lang);
-        case 'toContainText': return 'assert ' + q(normWs(v), lang) + ' in ' + pyText;
-        case 'toHaveValue': return 'assert ' + loc + '.get_attribute("value") == ' + q(v, lang);
+        case 'toHaveText': return 'assert ' + pyText + ' == ' + q(normText(v), lang);
+        case 'toContainText': return 'assert ' + q(normText(v), lang) + ' in ' + pyText;
+        case 'toHaveValue':
+          if (sensitive) {
+            return 'assert ' + loc + '.get_attribute("value") == ' + secretExpr(step, 'selenium', lang) + ', ' +
+              q(secretMismatch(step), lang);
+          }
+          return 'assert ' + loc + '.get_attribute("value") == ' + q(v, lang);
         case 'toBeEnabled': return 'assert ' + loc + '.is_enabled()';
         case 'toBeChecked': return selWithEl(loc, lang, ['assert ' + (unchecked ? 'not ' : '') + selCheckedExpr('el', lang)]);
         case 'toBeVisible': default: return 'assert ' + loc + '.is_displayed()';
       }
     }
-    var jsText = '(await ' + loc + ".getText()).replace(/\\s+/g, ' ').trim()";
+    var jsText = '(await ' + loc + ".getText()).replace(/[\\u00ad\\u200b]/g, '').replace(/\\s+/g, ' ').trim()";
     switch (t) {
-      case 'toHaveText': return 'assert.strictEqual(' + jsText + ', ' + q(normWs(v), lang) + ');';
-      case 'toContainText': return 'assert.ok(' + jsText + '.includes(' + q(normWs(v), lang) + '));';
-      case 'toHaveValue': return 'assert.strictEqual(await ' + loc + ".getAttribute('value'), " + q(v, lang) + ');';
+      case 'toHaveText': return 'assert.strictEqual(' + jsText + ', ' + q(normText(v), lang) + ');';
+      case 'toContainText': return 'assert.ok(' + jsText + '.includes(' + q(normText(v), lang) + '));';
+      case 'toHaveValue':
+        if (sensitive) {
+          return 'assert.ok((await ' + loc + ".getAttribute('value')) === (" + secretExpr(step, 'selenium', lang) + '), ' +
+            q(secretMismatch(step), lang) + ');';
+        }
+        return 'assert.strictEqual(await ' + loc + ".getAttribute('value'), " + q(v, lang) + ');';
       case 'toBeEnabled': return 'assert.ok(await ' + loc + '.isEnabled());';
       case 'toBeChecked': return selWithEl(loc, lang, ['assert.ok(' + (unchecked ? '!' : '') + selCheckedExpr('el', lang) + ');']);
       case 'toBeVisible': default: return 'assert.ok(await ' + loc + '.isDisplayed());';
@@ -1853,6 +2107,7 @@
     if (fw === 'cypress' && hasPositionalFrame(el.target)) {
       notes.push(comment(lang, 'NOTE: this iframe is cross-origin, so contentDocument is null and Cypress cannot reach into it.'));
     }
+    if (fw !== 'playwright' && lacksShadowCss(el.target)) notes.push(comment(lang, SHADOW_NOTE));
     return notes;
   }
 
@@ -2009,10 +2264,12 @@
       if (anyFrames) body.push('  await this.driver.switchTo().defaultContent();');
       body.push('  await this.driver.get(' + q(url, lang) + ');', '}');
     }
+    // A lookup through shadow roots awaits each hop, so it is an async method too.
+    var isAsync = function (m) { return anyFrames || !!shadowOf(unwrapFrames(m.el.target).inner); };
     members.forEach(function (m) {
       body.push('');
       body = body.concat(poNote(m.el, 'selenium', lang));
-      if (anyFrames) {
+      if (isAsync(m)) {
         body.push('async ' + m.id + '()' + (ts ? ': Promise<WebElement>' : '') + ' {',
           block(switchesOf(m).concat(['return ' + findOf(m) + ';']), '  '), '}');
       } else {
@@ -2044,8 +2301,10 @@
     var cls0 = 'class ' + cls + ' {\n' + block(body, '  ') + '\n}\n';
     if (ts) {
       // @types/selenium-webdriver declares Select only in its own module.
-      var tsImports = "import { By, type WebDriver, " + (anyFrames ? 'type WebElement' : 'type WebElementPromise') +
-        " } from 'selenium-webdriver';\n";
+      var types = [];
+      if (members.some(isAsync)) types.push('type WebElement');
+      if (!members.length || !members.every(isAsync)) types.push('type WebElementPromise');
+      var tsImports = 'import { By, type WebDriver, ' + types.join(', ') + " } from 'selenium-webdriver';\n";
       if (names.indexOf('Select') !== -1) tsImports += "import { Select } from 'selenium-webdriver/lib/select.js';\n";
       return poHeader(model, lang, info.skipped) + tsImports + '\nexport ' + cls0;
     }
@@ -2136,7 +2395,12 @@
     // Shared building blocks for registered targets (codegen-*.js). Not a stable
     // public API: only the target modules in this repository use it.
     _internals: {
-      escapeControls: escapeControls, attrSel: attrSel, normWs: normWs, cssIdent: cssIdent,
+      escapeControls: escapeControls, attrSel: attrSel, normWs: normWs, normText: normText, cssIdent: cssIdent,
+      // numeric target fields, validated before they are emitted as code (C4)
+      headingLevel: headingLevel, nonNegInt: nonNegInt, seleniumFrameIndex: seleniumFrameIndex,
+      // multi-select (C1), sensitive assertions (C2), open shadow DOM (C3)
+      multiValues: multiValues, sensitiveAssert: sensitiveAssert, secretMismatch: secretMismatch,
+      shadowOf: shadowOf, lacksShadowCss: lacksShadowCss, SHADOW_NOTE: SHADOW_NOTE, xpNorm: xpNorm,
       xpathLiteral: xpathLiteral, roleCss: roleCss, roleNodeXpath: roleNodeXpath, nameXpath: nameXpath,
       labelXpath: labelXpath, textXpath: textXpath, xpMatch: xpMatch, attrMatchSel: attrMatchSel,
       explicitRole: explicitRole, roleNatives: roleNatives, LABELLED_ROLES: LABELLED_ROLES,
