@@ -152,6 +152,13 @@ All notable changes to Locatra (formerly LocatorLens). Versions follow [semantic
   - in the side panel, non-Playwright output lists the shortest unique locator
     first, collapses any long one behind "Show full locator", and Copy includes a
     helper when one is needed (as does right-click "Copy Best Locator").
+- The helper is compact (about 160–210 lines, every line ≤ 120 characters, emitted
+  only when a file needs it), and text assertions use a small `locatraText` /
+  `Locatra.text` helper instead of a long normalisation chain.
+- With a non-Playwright framework selected, the stability badge rates what that
+  framework can do natively (a plain id lookup is BEST, a helper lookup OK), and a
+  locator that matches a different single element says "other element" instead of
+  "1 matches".
 - Re-injecting the content script (a new iframe while inspecting, a health check)
   no longer makes Locatra's own overlay buttons and toast count as page elements.
 - URL redaction keeps ordinary parameters (`?key=shoes`, `?code=SUMMER`); generic
@@ -163,6 +170,29 @@ All notable changes to Locatra (formerly LocatorLens). Versions follow [semantic
 - A replayed step from an older recording without a secret name gets the
   `LOCATRA_PASSWORD` value the panel asked for.
 - Headings with `aria-level` above 6 keep their level in exports and imports.
+
+- Found by recording and inspecting real sites (GitHub, Wikipedia, MDN, TodoMVC,
+  Shoelace web components, the-internet, Sauce Demo):
+  - one click on a web-component checkbox's icon records only the check, not an
+    extra non-unique `svg` click; a click whose locator would be ambiguous is moved
+    to the nearest uniquely nameable control;
+  - a checkbox / select step uses the locator taken before the click, so a class
+    the click adds (`li.completed`) never ends up in it, and generated CSS skips
+    state classes (`active`, `selected`, `is-*`, BEM modifiers…);
+  - shadow-DOM hosts and inner selectors are short (`#navigation__popup
+mdn-search-button` instead of an `html > body > …` path), and an element
+    known only by its class inside a shadow root gets a selector every framework
+    can use; role/label/text lookups in shadow DOM use the helper (which pierces
+    shadow roots) instead of a host-by-host walk;
+  - a recorded step that matched several elements gets a NOTE in every export;
+  - inspect: the traversal bar no longer covers the next element, disabled
+    controls can be picked, an icon or label span inside a button picks the
+    button (▼ Child still reaches the inner element), and only the frame under
+    the pointer shows its hover UI;
+  - copying from a frame where the Clipboard API is blocked goes through the top
+    frame, with no console errors.
+- WebdriverIO: a script whose only text check was a "contains" one used
+  `LOCATRA_TEXT` without declaring it.
 
 ### Security
 
@@ -200,6 +230,9 @@ All notable changes to Locatra (formerly LocatorLens). Versions follow [semantic
 
 ### Tests
 
+- The step-screenshots smoke blocks desktop input that does not come from the
+  script: a real click landing in its visible window was recorded (correctly) and
+  failed the run about one time in forty.
 - `npm run smoke:firefox` installs the Firefox package in a real Firefox (Selenium +
   geckodriver) and records, exports, replays and health-checks through it; CI runs
   it.
