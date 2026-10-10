@@ -19,6 +19,8 @@ import vm from 'node:vm';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 
 import { M2_REPO, javaToolchain } from '../scripts/e2e/setup-java.mjs';
+import * as CORPUS from './codegen-corpus.mjs';
+import { helperCallOf } from './codegen-helper-calls.mjs';
 
 let C;
 beforeAll(async () => {
@@ -37,8 +39,6 @@ const role = (r, name, o = {}) => ({ kind: 'role', role: r, ...(name != null ? {
 const label = (value, o = {}) => ({ kind: 'label', value, ...o });
 const frame = (selector, child, o = {}) => ({ kind: 'frame', selector, index: 0, child, ...o });
 const chain = (parent, child) => ({ kind: 'chain', parent, child });
-// The role XPath every Selenium-family target uses (codegen.js roleNodeXpath).
-const roleXp = (r, level) => `//*[${C._internals.roleNodeXpath(r, level)}]`;
 
 /** Decode a Java string literal (as emitted: \\ \" \n \r \t \b \f, octal, \uXXXX). */
 function javaString(lit) {
@@ -411,15 +411,24 @@ const PARITY_TARGETS = [
   chain(testid('row'), label('L')),
   chain({ kind: 'css', value: 'table' }, { kind: 'text', value: 'Refactoring', exact: true }),
   chain({ kind: 'id', value: 'a' }),
+  { kind: 'xpath', value: '//a[@title="it\'s"]' },
+  chain(testid('row'), { kind: 'xpath', value: '//td[2]' }),
 ];
 
 describe('Selenium for Java locators', () => {
-  it('selects exactly what Selenium JavaScript selects (same By strategy and selector)', () => {
+  it('selects exactly what Selenium JavaScript selects (same By strategy and selector, same helper call)', () => {
     for (const t of PARITY_TARGETS) {
       const js = C.locatorExpr(t, 'selenium', 'javascript');
       const java = se(t);
       expect(byCalls(java, 'java'), JSON.stringify(t)).toEqual(byCalls(js, 'javascript'));
-      expect(byCalls(java, 'java').length, JSON.stringify(t)).toBeGreaterThan(0);
+      const call = (code, lang) => {
+        const c = helperCallOf(code, lang);
+        return c && { ...c, root: null };
+      };
+      expect(call(java, 'java'), JSON.stringify(t)).toEqual(call(js, 'javascript'));
+      expect(byCalls(java, 'java').length + (call(java, 'java') ? 1 : 0), JSON.stringify(t)).toBeGreaterThan(
+        0
+      );
       expect(byCalls(se(t, true), 'java'), JSON.stringify(t)).toEqual(
         byCalls(C.locatorExpr(t, 'selenium', 'javascript', true), 'javascript')
       );
@@ -430,21 +439,33 @@ describe('Selenium for Java locators', () => {
     expect(se(testid('go'))).toBe('driver.findElement(By.cssSelector("[data-testid=\\"go\\"]"))');
     expect(se({ kind: 'id', value: 'a:b' })).toBe('driver.findElement(By.id("a:b"))');
     expect(se({ kind: 'name', value: 'notes' })).toBe('driver.findElement(By.name("notes"))');
-    expect(se(role('row'))).toBe(`driver.findElement(By.xpath(${JSON.stringify(roleXp('row'))}))`);
-    expect(se(role('link', null, { nth: 1 }))).toBe(
-      `driver.findElement(By.xpath(${JSON.stringify(`(${roleXp('link')})[2]`)}))`
+    expect(se({ kind: 'xpath', value: '//a[@id="x"]' })).toBe(
+      'driver.findElement(By.xpath("//a[@id=\\"x\\"]"))'
     );
+    // Role, label and text targets call the Locatra helper class (C9.4).
+    expect(se(role('row'))).toBe('Locatra.find(driver, "role", "row", null, false, 0, 0)');
+    expect(se(role('link', null, { nth: 1 }))).toBe(
+      'Locatra.find(driver, "role", "link", null, false, 0, 1)'
+    );
+    expect(se(role('button', 'Save'))).toBe('Locatra.find(driver, "role", "button", "Save")');
+    expect(se(role('button', 'Save', { exact: true }))).toBe(
+      'Locatra.find(driver, "role", "button", "Save", true)'
+    );
+    expect(se(label('Email', { exact: true }))).toBe('Locatra.find(driver, "label", "Email", null, true)');
+    expect(se({ kind: 'text', value: 'Hi' })).toBe('Locatra.find(driver, "text", "Hi")');
     expect(se({ kind: 'placeholder', value: 'P' })).toBe(
       'driver.findElement(By.cssSelector("[placeholder*=\\"P\\"]"))'
     );
   });
 
-  it('scopes a chained child to its parent with a leading dot', () => {
-    const out = se(chain(testid('row-2'), role('button', 'Delete')));
-    expect(out).toMatch(
-      /^driver\.findElement\(By\.cssSelector\("\[data-testid=\\"row-2\\"\]"\)\)\.findElement\(By\.xpath\("\.\/\/\*\[/
+  it('roots a chained child at its parent (an XPath child with a leading dot)', () => {
+    expect(se(chain(testid('row-2'), role('button', 'Delete')))).toBe(
+      'Locatra.find(driver.findElement(By.cssSelector("[data-testid=\\"row-2\\"]")), "role", "button", "Delete")'
     );
-    expect(se(role('button', 'X'), true)).toMatch(/^driver\.findElement\(By\.xpath\("\.\/\/\*\[/);
+    expect(se(chain(role('row', 'Ada'), testid('x')))).toBe(
+      'Locatra.find(driver, "role", "row", "Ada").findElement(By.cssSelector("[data-testid=\\"x\\"]"))'
+    );
+    expect(se({ kind: 'xpath', value: '//td' }, true)).toBe('driver.findElement(By.xpath(".//td"))');
     expect(se({ kind: 'chain' })).toBe('');
     expect(se(chain(null, testid('c')))).toBe('driver.findElement(By.cssSelector("[data-testid=\\"c\\"]"))');
     expect(se(null)).toBe('');
@@ -602,11 +623,13 @@ describe('Selenium for Java statements', () => {
     );
     for (const inputType of ['range', 'color', 'date', 'time', 'datetime-local', 'month', 'week']) {
       const out = seStep({ action: 'fill', target: t, value: '5', inputType });
+      // The script is a class constant (LOCATRA_SET_VALUE_JS), declared once.
       expect(out).toMatch(
-        /^\(\(JavascriptExecutor\) driver\)\.executeScript\(".*", driver\.findElement\(.*\), "5"\);$/
+        /^\(\(JavascriptExecutor\) driver\)\.executeScript\(LOCATRA_SET_VALUE_JS, driver\.findElement\(.*\), "5"\);$/
       );
-      const script = javaString(out.match(/executeScript\(("(?:[^"\\]|\\.)*")/)[1]);
-      expect(script).toBe(C._internals.SET_VALUE_JS);
+      const file = C.testScript([{ action: 'fill', target: t, value: '5', inputType }], 'selenium', 'java');
+      const decl = /private static final String LOCATRA_SET_VALUE_JS = ("(?:[^"\\]|\\.)*");/.exec(file);
+      expect(javaString(decl[1])).toBe(C._internals.SET_VALUE_JS);
     }
     expect(seStep({ action: 'fill', target: t, value: 'x', inputType: 'text' })).toBe(
       block('el.clear();', 'el.sendKeys("x");')
@@ -725,7 +748,7 @@ describe('Selenium for Java statements', () => {
     ).toBe(
       [
         'driver.switchTo().frame(driver.findElement(By.cssSelector("#a")));',
-        `driver.switchTo().frame((WebElement) ((JavascriptExecutor) driver).executeScript(${JSON.stringify(C._internals.DEEP_IFRAME_JS)}, 2));`,
+        'driver.switchTo().frame((WebElement) ((JavascriptExecutor) driver).executeScript(LOCATRA_FRAME_JS, 2));',
         `${loc}.click();`,
         'driver.switchTo().defaultContent();',
       ].join('\n')
@@ -737,7 +760,7 @@ describe('Selenium for Java statements', () => {
         target: { kind: 'frame', selector: null, index: 'junk', child: t },
       }).split('\n')[0]
     ).toBe(
-      `driver.switchTo().frame((WebElement) ((JavascriptExecutor) driver).executeScript(${JSON.stringify(C._internals.DEEP_IFRAME_JS)}, 0));`
+      'driver.switchTo().frame((WebElement) ((JavascriptExecutor) driver).executeScript(LOCATRA_FRAME_JS, 0));'
     );
   });
 
@@ -764,7 +787,7 @@ describe('Selenium for Java statements', () => {
     const note =
       '// NOTE: this role locator has no accessible name and may match several elements; the first match is used.';
     expect(seStep({ action: 'click', target: role('row') })).toBe(
-      `${note}\ndriver.findElement(By.xpath(${JSON.stringify(roleXp('row'))})).click();`
+      `${note}\nLocatra.find(driver, "role", "row", null, false, 0, 0).click();`
     );
     expect(seStep({ action: 'click', target: frame('#f', role('row')) }).split('\n')[1]).toBe(note);
     expect(seStep({ action: 'click', target: role('row', null, { matchCount: 1 }) })).not.toContain('NOTE');
@@ -891,11 +914,18 @@ describe('Selenium for Java test file', () => {
       'import org.junit.jupiter.api.BeforeEach;',
       'import org.junit.jupiter.api.Test;',
       'import org.openqa.selenium.By;',
+      'import org.openqa.selenium.JavascriptExecutor;',
+      'import org.openqa.selenium.NoSuchElementException;',
+      'import org.openqa.selenium.SearchContext;',
       'import org.openqa.selenium.WebDriver;',
+      'import org.openqa.selenium.WebDriverException;',
       'import org.openqa.selenium.WebElement;',
+      'import org.openqa.selenium.WrapsDriver;',
       'import org.openqa.selenium.chrome.ChromeDriver;',
       '',
       'import java.time.Duration;',
+      'import java.util.ArrayList;',
+      'import java.util.List;',
       '',
       'import static org.junit.jupiter.api.Assertions.assertEquals;',
       '',
@@ -918,20 +948,21 @@ describe('Selenium for Java test file', () => {
       '    void recordedTest() {',
       '        driver.get("https://shop.example/");',
       '        {',
-      '            WebElement el = driver.findElement(By.xpath(',
+      '            WebElement el = Locatra.find(driver, "label", "First name");',
     ].join('\n');
     expect(out.startsWith(head)).toBe(true);
-    expect(
-      out.endsWith(
-        [
-          '        assertEquals("Saved", driver.findElement(By.cssSelector("[data-testid=\\"done\\"]")).getText()' +
-            '.replaceAll("[\\\\u00ad\\\\u200b]", "").replaceAll("(?U)\\\\s+", " ").trim());',
-          '    }',
-          '}',
-          '',
-        ].join('\n')
-      )
-    ).toBe(true);
+    expect(out).toContain(
+      [
+        '        assertEquals("Saved", driver.findElement(By.cssSelector("[data-testid=\\"done\\"]")).getText()' +
+          '.replaceAll("[\\\\u00ad\\\\u200b]", "").replaceAll("(?U)\\\\s+", " ").trim());',
+        '    }',
+        '',
+        "    // Locatra: the one element a role / label / text locator matches, found the way Playwright's",
+      ].join('\n')
+    );
+    // The helper class closes the test class, declared once.
+    expect(out.match(/^ {4}static final class Locatra \{$/gm)).toHaveLength(1);
+    expect(out.endsWith('        }\n    }\n}\n')).toBe(true);
     expect(out).toContain('            el.clear();\n            el.sendKeys("Ada");\n        }\n');
   });
 
@@ -1171,13 +1202,21 @@ describe('page objects: exact output', () => {
     const code = C.pageObject(SMALL, 'selenium', 'java');
     const xpath = C.locatorExpr(SMALL.elements[0].target, 'selenium', 'java');
     const button = C.locatorExpr(SMALL.elements[1].target, 'selenium', 'java');
-    expect(code).toBe(
+    expect(xpath).toBe('Locatra.find(driver, "label", "Email address")');
+    expect(code.slice(0, code.indexOf('    // Locatra: the one element'))).toBe(
       [
         '// Page Object generated by Locatra for "Checkout | Shop".',
         '// Page: https://shop.example/checkout',
-        'import org.openqa.selenium.By;',
+        'import org.openqa.selenium.JavascriptExecutor;',
+        'import org.openqa.selenium.NoSuchElementException;',
+        'import org.openqa.selenium.SearchContext;',
         'import org.openqa.selenium.WebDriver;',
+        'import org.openqa.selenium.WebDriverException;',
         'import org.openqa.selenium.WebElement;',
+        'import org.openqa.selenium.WrapsDriver;',
+        '',
+        'import java.util.ArrayList;',
+        'import java.util.List;',
         '',
         'public class CheckoutPage {',
         '    public final WebDriver driver;',
@@ -1207,10 +1246,11 @@ describe('page objects: exact output', () => {
         '    public void clickPlaceOrderButton() {',
         '        placeOrderButton().click();',
         '    }',
-        '}',
+        '',
         '',
       ].join('\n')
     );
+    expect(code.endsWith('        }\n    }\n}\n')).toBe(true);
   });
 
   it('is deterministic and handles an empty or missing model', () => {
@@ -1341,14 +1381,17 @@ describe('page objects: members and helpers', () => {
       '    public WebElement placeOrderButton() {\n        driver.switchTo().defaultContent();\n        return driver.findElement(By.cssSelector("[data-testid=\\"place-order\\"]"));\n    }'
     );
     expect(code).toContain(
-      `        driver.switchTo().frame((WebElement) ((JavascriptExecutor) driver).executeScript(${JSON.stringify(C._internals.DEEP_IFRAME_JS)}, 2));\n        return driver.findElement(By.xpath(`
+      '        driver.switchTo().frame((WebElement) ((JavascriptExecutor) driver).executeScript(LOCATRA_FRAME_JS, 2));\n        return Locatra.find(driver, "text", "Go", null, true);'
+    );
+    expect(code).toContain(
+      `    private static final String LOCATRA_FRAME_JS = ${JSON.stringify(C._internals.DEEP_IFRAME_JS)};`
     );
   });
 
   it('sets range values through the value setter, selects by text, toggles only when needed', () => {
     const code = seCode();
     expect(code).toContain(
-      `    public void fillQtyInput(String value) {\n        ((JavascriptExecutor) driver).executeScript(${JSON.stringify(C._internals.SET_VALUE_JS)}, qtyInput(), value);\n    }`
+      '    public void fillQtyInput(String value) {\n        ((JavascriptExecutor) driver).executeScript(LOCATRA_SET_VALUE_JS, qtyInput(), value);\n    }'
     );
     expect(code).toContain(
       '    public void selectCountrySelect(String value) {\n        new Select(countrySelect()).selectByVisibleText(value);\n    }'
@@ -1361,7 +1404,9 @@ describe('page objects: members and helpers', () => {
     );
     for (const imp of ['JavascriptExecutor', 'support.ui.Select'])
       expect(code).toContain(`import org.openqa.selenium.${imp};`);
-    expect(C.pageObject(SMALL, 'selenium', 'java')).not.toMatch(/JavascriptExecutor|Select;/);
+    expect(
+      C.pageObject({ elements: [{ name: 'x', kind: 'button', target: testid('x') }] }, 'selenium', 'java')
+    ).not.toMatch(/JavascriptExecutor|Select;/);
   });
 
   it('never emits a Java keyword or a member every page object has', () => {
@@ -1611,6 +1656,13 @@ describe.skipIf(!JAVA)('javac compiles every generated file (-Xlint:all -Werror)
       { className: 'Page', elements: [{ name: 'go', kind: 'button', target: role('button', 'Go') }] },
       'playwright'
     );
+    // The C9.4 corpus: every target kind × every action, the Locatra helper class and
+    // its overloads, the frame / value-setter constants, deep shadow chains, XPath.
+    for (const fw of ['playwright', 'selenium']) {
+      addTest(C.testScript(CORPUS.STEPS, fw, 'java'));
+      addTest(C.testScript(CORPUS.STEPS, fw, 'java', { variables: true }));
+      addPo({ ...CORPUS.MODEL, className: `${fw} corpus` }, fw);
+    }
     const out = join(workDir, 'out');
     let output = '';
     try {
@@ -1634,6 +1686,6 @@ describe.skipIf(!JAVA)('javac compiles every generated file (-Xlint:all -Werror)
       throw new Error(`javac failed:\n${err.stdout}${err.stderr}`);
     }
     expect(output).toBe('');
-    expect(files.length).toBe(n + 11);
+    expect(files.length).toBe(n + 13);
   }, 180_000);
 });

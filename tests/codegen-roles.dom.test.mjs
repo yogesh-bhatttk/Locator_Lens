@@ -1,16 +1,16 @@
 // @vitest-environment jsdom
 //
-// Role parity between the locator engine and the Selenium / WebdriverIO / Cypress role
-// selectors (codegen.js roleNodeXpath, roleCss + the locatraRole() Cypress helper).
-// Every row of the engine's Playwright-verified role tables
-// (tests/locator-engine-roles.dom.test.mjs, read from that file so the two can never
-// drift apart) and the extra rows below is rendered, and for EVERY role the codegen
-// knows, the element set the engine assigns that role to must equal the set the XPath
-// selects and the set Cypress keeps (its CSS candidates filtered by locatraRole()).
-// A selector that misses an element the engine gave a role made the exported test
-// fail to find what Playwright finds; one that matches more made `nth` and "first
-// match" point at a different element. Checking every role, not just the row's, also
-// covers the rows whose subject has no role (a header inside an article, a lone <th>).
+// Role parity between the locator engine and the Locatra helpers' in-page matcher
+// (codegen.js MATCH_SRC, which every non-Playwright target runs: locatraFind /
+// locatra_find / Locatra.find / Locatra.Find / locatraGet). Every row of the engine's
+// Playwright-verified role tables (tests/locator-engine-roles.dom.test.mjs, read from
+// that file so the two can never drift apart) and the extra rows below is rendered,
+// and for EVERY role the element set the engine resolves getByRole(role) to must equal
+// the set the matcher finds. A matcher that misses an element the engine gave a role
+// made the exported test fail to find what Playwright finds; one that matches more
+// made `nth` and "exactly one" disagree with the panel. Checking every role, not just
+// the row's, also covers the rows whose subject has no role (a header inside an
+// article, a lone <th>). (The role XPath this used to check is gone: C9.4.)
 import { readFileSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -22,7 +22,7 @@ const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 let E;
 let I;
 let C;
-let locatraRole;
+let matchScript;
 beforeAll(async () => {
   vm.runInThisContext(readFileSync(join(ROOT, 'src/content-locator-engine.js'), 'utf8'), {
     filename: 'src/content-locator-engine.js',
@@ -31,8 +31,10 @@ beforeAll(async () => {
   await import('../src/codegen.js');
   C = globalThis.LLCodegen;
   I = C._internals;
-  // The helper exactly as a JavaScript Cypress spec declares it.
-  locatraRole = new Function(`${I.cyRoleSource('javascript')}\nreturn locatraRole;`)();
+  // The matcher exactly as WebDriver runs it (executeScript(MATCH_JS, …)).
+  matchScript = new Function(I.MATCH_JS);
+  const real = window.getComputedStyle.bind(window);
+  window.getComputedStyle = (el, pseudo) => (pseudo ? null : real(el));
 });
 
 /** Every `// pw-verified:roles` table of the engine's role tests, row by row. */
@@ -109,25 +111,24 @@ const EXTRA = [
   ['<div role="heading" aria-level="7" id="subject">Summary</div><h2>Summary</h2>', 'heading'],
 ];
 
-// Explicit-only roles (no native element) checked alongside the native ones.
-const EXTRA_ROLES = ['switch', 'tab', 'menuitem', 'note', 'none', 'presentation'];
+// Every role the engine can give an element.
+const ROLES = (
+  'alert alertdialog application article banner blockquote button caption cell checkbox code columnheader ' +
+  'combobox complementary contentinfo definition deletion dialog directory document emphasis feed figure form ' +
+  'generic grid gridcell group heading img insertion link list listbox listitem log main mark marquee math meter ' +
+  'menu menubar menuitem menuitemcheckbox menuitemradio navigation none note option paragraph presentation ' +
+  'progressbar radio radiogroup region row rowgroup rowheader scrollbar search searchbox separator slider ' +
+  'spinbutton status strong subscript superscript switch tab table tablist tabpanel term textbox time timer ' +
+  'toolbar tooltip tree treegrid treeitem'
+).split(' ');
 
-function rolesToCheck() {
-  return I.NATIVE_ROLES.concat(EXTRA_ROLES).filter((r) => r !== 'none' && r !== 'presentation');
+/** What getByRole(role) resolves to in the engine (hidden elements skipped). */
+function engineRole(role, level) {
+  return E.resolveTarget({ kind: 'role', role, ...(level ? { level } : {}) });
 }
 
-function elementsWithRole(role) {
-  return [...document.querySelectorAll('*')].filter((el) => E.getRole(el) === role);
-}
-
-function byXpath(xpath) {
-  const r = document.evaluate(xpath, document, null, 7, null);
-  return Array.from({ length: r.snapshotLength }, (_, i) => r.snapshotItem(i));
-}
-
-/** What a Cypress role locator keeps: its CSS candidates, filtered by locatraRole(). */
-function byCypress(role, level) {
-  return [...document.querySelectorAll(I.roleCss(role, level))].filter((el) => locatraRole(el) === role);
+function byMatcher(role, level = 0) {
+  return matchScript('role', role, null, false, level, null);
 }
 
 function render(html) {
@@ -136,7 +137,7 @@ function render(html) {
 
 const ids = (els) => els.map((e) => e.id || e.localName);
 
-describe('the role selectors select what the engine (and Playwright) call that role', () => {
+describe('the matcher gives every element the role the engine (and Playwright) gives it', () => {
   const rows = pwVerifiedRows();
 
   it('reads the engine tables', () => {
@@ -157,30 +158,8 @@ describe('the role selectors select what the engine (and Playwright) call that r
 
   it.each(cases)('%s: %s', (table, html) => {
     render(html);
-    for (const role of rolesToCheck()) {
-      const want = ids(elementsWithRole(role));
-      expect(ids(byXpath(`//*[${I.roleNodeXpath(role)}]`)), `XPath ${role}`).toEqual(want);
-      expect(ids(byCypress(role)), `Cypress ${role}`).toEqual(want);
-      // The CSS alone may select more, never less: the filter can only take away.
-      const css = new Set(document.querySelectorAll(I.roleCss(role)));
-      expect(
-        elementsWithRole(role).every((el) => css.has(el)),
-        `CSS candidates ${role}`
-      ).toBe(true);
-    }
-  });
-
-  it('skips only the shadow-DOM rows (a document-level selector cannot see into them; C3 covers it)', () => {
-    const shadow = rows.filter(([, , role, opts]) => opts && opts.shadow);
-    expect(shadow.map((r) => r[2])).toEqual([null, 'banner']);
-  });
-
-  it('locatraRole() is the engine role on every row, element by element', () => {
-    for (const [, html] of cases) {
-      render(html);
-      for (const el of document.querySelectorAll('*')) {
-        expect(locatraRole(el), `${html} <${el.localName}>`).toBe(E.getRole(el));
-      }
+    for (const role of ROLES) {
+      expect(ids(byMatcher(role)), role).toEqual(ids(engineRole(role)));
     }
   });
 });
@@ -192,22 +171,20 @@ describe('explicit role attributes', () => {
         '<div role=" checkbox  " id="c">z</div><div role="checkboxes" id="d">no</div>' +
         '<div role="switch checkbox" id="e">no</div>'
     );
-    expect(ids(elementsWithRole('checkbox'))).toEqual(['a', 'b', 'c']);
-    expect(ids(byCypress('checkbox'))).toEqual(['a', 'b', 'c']);
-    expect(ids(byXpath(`//*[${I.roleNodeXpath('checkbox')}]`))).toEqual(['a', 'b', 'c']);
+    expect(ids(byMatcher('checkbox'))).toEqual(['a', 'b', 'c']);
+    expect(ids(engineRole('checkbox'))).toEqual(['a', 'b', 'c']);
   });
 
-  // The XPath reads only the first role token against the valid roles; a role
-  // attribute starting with an unknown token is matched by its later tokens without
-  // telling which comes first (Cypress, running the engine's function, is exact).
-  it('after an unknown first token, the XPath does not tell later tokens apart (documented)', () => {
+  // The role XPath read only the first token and could not tell later tokens apart
+  // (role="foo switch checkbox" matched checkbox); the matcher walks every token, as
+  // Playwright does.
+  it('takes the first valid token, wherever it is', () => {
     render('<div role="foo switch checkbox" id="s">x</div><button role="foo bar" id="b">y</button>');
     expect(E.getRole(document.getElementById('s'))).toBe('switch');
     expect(E.getRole(document.getElementById('b'))).toBe('button');
-    expect(ids(byXpath(`//*[${I.roleNodeXpath('checkbox')}]`))).toEqual(['s']);
-    expect(ids(byXpath(`//*[${I.roleNodeXpath('button')}]`))).toEqual([]);
-    expect(ids(byCypress('checkbox'))).toEqual([]);
-    expect(ids(byCypress('button'))).toEqual(['b']);
+    expect(ids(byMatcher('checkbox'))).toEqual([]);
+    expect(ids(byMatcher('switch'))).toEqual(['s']);
+    expect(ids(byMatcher('button'))).toEqual(['b']);
   });
 
   it('narrow a heading by level: the tag for <h1>–<h6>, else aria-level, up to 99', () => {
@@ -216,13 +193,12 @@ describe('explicit role attributes', () => {
         '<h3 role="heading" aria-level="2" id="t">t</h3><h2 role="heading" id="r">r</h2>' +
         '<div role="heading" aria-level="7" id="s">Summary</div>'
     );
-    const level = (lv) => ids(byXpath(`//*[${I.roleNodeXpath('heading', lv)}]`));
-    expect(level(2)).toEqual(['h', 'n', 'r']);
-    expect(ids(byCypress('heading', 2))).toEqual(['h', 'n', 'r']);
-    expect(level(7)).toEqual(['s']);
-    expect(ids(byCypress('heading', 7))).toEqual(['s']);
-    expect(level(3)).toEqual(['o', 't']);
-    expect(I.roleCss('heading', '2"]')).toBe(I.roleCss('heading'));
+    for (const level of [2, 3, 7]) {
+      expect(ids(byMatcher('heading', level)), String(level)).toEqual(ids(engineRole('heading', level)));
+    }
+    expect(ids(byMatcher('heading', 2))).toEqual(['h', 'n', 'r']);
+    expect(ids(byMatcher('heading', 7))).toEqual(['s']);
+    expect(ids(byMatcher('heading', 3))).toEqual(['o', 't']);
     expect(I.headingLevel(99)).toBe(99);
     expect(I.headingLevel(100)).toBe(0);
   });
@@ -261,38 +237,43 @@ describe('the rows the audit found', () => {
     ['<math id="m"><mi>x</mi></math>', 'math', ['m']],
   ])('%s → %s', (html, role, want) => {
     render(html);
-    expect(ids(elementsWithRole(role))).toEqual(want);
-    expect(ids(byCypress(role)), 'Cypress').toEqual(want);
-    expect(ids(byXpath(`//*[${I.roleNodeXpath(role)}]`)), 'XPath').toEqual(want);
+    expect(ids(engineRole(role))).toEqual(want);
+    expect(ids(byMatcher(role)), 'matcher').toEqual(want);
   });
 });
 
-describe('every framework uses the exact form', () => {
-  it('Selenium and WebdriverIO use the role XPath, named or not; Cypress filters by locatraRole()', () => {
+describe('every framework but Playwright uses the helper', () => {
+  it('Selenium, WebdriverIO and Cypress call it, named or not; Playwright keeps getByRole', () => {
     const t = { kind: 'role', role: 'checkbox' };
-    expect(C.locatorExpr(t, 'selenium', 'javascript')).toContain("By.xpath('//*[");
+    expect(C.locatorExpr(t, 'selenium', 'javascript')).toBe(
+      "locatraFind(driver, 'role', 'checkbox', null, { nth: 0 })"
+    );
     expect(C.locatorExpr(t, 'cypress', 'javascript')).toBe(
-      'cy.get(\'input[type="checkbox"], [role~="checkbox"]\').filter((_, el) => locatraRole(el) === \'checkbox\').first()'
+      "locatraGet('role', 'checkbox', null, { nth: 0 })"
     );
-    // An unknown role has no helper verdict: its CSS stands alone.
+    expect(C.locatorExpr(t, 'playwright', 'javascript')).toBe("page.getByRole('checkbox')");
+    // An unknown role is passed through; the matcher (like Playwright) gives it to nothing.
     expect(C.locatorExpr({ kind: 'role', role: 'doc-tip' }, 'cypress', 'javascript')).toBe(
-      'cy.get(\'[role~="doc-tip"]\').first()'
+      "locatraGet('role', 'doc-tip', null, { nth: 0 })"
     );
+    render('<div role="doc-tip" id="x">t</div>');
+    expect(byMatcher('doc-tip')).toEqual([]);
   });
 
-  it('declares locatraRole() once, before the name helper, only when a role locator needs it', () => {
+  it('declares the helper once, only when a role / label / text locator needs it', () => {
     const steps = [
       { action: 'click', target: { kind: 'role', role: 'button', name: 'Go' } },
       { action: 'click', target: { kind: 'role', role: 'link' } },
     ];
     const spec = C.testScript(steps, 'cypress', 'typescript');
-    expect(spec.match(/function locatraRole\(el: Element\): string \| null \{/g)).toHaveLength(1);
-    expect(spec.indexOf('function locatraRole')).toBeLessThan(spec.indexOf('function locatraMatch'));
+    expect(spec.match(/function locatraMatch\(/g)).toHaveLength(1);
+    expect(spec.match(/function locatraGet\(/g)).toHaveLength(1);
+    expect(spec.indexOf('function locatraMatch')).toBeLessThan(spec.indexOf('function locatraGet'));
     const plain = C.testScript(
       [{ action: 'click', target: { kind: 'testid', attr: 'data-testid', value: 'x' } }],
       'cypress',
       'javascript'
     );
-    expect(plain).not.toContain('locatraRole');
+    expect(plain).not.toContain('locatra');
   });
 });

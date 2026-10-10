@@ -14,11 +14,11 @@ import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 
 import { csproj, runsettings, chromeWrapper, scaffold, PACKAGES } from '../scripts/e2e/runners/csharp.mjs';
 import { dotnetEnv, findDotnet } from '../scripts/e2e/setup-csharp.mjs';
+import * as CORPUS from './codegen-corpus.mjs';
+import { helperCallSpan } from './codegen-helper-calls.mjs';
 
 let C;
 let X;
-// The role XPath every Selenium-family target uses (codegen.js roleNodeXpath).
-const roleXp = (r, level) => `//*[${C._internals.roleNodeXpath(r, level)}]`;
 beforeAll(async () => {
   await import('../src/codegen.js');
   await import('../src/codegen-csharp.js');
@@ -43,7 +43,20 @@ const id = (value) => ({ kind: 'id', value });
 const PY_BY = { XPATH: 'XPath', CSS_SELECTOR: 'CssSelector', ID: 'Id', NAME: 'Name' };
 const pyString = (lit) =>
   JSON.parse(lit.replace(/\\(x([0-9a-f]{2})|.)/g, (m, e, hex) => (hex ? `\\u00${hex}` : m)));
+// A Python helper call becomes Locatra.Find(root, "kind", "value", "name"?, exact:, level:, nth:).
 function pyToCs(expr) {
+  const span = helperCallSpan(expr, 'python');
+  if (span) {
+    const c = span.call;
+    const args = [pyToCs(c.root), X.q(c.kind), X.q(c.value)];
+    if (c.name != null) args.push(X.q(c.name));
+    if (c.exact) args.push('exact: true');
+    if (c.level) args.push(`level: ${c.level}`);
+    if (c.nth >= 0) args.push(`nth: ${c.nth}`);
+    return (
+      pyToCs(expr.slice(0, span.start)) + `Locatra.Find(${args.join(', ')})` + pyToCs(expr.slice(span.end))
+    );
+  }
   return expr.replace(
     /(driver)?\.find_element\(By\.(XPATH|CSS_SELECTOR|ID|NAME), ("(?:[^"\\]|\\.)*")\)/g,
     (m, root, by, lit) => `${root ?? ''}.FindElement(By.${PY_BY[by]}(${X.q(pyString(lit))}))`
@@ -81,7 +94,7 @@ describe('registration', () => {
   it('leaves the built-in languages untouched', () => {
     const t = role('button', 'Go');
     expect(C.locatorExpr(t, 'playwright', 'typescript')).toBe("page.getByRole('button', { name: 'Go' })");
-    expect(C.locatorExpr(t, 'selenium', 'python')).toMatch(/^driver\.find_element\(By\.XPATH, /);
+    expect(C.locatorExpr(t, 'selenium', 'python')).toBe('locatra_find(driver, "role", "button", "Go")');
   });
 });
 
@@ -211,12 +224,15 @@ describe('Playwright for .NET locators', () => {
     }
   });
 
-  it('falls back to the role selector for a role AriaRole lacks', () => {
-    expect(PW(role('mark'))).toBe(`Page.Locator(${JSON.stringify(`xpath=${roleXp('mark')}`)})`);
-    expect(PW(role('x-widget', 'Go', { nth: 2 }))).toBe(
-      `Page.Locator(${JSON.stringify(`xpath=${roleXp('x-widget')}`)}).Filter(new() { HasText = "Go" }).Nth(2)`
+  // The selector Playwright's own GetByRole() builds (as the Java target writes it).
+  it('falls back to the internal:role selector for a role AriaRole lacks', () => {
+    expect(PW(role('mark'))).toBe('Page.Locator("internal:role=mark")');
+    expect(PW(role('x-widget', 'Go "x"', { nth: 2, exact: true, level: 3 }))).toBe(
+      'Page.Locator(@"internal:role=x-widget[name=""Go \\""x\\""""s][level=3]").Nth(2)'
     );
-    expect(PW({ kind: 'role' })).toBe('Page.Locator("xpath=//*[false()]")');
+    expect(PW(role('x-widget', 'Go'))).toBe('Page.Locator("internal:role=x-widget[name=\\"Go\\"i]")');
+    expect(PW({ kind: 'role' })).toBe('Page.Locator("internal:role=")');
+    expect(PW({ kind: 'xpath', value: '//a[@id="x"]' })).toBe('Page.Locator("xpath=//a[@id=\\"x\\"]")');
   });
 
   it('escapes hostile values in every literal', () => {
@@ -434,6 +450,8 @@ describe('Selenium for C# locators', () => {
     { kind: 'chain', parent: role('row', 'Ada'), child: label('Qty') },
     { kind: 'chain', parent: null, child: role('button', 'Go') },
     { kind: 'chain', parent: testid('p') },
+    { kind: 'xpath', value: '//a[@title="it\'s"]' },
+    { kind: 'chain', parent: testid('row'), child: { kind: 'xpath', value: '//td[2]' } },
   ];
 
   it('emits exactly the selectors Selenium JS/Python emit', () => {
@@ -446,45 +464,42 @@ describe('Selenium for C# locators', () => {
     }
   });
 
-  // codegen.js renders the parent of a chain nested inside another chain with an
-  // absolute //* XPath, which searches the whole document from the outer element;
-  // here the inner parent stays scoped to the outer one.
+  // Each part of a nested chain is rooted at the one before it.
   it('keeps a nested chain scoped to its outer parent', () => {
     const t = {
       kind: 'chain',
       parent: testid('table'),
       child: { kind: 'chain', parent: role('row', 'Ada'), child: { kind: 'text', value: 'Edit' } },
     };
-    const out = SEL(t);
-    expect(
-      out.startsWith(
-        'driver.FindElement(By.CssSelector("[data-testid=\\"table\\"]")).FindElement(By.XPath(".//*['
-      )
-    ).toBe(true);
-    expect(out.match(/By\.XPath\("\.\/\/\*/g)).toHaveLength(2);
+    expect(SEL(t)).toBe(
+      'Locatra.Find(Locatra.Find(driver.FindElement(By.CssSelector("[data-testid=\\"table\\"]")), "role", "row", "Ada"), "text", "Edit")'
+    );
   });
 
   it('spells By the .NET way', () => {
     expect(SEL(testid('save'))).toBe('driver.FindElement(By.CssSelector("[data-testid=\\"save\\"]"))');
     expect(SEL(id('main'))).toBe('driver.FindElement(By.Id("main"))');
     expect(SEL({ kind: 'name', value: 'q' })).toBe('driver.FindElement(By.Name("q"))');
-    expect(SEL(role('row'))).toBe(`driver.FindElement(By.XPath(${JSON.stringify(roleXp('row'))}))`);
+    expect(SEL({ kind: 'xpath', value: '//td' })).toBe('driver.FindElement(By.XPath("//td"))');
+    // Role, label and text targets call the Locatra helper class (C9.4).
+    expect(SEL(role('row'))).toBe('Locatra.Find(driver, "role", "row", nth: 0)');
     expect(SEL({ kind: 'text', value: 'Go', exact: true })).toBe(
-      'driver.FindElement(By.XPath("//*[not(ancestor-or-self::head or self::script or self::style or self::noscript or self::template) and ' +
-        'normalize-space(translate(., \\"\\u00A0\\u202F\\u00AD\\u200B\\", \\"  \\"))=\\"Go\\" and not(.//*[not(self::script or self::style or ' +
-        'self::noscript or self::template) and normalize-space(translate(., \\"\\u00A0\\u202F\\u00AD\\u200B\\", \\"  \\"))=\\"Go\\"])]"))'
+      'Locatra.Find(driver, "text", "Go", exact: true)'
+    );
+    expect(SEL(role('heading', 'T', { level: 2 }))).toBe(
+      'Locatra.Find(driver, "role", "heading", "T", level: 2)'
     );
     expect(SEL(id('a:b'))).toBe('driver.FindElement(By.Id("a:b"))');
     expect(SEL(null)).toBe('');
   });
 
-  it('scopes a chained child XPath to its parent with a leading dot', () => {
-    const out = SEL({ kind: 'chain', parent: testid('row'), child: { kind: 'text', value: 'Go' } });
-    expect(
-      out.startsWith(
-        'driver.FindElement(By.CssSelector("[data-testid=\\"row\\"]")).FindElement(By.XPath(".//*['
-      )
-    ).toBe(true);
+  it('roots a chained child at its parent (an XPath child with a leading dot)', () => {
+    expect(SEL({ kind: 'chain', parent: testid('row'), child: { kind: 'text', value: 'Go' } })).toBe(
+      'Locatra.Find(driver.FindElement(By.CssSelector("[data-testid=\\"row\\"]")), "text", "Go")'
+    );
+    expect(SEL({ kind: 'chain', parent: testid('row'), child: { kind: 'xpath', value: '//td' } })).toBe(
+      'driver.FindElement(By.CssSelector("[data-testid=\\"row\\"]")).FindElement(By.XPath(".//td"))'
+    );
   });
 
   it("renders a frame target's inner element (switching is a statement)", () => {
@@ -549,7 +564,7 @@ describe('Selenium for C# statements', () => {
     );
     for (const inputType of ['range', 'color', 'date', 'time', 'datetime-local', 'month', 'week']) {
       expect(sel({ action: 'fill', target: t, value: '2024-01-31', inputType })).toBe(
-        `((IJavaScriptExecutor)driver).ExecuteScript(${X.q(C._internals.SET_VALUE_JS)}, ${L}, "2024-01-31");`
+        `((IJavaScriptExecutor)driver).ExecuteScript(LocatraSetValueJs, ${L}, "2024-01-31");`
       );
     }
     expect(sel({ action: 'fill', target: t, value: 'x', inputType: 'text' })).toContain('el.SendKeys("x");');
@@ -560,7 +575,7 @@ describe('Selenium for C# statements', () => {
       `{\n    var el = ${L};\n    el.Clear();\n    el.SendKeys(Environment.GetEnvironmentVariable("LOCATRA_PASSWORD") ?? "");\n}`
     );
     expect(sel({ action: 'fill', target: t, sensitive: true, secretName: 'PIN', inputType: 'range' })).toBe(
-      `((IJavaScriptExecutor)driver).ExecuteScript(${X.q(C._internals.SET_VALUE_JS)}, ${L}, Environment.GetEnvironmentVariable("PIN") ?? "");`
+      `((IJavaScriptExecutor)driver).ExecuteScript(LocatraSetValueJs, ${L}, Environment.GetEnvironmentVariable("PIN") ?? "");`
     );
   });
 
@@ -600,8 +615,8 @@ describe('Selenium for C# statements', () => {
       'new Actions(driver).KeyDown(Keys.Shift).SendKeys(Keys.Tab).KeyUp(Keys.Shift).Perform();'
     );
     expect(p('Control+Alt+Shift+Meta+Enter')).toBe(
-      'new Actions(driver).KeyDown(Keys.Control).KeyDown(Keys.Alt).KeyDown(Keys.Shift).KeyDown(Keys.Meta)' +
-        '.SendKeys(Keys.Enter).KeyUp(Keys.Meta).KeyUp(Keys.Shift).KeyUp(Keys.Alt).KeyUp(Keys.Control).Perform();'
+      'new Actions(driver).KeyDown(Keys.Control).KeyDown(Keys.Alt).KeyDown(Keys.Shift).KeyDown(Keys.Meta)\n' +
+        '    .SendKeys(Keys.Enter).KeyUp(Keys.Meta).KeyUp(Keys.Shift).KeyUp(Keys.Alt).KeyUp(Keys.Control).Perform();'
     );
     expect(p('Control++')).toBe(
       'new Actions(driver).KeyDown(Keys.Control).SendKeys("+").KeyUp(Keys.Control).Perform();'
@@ -683,7 +698,7 @@ describe('Selenium for C# statements', () => {
   it('notes an unnamed role locator that may match several elements', () => {
     expect(sel({ action: 'click', target: role('button') })).toBe(
       '// NOTE: this role locator has no accessible name and may match several elements; the first match is used.\n' +
-        `driver.FindElement(By.XPath(${JSON.stringify(roleXp('button'))})).Click();`
+        'Locatra.Find(driver, "role", "button", nth: 0).Click();'
     );
     expect(sel({ action: 'click', target: role('button', null, { matchCount: 1 }) })).not.toContain('NOTE');
     expect(sel({ action: 'click', target: role('button', null, { unique: true }) })).not.toContain('NOTE');
@@ -719,12 +734,12 @@ describe('Selenium for C# frames', () => {
 
   it('addresses a cross-origin frame by index', () => {
     expect(fill({ kind: 'frame', selector: null, index: 2, child: inner })).toBe(
-      `driver.SwitchTo().Frame((IWebElement)((IJavaScriptExecutor)driver).ExecuteScript(${JSON.stringify(C._internals.DEEP_IFRAME_JS)}, 2)!);\n` +
+      'driver.SwitchTo().Frame((IWebElement)((IJavaScriptExecutor)driver).ExecuteScript(LocatraFrameJs, 2)!);\n' +
         FILL +
         '\ndriver.SwitchTo().DefaultContent();'
     );
     expect(fill({ kind: 'frame', child: inner }).split('\n')[0]).toBe(
-      `driver.SwitchTo().Frame((IWebElement)((IJavaScriptExecutor)driver).ExecuteScript(${JSON.stringify(C._internals.DEEP_IFRAME_JS)}, 0)!);`
+      'driver.SwitchTo().Frame((IWebElement)((IJavaScriptExecutor)driver).ExecuteScript(LocatraFrameJs, 0)!);'
     );
   });
 
@@ -765,7 +780,7 @@ describe('Selenium for C# frames', () => {
     expect(
       fill({ kind: 'frame', selector: null, index: 3, shadowPath: ['a-b', 'iframe'], child: inner })
     ).toContain(
-      `driver.SwitchTo().Frame((IWebElement)((IJavaScriptExecutor)driver).ExecuteScript(${JSON.stringify(C._internals.DEEP_IFRAME_JS)}, 3)!);`
+      'driver.SwitchTo().Frame((IWebElement)((IJavaScriptExecutor)driver).ExecuteScript(LocatraFrameJs, 3)!);'
     );
   });
 
@@ -777,7 +792,7 @@ describe('Selenium for C# frames', () => {
     expect(out.split('\n')).toEqual([
       'driver.SwitchTo().Frame(driver.FindElement(By.CssSelector("#f")));',
       '// NOTE: this role locator has no accessible name and may match several elements; the first match is used.',
-      `driver.FindElement(By.XPath(${JSON.stringify(roleXp('row'))})).Click();`,
+      'Locatra.Find(driver, "role", "row", nth: 0).Click();',
       'driver.SwitchTo().DefaultContent();',
     ]);
   });
@@ -1029,7 +1044,7 @@ describe('test-data variables', () => {
       'el.SendKeys(TestData["firstName"]);'
     );
     expect(sel({ action: 'fill', target: id('a'), value: 'x', varRef: 'v', inputType: 'date' })).toBe(
-      `((IJavaScriptExecutor)driver).ExecuteScript(${X.q(C._internals.SET_VALUE_JS)}, driver.FindElement(By.Id("a")), TestData["v"]);`
+      '((IJavaScriptExecutor)driver).ExecuteScript(LocatraSetValueJs, driver.FindElement(By.Id("a")), TestData["v"]);'
     );
     expect(sel({ action: 'selectOption', target: id('a'), value: 'x', varRef: 'country' })).toBe(
       'new SelectElement(driver.FindElement(By.Id("a"))).SelectByText(TestData["country"]);'
@@ -1069,7 +1084,7 @@ describe('test-data variables', () => {
     for (const opts of [undefined, {}, { variables: false }, { variables: [] }]) {
       const lit = C.testScript(steps, 'selenium', 'csharp', opts);
       expect(lit).not.toContain('TestData');
-      expect(lit).not.toContain('System.Collections.Generic');
+      expect(lit).not.toContain('IReadOnlyDictionary');
       expect(lit).toContain('el.SendKeys("Ada");');
     }
   });
@@ -1234,15 +1249,22 @@ describe('page objects: exact output', () => {
   });
 
   it('renders the Selenium class with lazy lookups', () => {
-    const name = C.locatorExpr(label('Email address'), 'selenium', 'csharp').replace(/^driver\./, 'Driver.');
+    // The members are rooted at the Driver property.
+    const name = C.locatorExpr(label('Email address'), 'selenium', 'csharp').replace('(driver,', '(Driver,');
     const button = C.locatorExpr(role('button', 'Place order'), 'selenium', 'csharp').replace(
-      /^driver\./,
-      'Driver.'
+      '(driver,',
+      '(Driver,'
     );
-    expect(C.pageObject(SMALL, 'selenium', 'csharp')).toBe(
+    expect(name).toBe('Locatra.Find(Driver, "label", "Email address")');
+    const code = C.pageObject(SMALL, 'selenium', 'csharp');
+    expect(code.slice(0, code.indexOf('    #nullable enable'))).toBe(
       [
         '// Page Object generated by Locatra for "Checkout | Shop".',
         '// Page: https://shop.example/checkout',
+        'using System;',
+        'using System.Collections.Generic;',
+        'using System.Linq;',
+        'using System.Threading;',
         'using OpenQA.Selenium;',
         '',
         'public class CheckoutPage',
@@ -1274,10 +1296,11 @@ describe('page objects: exact output', () => {
         '    {',
         '        PlaceOrderButton.Click();',
         '    }',
-        '}',
+        '',
         '',
       ].join('\n')
     );
+    expect(code.endsWith('    }\n    #nullable restore\n}\n')).toBe(true);
   });
 
   it('is deterministic', () => {
@@ -1360,21 +1383,25 @@ describe('page objects: every element kind and target', () => {
     );
     expect(code).toContain(
       '            Driver.SwitchTo().DefaultContent();\n' +
-        `            Driver.SwitchTo().Frame((IWebElement)((IJavaScriptExecutor)Driver).ExecuteScript(${JSON.stringify(C._internals.DEEP_IFRAME_JS)}, 2)!);\n` +
-        '            return Driver.FindElement(By.XPath('
+        '            Driver.SwitchTo().Frame((IWebElement)((IJavaScriptExecutor)Driver).ExecuteScript(LocatraFrameJs, 2)!);\n' +
+        '            return Locatra.Find(Driver, "text", "Go", exact: true);'
+    );
+    expect(code).toContain(
+      `    private const string LocatraFrameJs = ${JSON.stringify(C._internals.DEEP_IFRAME_JS)};`
     );
     expect(code).toContain(
       '            Driver.SwitchTo().DefaultContent();\n            Driver.SwitchTo().Frame(Driver.FindElement(By.CssSelector("#pay")));\n'
     );
     expect(code).toContain(
-      '            Driver.SwitchTo().DefaultContent();\n            return Driver.FindElement(By.CssSelector("[data-testid=\\"row-2\\"]")).FindElement(By.XPath(".//*['
+      '            Driver.SwitchTo().DefaultContent();\n            return Locatra.Find(Driver.FindElement(By.CssSelector("[data-testid=\\"row-2\\"]")), "role", "button", "Delete");'
     );
     expect(code).toContain(
       '    // NOTE: this locator matched 3 elements when the page object was generated.\n    public IWebElement AnyRow\n'
     );
     expect(code).toContain(
-      `    public void FillQtyInput(string value)\n    {\n        ((IJavaScriptExecutor)Driver).ExecuteScript(${X.q(C._internals.SET_VALUE_JS)}, QtyInput, value);\n    }`
+      '    public void FillQtyInput(string value)\n    {\n        ((IJavaScriptExecutor)Driver).ExecuteScript(LocatraSetValueJs, QtyInput, value);\n    }'
     );
+    expect(code).toContain(`    private const string LocatraSetValueJs = ${X.q(C._internals.SET_VALUE_JS)};`);
     expect(code).toContain(
       '    public void SelectCountrySelect(string value)\n    {\n        new SelectElement(CountrySelect).SelectByText(value);\n    }'
     );
@@ -1725,6 +1752,11 @@ describe.skipIf(!DOTNET)('dotnet build of the generated code', () => {
         ),
         fw + 'Shadow'
       );
+      // The C9.4 corpus: every target kind × every action, the Locatra helper class,
+      // the frame / value-setter constants, deep shadow chains, XPath.
+      add(C.testScript(CORPUS.STEPS, fw, 'csharp'), fw + 'Corpus');
+      add(C.testScript(CORPUS.STEPS, fw, 'csharp', { variables: true }), fw + 'CorpusData');
+      add(C.pageObject({ ...CORPUS.MODEL, className: 'Corpus' }, fw, 'csharp'), fw + 'CorpusPage');
     }
     // The literals, read back by the compiler: one line of UTF-16 code units each.
     files.push(

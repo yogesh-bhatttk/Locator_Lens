@@ -3,6 +3,8 @@
 // both as JUnit 5 tests. Registers with LLCodegen (codegen.js must load first) and
 // reuses its shared helpers, so every locator selects exactly what the JS/TS/Python
 // output of the same framework selects — only the host-language syntax differs.
+// A Selenium role / label / text target calls Locatra.find(), a static nested class
+// declared once per file (C9.4).
 //
 // Java specifics handled here:
 //   * String literals are double-quoted. Control characters become octal escapes and
@@ -193,6 +195,7 @@
       case 'text': return 'page.getByText(' + jq(t.value) + ex('Text') + ')';
       case 'id': return 'page.locator(' + jq('#' + I.cssIdent(t.value)) + ')';
       case 'name': return 'page.locator(' + jq('[name="' + I.attrSel(t.value) + '"]') + ')';
+      case 'xpath': return 'page.locator(' + jq('xpath=' + t.value) + ')';
       case 'css': default: return 'page.locator(' + jq(t.value || 'body') + ')';
     }
   }
@@ -308,76 +311,154 @@
 
   var BY = { css: 'By.cssSelector', id: 'By.id', name: 'By.name', xpath: 'By.xpath' };
 
-  function selFind(by, selector) { return 'driver.findElement(' + BY[by] + '(' + jq(selector) + '))'; }
+  /** `<root>.findElement(By…)`: root is the driver or, in a chain, the parent element. */
+  function selFind(by, selector, root) { return (root || 'driver') + '.findElement(' + BY[by] + '(' + jq(selector) + '))'; }
 
-  // Same XPath as Selenium JS/Python (codegen.js roleXpath): `rel` scopes it to a
-  // parent element with a leading dot.
-  function roleXpath(t, rel) {
-    var node = I.roleNodeXpath(t.role, t.level);
-    var axis = rel ? './/*' : '//*';
-    var xp = t.name
-      ? axis + '[(' + node + ') and (' + I.nameXpath(t.name, t.exact, t.role) + ')]'
-      : axis + '[' + node + ']';
-    if (I.hasNth(t)) xp = '(' + xp + ')[' + (t.nth + 1) + ']';
-    return xp;
+  // ── the Locatra helper (C9.4) ──────────────────────────────────────────────
+  // Selenium has no getByRole / getByLabel / getByText: a role, label or text
+  // target calls Locatra.find(root, kind, value[, name[, exact[, level, nth]]]), a
+  // static nested class declared once per file (the in-page matcher every target
+  // runs, codegen.js MATCH_JS). It waits up to the driver's implicit wait, as
+  // findElement does, and throws when several elements match.
+  function helperCall(spec, root) {
+    var args = [root, jq(spec.kind), jq(spec.value)];
+    var full = spec.level || spec.nth >= 0;
+    if (spec.name != null || spec.exact || full) args.push(spec.name != null ? jq(spec.name) : 'null');
+    if (spec.exact || full) args.push(String(spec.exact));
+    if (full) args.push(String(spec.level), String(spec.nth));
+    return 'Locatra.find(' + args.join(', ') + ')';
+  }
+
+  var HELPER_CLASS = [
+    '// Locatra: the one element a role / label / text locator matches, found the way Playwright\'s',
+    '// getByRole / getByLabel / getByText find it (Selenium has none of them). It waits up to the',
+    '// driver\'s implicit wait, as findElement does, and fails when several elements match.',
+    'static final class Locatra {',
+    '    private static final String JS = String.join("\\n",',
+    '@@JS@@);',
+    '',
+    '    private Locatra() {',
+    '    }',
+    '',
+    '    static WebElement find(SearchContext root, String kind, String value) {',
+    '        return find(root, kind, value, null, false, 0, -1);',
+    '    }',
+    '',
+    '    static WebElement find(SearchContext root, String kind, String value, String name) {',
+    '        return find(root, kind, value, name, false, 0, -1);',
+    '    }',
+    '',
+    '    static WebElement find(SearchContext root, String kind, String value, String name, boolean exact) {',
+    '        return find(root, kind, value, name, exact, 0, -1);',
+    '    }',
+    '',
+    '    static WebElement find(SearchContext root, String kind, String value, String name, boolean exact, int level, int nth) {',
+    '        WebDriver driver = root instanceof WrapsDriver ? ((WrapsDriver) root).getWrappedDriver() : (WebDriver) root;',
+    '        Object scope = root instanceof WebDriver ? null : root;',
+    '        String what = kind + " \\"" + value + "\\"" + (name != null ? " named \\"" + name + "\\"" : "") + (exact ? " (exact)" : "");',
+    '        long end = System.nanoTime() + driver.manage().timeouts().getImplicitWaitTimeout().toNanos();',
+    '        while (true) {',
+    '            List<WebElement> found = new ArrayList<>();',
+    '            Object result = ((JavascriptExecutor) driver).executeScript(JS, kind, value, name, exact, level, scope);',
+    '            if (result instanceof List<?>) {',
+    '                for (Object item : (List<?>) result) found.add((WebElement) item);',
+    '            }',
+    '            if (found.size() > Math.max(nth, 0)) {',
+    '                if (nth < 0 && found.size() > 1) {',
+    '                    throw new WebDriverException("Locatra: " + found.size() + " elements match " + what + "; expected exactly one");',
+    '                }',
+    '                return found.get(Math.max(nth, 0));',
+    '            }',
+    '            if (System.nanoTime() - end >= 0) throw new NoSuchElementException("Locatra: no element matches " + what);',
+    '            try {',
+    '                Thread.sleep(100);',
+    '            } catch (InterruptedException e) {',
+    '                Thread.currentThread().interrupt();',
+    '                throw new WebDriverException(e);',
+    '            }',
+    '        }',
+    '    }',
+    '}'
+  ].join('\n');
+
+  var FRAME_JS = 'LOCATRA_FRAME_JS';
+
+  /** The class members code needs (the frame script, the Locatra class), in order. */
+  function selHelpers(code) {
+    var out = [];
+    if (I.uses(code, FRAME_JS)) {
+      out.push('// ' + I.FRAME_JS_NOTE + '\nprivate static final String ' + FRAME_JS + ' = ' + jq(I.DEEP_IFRAME_JS) + ';');
+    }
+    if (I.uses(code, I.SET_VALUE_NAME)) {
+      out.push('// ' + I.SET_VALUE_NOTE + '\nprivate static final String ' + I.SET_VALUE_NAME + ' = ' + jq(I.SET_VALUE_JS) + ';');
+    }
+    if (I.uses(code, 'Locatra')) {
+      // Every line of the script is one literal, joined with line breaks.
+      var lines = I.MATCH_JS.split('\n').map(function (l) { return '        ' + jq(l); }).join(',\n');
+      out.push(HELPER_CLASS.replace('@@JS@@', function () { return lines; }));
+    }
+    return out;
   }
 
   /**
    * One target as a `driver.findElement(...)` expression (frames are statements, not
-   * part of it). An element in open shadow DOM is reached host by host — a shadow
-   * root is searched with CSS only — ending with its shadowCss (C3).
+   * part of it), or a Locatra.find(...) call. `root` is what the search starts from:
+   * the driver, or a chain's parent element. An element in open shadow DOM is reached
+   * host by host from the driver — a shadow root is searched with CSS only — ending
+   * with its shadowCss (C3).
    */
-  function selExpr(t, rel) {
+  function selExpr(t, rel, root) {
     if (!t) return '';
     if (t.kind === 'frame') return selExpr(I.unwrapFrames(t).inner, false);
     var sh = I.shadowOf(t);
     if (sh) {
       var el = selFind('css', sh.hosts[0]);
-      sh.hosts.slice(1).concat(sh.css).forEach(function (sel) {
-        el += '.getShadowRoot().findElement(By.cssSelector(' + jq(sel) + '))';
+      var hops = sh.hosts.slice(1).concat(sh.css);
+      hops.forEach(function (sel) {
+        el += hopBreak(hops.length) + '.getShadowRoot().findElement(By.cssSelector(' + jq(sel) + '))';
       });
       return el;
     }
     if (t.kind === 'chain') {
-      var parent = selExpr(t.parent, rel);
+      var parent = selExpr(t.parent, rel, root);
       if (!t.child) return parent;
-      var child = selExpr(t.child, true);
       // A child reached through shadow roots starts from the document.
-      if (!parent || I.shadowOf(t.child)) return child;
-      return parent + child.replace(/^driver\./, '.');
+      if (!parent || I.shadowOf(t.child)) return selExpr(t.child, true);
+      return selExpr(t.child, true, parent);
     }
-    var axis = rel ? './/*' : '//*';
+    var spec = I.helperSpec(t);
+    if (spec) return helperCall(spec, root || 'driver');
     switch (t.kind) {
-      case 'testid': return selFind('css', '[' + I.cssIdent(t.attr) + '="' + I.attrSel(t.value) + '"]');
-      case 'role':
-        // XPath, named or not: CSS cannot say which role an element ends up with.
-        return selFind('xpath', roleXpath(t, rel));
-      case 'label': return selFind('xpath', axis + '[' + I.labelXpath(t.value, t.exact) + ']');
-      case 'placeholder': return selFind('css', I.attrMatchSel('placeholder', t.value, t.exact));
-      case 'altText': return selFind('css', I.attrMatchSel('alt', t.value, t.exact));
-      case 'title': return selFind('css', I.attrMatchSel('title', t.value, t.exact));
-      case 'text': return selFind('xpath', I.textXpath(t.value, t.exact, rel));
-      case 'id': return selFind('id', t.value);
-      case 'name': return selFind('name', t.value);
-      case 'css': default: return selFind('css', t.value || 'body');
+      case 'testid': return selFind('css', '[' + I.cssIdent(t.attr) + '="' + I.attrSel(t.value) + '"]', root);
+      case 'placeholder': return selFind('css', I.attrMatchSel('placeholder', t.value, t.exact), root);
+      case 'altText': return selFind('css', I.attrMatchSel('alt', t.value, t.exact), root);
+      case 'title': return selFind('css', I.attrMatchSel('title', t.value, t.exact), root);
+      case 'xpath': return selFind('xpath', I.scopedXpath(t.value, rel), root);
+      case 'id': return selFind('id', t.value, root);
+      case 'name': return selFind('name', t.value, root);
+      case 'css': default: return selFind('css', t.value || 'body', root);
     }
   }
 
   // An <iframe> inside shadow DOM is reached host by host: WebDriver searches a
   // shadow root with CSS only, one tree at a time.
+  // More than two hops go one per line.
+  function hopBreak(hops) { return hops > 2 ? '\n    ' : ''; }
+
   function selFrameSwitch(frame) {
     if (frame.shadowPath) {
       var el = selFind('css', frame.shadowPath[0]);
       for (var i = 1; i < frame.shadowPath.length; i++) {
-        el += '.getShadowRoot().findElement(By.cssSelector(' + jq(frame.shadowPath[i]) + '))';
+        el += hopBreak(frame.shadowPath.length - 1) + '.getShadowRoot().findElement(By.cssSelector(' + jq(frame.shadowPath[i]) + '))';
       }
       return 'driver.switchTo().frame(' + el + ');';
     }
     if (frame.selector) return 'driver.switchTo().frame(' + selFind('css', frame.selector) + ');';
     // No selector (a cross-origin frame): the frame element, by its position among
-    // the page's <iframe>s, shadow roots included (codegen.js DEEP_IFRAME_JS).
+    // the page's <iframe>s, shadow roots included (codegen.js DEEP_IFRAME_JS, declared
+    // once per file as LOCATRA_FRAME_JS).
     return 'driver.switchTo().frame((WebElement) ((JavascriptExecutor) driver).executeScript(' +
-      jq(I.DEEP_IFRAME_JS) + ', ' + I.seleniumFrameIndex(frame) + '));';
+      FRAME_JS + ', ' + I.seleniumFrameIndex(frame) + '));';
   }
 
   /** A block that looks the element up once: `WebElement el = …;` (scoped, so steps can repeat). */
@@ -404,7 +485,8 @@
     }
     var down = mods.map(function (m) { return '.keyDown(' + m + ')'; }).join('');
     var up = mods.slice().reverse().map(function (m) { return '.keyUp(' + m + ')'; }).join('');
-    return 'new Actions(driver)' + down + '.sendKeys(' + keyArg + ')' + up + '.perform();';
+    // Three or four modifiers make a long chain: it continues on a second line.
+    return 'new Actions(driver)' + down + (mods.length > 2 ? '\n    ' : '') + '.sendKeys(' + keyArg + ')' + up + '.perform();';
   }
 
   // The recorded size is the viewport (innerWidth x innerHeight); Selenium sizes the
@@ -449,7 +531,7 @@
   }
 
   var SET_VALUE = function (loc, val) {
-    return '((JavascriptExecutor) driver).executeScript(' + jq(I.SET_VALUE_JS) + ', ' + loc + ', ' + val + ');';
+    return '((JavascriptExecutor) driver).executeScript(' + I.SET_VALUE_NAME + ', ' + loc + ', ' + val + ');';
   };
 
   function selTargetStatement(step) {
@@ -526,7 +608,14 @@
       [/\bnew Select\(/, 'org.openqa.selenium.support.ui.Select'],
       [/\bnew WebDriverWait\(/, 'org.openqa.selenium.support.ui.WebDriverWait'],
       [/\bPaths\.get\(/, 'java.nio.file.Paths'],
-      [/\bDuration\./, 'java.time.Duration']
+      [/\bDuration\./, 'java.time.Duration'],
+      // the Locatra helper class
+      [/\bSearchContext\b/, 'org.openqa.selenium.SearchContext'],
+      [/\bWrapsDriver\b/, 'org.openqa.selenium.WrapsDriver'],
+      [/\bNoSuchElementException\(/, 'org.openqa.selenium.NoSuchElementException'],
+      [/\bWebDriverException\(/, 'org.openqa.selenium.WebDriverException'],
+      [/\bList</, 'java.util.List'],
+      [/\bArrayList</, 'java.util.ArrayList']
     ];
     uses.forEach(function (u) { if (u[0].test(code)) imports.push(u[1]); });
     return imports;
@@ -535,7 +624,8 @@
   function selWrap(stmts, lang, steps, opts) {
     var body = (stmts || []).map(javaSafe);
     var field = testDataField(opts, '    ');
-    var code = codeOnly(body.join('\n'));
+    var decls = selHelpers(body.join('\n'));
+    var code = codeOnly(body.concat(decls).join('\n'));
     var imports = selImports(code, [
       'org.junit.jupiter.api.AfterEach', 'org.junit.jupiter.api.BeforeEach', 'org.junit.jupiter.api.Test',
       'org.openqa.selenium.chrome.ChromeDriver', 'java.time.Duration'
@@ -566,6 +656,7 @@
       '    void recordedTest() {\n' +
       (body.length ? I.indent(body, '        ') + '\n' : '') +
       '    }\n' +
+      (decls.length ? '\n' + I.indent([decls.join('\n\n')], '    ') + '\n' : '') +
       '}\n';
   }
 
@@ -721,6 +812,8 @@
         out.push('', 'public void ' + h.id + sig + ' {', I.indent(lines, '    '), '}');
       });
     });
+    var decls = selHelpers(out.join('\n'));
+    if (decls.length) out.push('', decls.join('\n\n'));
     var code = codeOnly(out.join('\n'));
     var imports = selImports(code, []);
     return poHeader(model, info.skipped) + importBlock(imports, []) + '\n' +
@@ -747,6 +840,8 @@
     locatorExpr: function (target, lang, rel) { return selExpr(target, !!rel); },
     actionStatement: function (step) { return javaSafe(selStatement(step)); },
     wrapScript: selWrap,
+    // The class members a locator expression needs (LLCodegen.locatorSnippet).
+    helpers: function (code) { return selHelpers(code); },
     // LLCodegen's own TODOs (unknown action, no locator) come through here too.
     todo: function (text) { return todo(text); },
     pageObject: function (model) { return poSelenium(model || {}); }

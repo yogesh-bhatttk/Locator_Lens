@@ -16,6 +16,8 @@ import { fileURLToPath } from 'node:url';
 import vm from 'node:vm';
 import { beforeAll, describe, expect, it } from 'vitest';
 
+import * as CORPUS from './codegen-corpus.mjs';
+
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 
 let E;
@@ -45,17 +47,24 @@ function renderPage() {
   document.body.insertBefore(late, document.body.firstChild);
 }
 
-/** The script a generated Selenium JS statement passes to executeScript, decoded. */
+/**
+ * The script a generated Selenium JS test passes to executeScript — the
+ * LOCATRA_FRAME_JS it declares, decoded — after checking the statement runs it with
+ * the frame's index.
+ */
 function seleniumScript(index) {
   const target = { kind: 'frame', selector: null, index, child: { kind: 'id', value: 'x' } };
   const code = C.actionStatement({ action: 'click', target }, 'selenium', 'javascript');
   const m =
-    /^await driver\.switchTo\(\)\.frame\(await driver\.executeScript\('((?:[^'\\]|\\.)*)', (\d+)\)\);/.exec(
+    /^await driver\.switchTo\(\)\.frame\(await driver\.executeScript\(LOCATRA_FRAME_JS, (\d+)\)\);/.exec(
       code
     );
   expect(m, code).toBeTruthy();
-  expect(Number(m[2])).toBe(index);
-  return new Function(`return '${m[1]}';`)();
+  expect(Number(m[1])).toBe(index);
+  const file = C.testScript([{ action: 'click', target }], 'selenium', 'javascript');
+  const decl = /^const LOCATRA_FRAME_JS = '((?:[^'\\]|\\.)*)';$/m.exec(file);
+  expect(decl, file).toBeTruthy();
+  return new Function(`return '${decl[1]}';`)();
 }
 
 /** Runs a WebDriver script the way executeScript does: a function body with arguments. */
@@ -82,13 +91,20 @@ describe('a selector-less frame is found by the engine’s index', () => {
     const I = C._internals;
     const target = { kind: 'frame', selector: null, index: 3, child: { kind: 'id', value: 'x' } };
     const click = (fw, lang) => C.actionStatement({ action: 'click', target }, fw, lang).split('\n')[0];
+    const file = (fw, lang) => C.testScript([{ action: 'click', target }], fw, lang);
     expect(click('selenium', 'python')).toBe(
-      `driver.switch_to.frame(driver.execute_script(${C.q(I.DEEP_IFRAME_JS, 'python')}, 3))`
+      'driver.switch_to.frame(driver.execute_script(LOCATRA_FRAME_JS, 3))'
     );
-    expect(click('selenium', 'java')).toContain(`executeScript(${JSON.stringify(I.DEEP_IFRAME_JS)}, 3)`);
-    expect(click('selenium', 'csharp')).toContain(`ExecuteScript(${JSON.stringify(I.DEEP_IFRAME_JS)}, 3)`);
+    expect(file('selenium', 'python')).toContain(`LOCATRA_FRAME_JS = ${C.q(I.DEEP_IFRAME_JS, 'python')}\n`);
+    expect(click('selenium', 'java')).toContain('executeScript(LOCATRA_FRAME_JS, 3)');
+    expect(file('selenium', 'java')).toContain(`LOCATRA_FRAME_JS = ${JSON.stringify(I.DEEP_IFRAME_JS)};`);
+    expect(click('selenium', 'csharp')).toContain('ExecuteScript(LocatraFrameJs, 3)');
+    expect(file('selenium', 'csharp')).toContain(`LocatraFrameJs = ${JSON.stringify(I.DEEP_IFRAME_JS)};`);
     expect(click('webdriverio', 'javascript')).toBe(
-      `await browser.switchFrame($(await browser.execute(${C.q(I.DEEP_IFRAME_JS, 'javascript')}, 3)));`
+      'await browser.switchFrame($(await browser.execute(LOCATRA_FRAME_JS, 3)));'
+    );
+    expect(file('webdriverio', 'javascript')).toContain(
+      `const LOCATRA_FRAME_JS = ${C.q(I.DEEP_IFRAME_JS, 'javascript')};`
     );
   });
 
@@ -108,10 +124,11 @@ describe('a selector-less frame is found by the engine’s index', () => {
       index: 1,
       child: { kind: 'frame', selector: null, index: 0, child: { kind: 'id', value: 'x' } },
     };
+    // One frame per line: the chain is long.
     expect(C.locatorExpr(nested, 'cypress', 'typescript')).toBe(
       "cy.document().then((doc) => locatraFrame(doc, 1)).its('0.contentDocument.body').should('not.be.empty')" +
-        '.then(cy.wrap).then((body) => locatraFrame((body as JQuery<HTMLElement>)[0].ownerDocument, 0))' +
-        ".its('0.contentDocument.body').should('not.be.empty').then(cy.wrap).find('#x')"
+        '.then(cy.wrap)\n  .then((body) => locatraFrame((body as JQuery<HTMLElement>)[0].ownerDocument, 0))' +
+        ".its('0.contentDocument.body').should('not.be.empty').then(cy.wrap)\n  .find('#x')"
     );
     const spec = C.testScript([{ action: 'click', target: nested }], 'cypress', 'typescript');
     expect(
@@ -135,8 +152,8 @@ describe('a selector-less frame is found by the engine’s index', () => {
   });
 });
 
-// The Cypress helpers (locatraFrame, locatraRole, locatraMatch) and the chains that call
-// them, type-checked against the real Cypress typings when they are installed.
+// The Cypress helpers (locatraFrame, locatraMatch + locatraGet, locatraSecret) and the
+// chains that call them, type-checked against the real Cypress typings when installed.
 const TSC = join(ROOT, 'node_modules/typescript/bin/tsc');
 const CYPRESS_TYPES = join(ROOT, 'node_modules/cypress/types/index.d.ts');
 describe.skipIf(!existsSync(TSC) || !existsSync(CYPRESS_TYPES))('Cypress TypeScript output', () => {
@@ -166,6 +183,14 @@ describe.skipIf(!existsSync(TSC) || !existsSync(CYPRESS_TYPES))('Cypress TypeScr
         join(dir, 'page.ts'),
         C.pageObject({ elements: [{ name: 'go', kind: 'button', target: nested }] }, 'cypress', 'typescript')
       );
+      // The C9.4 corpus: locatraGet (within, nth, level, exact, a forced XPath), frames
+      // and chains continuing into it, deep shadow DOM, test data.
+      writeFileSync(join(dir, 'corpus.cy.ts'), C.testScript(CORPUS.STEPS, 'cypress', 'typescript'));
+      writeFileSync(
+        join(dir, 'corpus-vars.cy.ts'),
+        `export {};\n${C.testScript(CORPUS.STEPS, 'cypress', 'typescript', { variables: true })}`
+      );
+      writeFileSync(join(dir, 'corpus-page.ts'), C.pageObject(CORPUS.MODEL, 'cypress', 'typescript'));
       writeFileSync(
         join(dir, 'tsconfig.json'),
         JSON.stringify({
@@ -180,7 +205,7 @@ describe.skipIf(!existsSync(TSC) || !existsSync(CYPRESS_TYPES))('Cypress TypeScr
             module: 'commonjs',
             moduleResolution: 'node',
           },
-          files: ['spec.cy.ts', 'page.ts'],
+          files: ['spec.cy.ts', 'page.ts', 'corpus.cy.ts', 'corpus-vars.cy.ts', 'corpus-page.ts'],
         })
       );
       try {

@@ -1,14 +1,15 @@
 // Regression tests for the codegen audit findings and the cross-file contract fields
 // the recorder now produces (scratchpad contracts C1–C4):
-//   H1  text / name / label XPath must match text holding no-break spaces, soft
+//   H1  text / name / label lookups must match text holding no-break spaces, soft
 //       hyphens and zero-width spaces, as the engine (and Playwright) normalise them
 //   H2  text assertions compare rendered text (innerText), like the recorder read it
 //   M1  aria-labelledby with several ids names an element by all of them, in order
 //   M6  numeric target fields (level, frame indices, viewport) can never become code
 //   C1  multi-select steps (`values`)       C2  sensitive toHaveValue assertions
 //   C3  open shadow DOM (`shadowHosts` / `shadowCss`)     C4  frame indices
-// Every Selenium-family selector is decoded from the emitted string literal of each
-// language and evaluated against a real DOM (jsdom), so the escapes are checked too.
+// Every Selenium-family selector — or Locatra helper call (C9.4) — is decoded from the
+// emitted string literals of each language and evaluated against a real DOM (jsdom),
+// so the escapes are checked too.
 import { execFileSync } from 'node:child_process';
 import assert from 'node:assert';
 import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
@@ -17,6 +18,8 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { JSDOM } from 'jsdom';
 import { beforeAll, describe, expect, it } from 'vitest';
+
+import { helperCallOf, runHelper } from './codegen-helper-calls.mjs';
 
 let C;
 beforeAll(async () => {
@@ -50,6 +53,8 @@ const SELENIUM_FAMILY = [
   ['selenium', 'csharp'],
   ['webdriverio', 'typescript'],
 ];
+// Every target that runs the Locatra helper for a role / label / text locator.
+const HELPER_FAMILY = [...SELENIUM_FAMILY, ['cypress', 'javascript'], ['cypress', 'typescript']];
 
 const testid = (value) => ({ kind: 'testid', attr: 'data-testid', value });
 const role = (r, name, o = {}) => ({ kind: 'role', role: r, ...(name != null ? { name } : {}), ...o });
@@ -93,7 +98,7 @@ const dom = (html) =>
   new JSDOM(`<!doctype html><html><head><title>t</title></head><body>${html}</body></html>`).window;
 
 // ════════════════════════════════════════════════════════════════════════════
-describe('H1: no-break spaces, soft hyphens and zero-width spaces (Selenium / WebdriverIO XPath)', () => {
+describe('H1: no-break spaces, soft hyphens and zero-width spaces (the Locatra helper)', () => {
   const HTML = `
     <button data-k="cart">Add&nbsp;to&nbsp;cart</button>
     <button data-k="wish">Add to wishlist</button>
@@ -110,6 +115,12 @@ describe('H1: no-break spaces, soft hyphens and zero-width spaces (Selenium / We
     doc = dom(HTML).document;
   });
 
+  /** data-k of what each language's helper call finds, decoded from its literals. */
+  const found = (target, fw, lang) => {
+    const call = helperCallOf(C.locatorExpr(target, fw, lang), lang);
+    return runHelper(C._internals, doc, call).map((e) => e.getAttribute('data-k'));
+  };
+
   it.each([
     [role('button', 'Add to cart', { exact: true }), 'cart'],
     [role('button', 'to cart'), 'cart'],
@@ -124,23 +135,30 @@ describe('H1: no-break spaces, soft hyphens and zero-width spaces (Selenium / We
     [{ kind: 'label', value: 'Ship to', exact: true }, 'ship'],
     [role('button', 'Bundestag', { exact: true }), 'shy'],
   ])('%j finds the element in every language', (target, want) => {
-    for (const [fw, lang] of SELENIUM_FAMILY) {
-      const s = selectorOf(target, fw, lang);
-      expect(matches(doc, s)[0], `${fw}/${lang}`).toBe(want);
+    for (const [fw, lang] of HELPER_FAMILY) {
+      expect(found(target, fw, lang), `${fw}/${lang}`).toEqual([want]);
     }
   });
 
   it('writes the characters as escapes in every language, never raw', () => {
-    const t = { kind: 'text', value: 'x' };
-    for (const [fw, lang] of SELENIUM_FAMILY) {
+    const t = { kind: 'text', value: 'a\u00a0b\u00adc\u200bd\u202fe' };
+    for (const [fw, lang] of HELPER_FAMILY) {
       const code = C.locatorExpr(t, fw, lang);
       expect(code, `${fw}/${lang}`).not.toMatch(/[\u00a0\u00ad\u200b\u202f]/);
-      expect(code).toContain('translate(');
+      expect(helperCallOf(code, lang).value, `${fw}/${lang}`).toBe(t.value);
     }
-    expect(C.locatorExpr(t, 'selenium', 'javascript')).toContain('"\\xa0\\u202f\\xad\\u200b", "  "');
-    expect(C.locatorExpr(t, 'selenium', 'python')).toContain('\\"\\xa0\\u202f\\xad\\u200b\\", \\"  \\"');
-    expect(C.locatorExpr(t, 'selenium', 'java')).toContain('\\"\\u00a0\\u202f\\u00ad\\u200b\\", \\"  \\"');
-    expect(C.locatorExpr(t, 'selenium', 'csharp')).toContain('\\"\\u00A0\\u202F\\u00AD\\u200B\\", \\"  \\"');
+    expect(C.locatorExpr(t, 'selenium', 'javascript')).toBe(
+      "locatraFind(driver, 'text', 'a\\xa0b\\xadc\\u200bd\\u202fe')"
+    );
+    expect(C.locatorExpr(t, 'selenium', 'python')).toBe(
+      'locatra_find(driver, "text", "a\\xa0b\\xadc\\u200bd\\u202fe")'
+    );
+    expect(C.locatorExpr(t, 'selenium', 'java')).toBe(
+      'Locatra.find(driver, "text", "a\\u00a0b\\u00adc\\u200bd\\u202fe")'
+    );
+    expect(C.locatorExpr(t, 'selenium', 'csharp')).toBe(
+      'Locatra.Find(driver, "text", "a\\u00A0b\\u00ADc\\u200Bd\\u202Fe")'
+    );
     // A recorded value holding them is escaped too (a pasted test never hides text).
     expect(C.q('a\u00a0b\u00adc\u200bd\ufeff', 'python')).toBe('"a\\xa0b\\xadc\\u200bd\\ufeff"');
     expect(C._csharp.q('a\u00a0b\u202fc')).toBe('"a\\u00A0b\\u202Fc"');
@@ -148,17 +166,29 @@ describe('H1: no-break spaces, soft hyphens and zero-width spaces (Selenium / We
 
   it('drops soft hyphens and zero-width spaces from the needle too', () => {
     const t = { kind: 'text', value: 'Bundes\u00adregierung\u200b', exact: true };
-    expect(matches(doc, selectorOf(t, 'selenium', 'javascript'))).toEqual(['bundes']);
+    for (const [fw, lang] of HELPER_FAMILY) expect(found(t, fw, lang), `${fw}/${lang}`).toEqual(['bundes']);
+  });
+});
+
+// ════════════════════════════════════════════════════════════════════════════
+describe('C9: an XPath target is handed over verbatim (decoded from every literal)', () => {
+  let doc;
+  beforeAll(() => {
+    doc = dom(`<button data-k="save">Save</button><a data-k="close" aria-label='Close "it"'>x</a>
+      <table data-k="t"><tr><td>1</td><td data-k="two">2</td></tr></table>`).document;
   });
 
-  it('the Cypress name helper normalises the same way', () => {
-    const target = role('button', 'Bundestag', { exact: true });
-    const expr = C.locatorExpr(target, 'cypress', 'javascript');
-    const helper = C.wrapScript([expr], 'cypress', 'javascript').split('describe(')[0];
-    const wrap = (els) => ({ els, filter: (fn) => wrap(els.filter((e, i) => fn(i, e))) });
-    const cy = { get: (s) => wrap([...doc.querySelectorAll(s)]) };
-    const res = new Function('cy', `${helper}\nreturn ${expr};`)(cy);
-    expect(res.els.map((e) => e.getAttribute('data-k'))).toEqual(['shy']);
+  it.each([
+    [{ kind: 'xpath', value: '//button[normalize-space(.)="Save"]' }, ['save']],
+    [{ kind: 'xpath', value: `//a[@aria-label=concat('Close "it', '"')]` }, ['close']],
+    [{ kind: 'xpath', value: '(//td)[2]' }, ['two']],
+  ])('%j', (target, want) => {
+    for (const [fw, lang] of SELENIUM_FAMILY) {
+      const s = selectorOf(target, fw, lang);
+      expect(s.xpath, `${fw}/${lang}`).toBe(true);
+      expect(s.sel, `${fw}/${lang}`).toBe(target.value);
+      expect(matches(doc, s), `${fw}/${lang}`).toEqual(want);
+    }
   });
 });
 
@@ -284,7 +314,7 @@ describe('H2: text assertions compare the rendered text', () => {
 });
 
 // ════════════════════════════════════════════════════════════════════════════
-describe('M1: aria-labelledby with several ids (Selenium / WebdriverIO XPath)', () => {
+describe('M1: aria-labelledby with several ids (the Locatra helper)', () => {
   const HTML = `
     <h2 id="t">Delete file</h2><p id="d">This cannot be undone</p>
     <div role="dialog" data-k="dlg" aria-labelledby="t d"><button>OK</button></div>
@@ -304,7 +334,10 @@ describe('M1: aria-labelledby with several ids (Selenium / WebdriverIO XPath)', 
     [role('dialog', 'Delete file This cannot be undone', { exact: true }), ['dlg']],
     [role('dialog', 'Delete file'), ['dlg']],
     [role('textbox', 'Amount USD', { exact: true }), ['amt']],
-    [{ kind: 'label', value: 'Amount USD', exact: true }, ['amt']],
+    // getByLabel matches each labelling element on its own (Playwright's
+    // getElementLabels), unlike the accessible name, which joins them.
+    [{ kind: 'label', value: 'Amount USD', exact: true }, []],
+    [{ kind: 'label', value: 'USD', exact: true }, ['amt', 'pref']],
     [{ kind: 'label', value: 'Amount' }, ['amt']],
     // "a" is a prefix of "ab": only the whole id counts.
     [role('textbox', 'USD', { exact: true }), ['pref']],
@@ -316,8 +349,10 @@ describe('M1: aria-labelledby with several ids (Selenium / WebdriverIO XPath)', 
     [role('textbox', 'w4 w3 w2 w1', { exact: true }), ['four']],
     [role('textbox', 'w1 w2 w3 w4', { exact: true }), []],
   ])('%j matches %j', (target, want) => {
-    for (const [fw, lang] of SELENIUM_FAMILY) {
-      expect(matches(doc, selectorOf(target, fw, lang)), `${fw}/${lang}`).toEqual(want);
+    for (const [fw, lang] of HELPER_FAMILY) {
+      const call = helperCallOf(C.locatorExpr(target, fw, lang), lang);
+      const got = runHelper(C._internals, doc, call).map((e) => e.getAttribute('data-k'));
+      expect(got, `${fw}/${lang}`).toEqual(want);
     }
   });
 });
@@ -370,8 +405,10 @@ describe('M6 / C4: numeric target fields never become code', () => {
       'page.getByRole(AriaRole.HEADING, new Page.GetByRoleOptions().setLevel(4))'
     );
     expect(C.locatorExpr(role('heading', null, { level: 2 }), 'cypress', 'javascript')).toBe(
-      'cy.get(\'h2, [role~="heading"][aria-level="2"]:not(h1, h2, h3, h4, h5, h6)\')' +
-        ".filter((_, el) => locatraRole(el) === 'heading').first()"
+      "locatraGet('role', 'heading', null, { level: 2, nth: 0 })"
+    );
+    expect(C.locatorExpr(role('heading', 'x', { level: 2 }), 'selenium', 'java')).toBe(
+      'Locatra.find(driver, "role", "heading", "x", false, 2, -1)'
     );
   });
 
@@ -396,29 +433,58 @@ describe('M6 / C4: numeric target fields never become code', () => {
     const I = C._internals;
     const target = { kind: 'frame', selector: null, index: 1, framesIndex: 3, child: testid('x') };
     const click = (fw, lang) => stmt({ action: 'click', target }, fw, lang).split('\n');
-    const js = (lang) => C.q(I.DEEP_IFRAME_JS, lang);
+    // The script is declared once per file (LOCATRA_FRAME_JS) and run with the index.
+    expect(I.FRAME_JS_NAME).toBe('LOCATRA_FRAME_JS');
     expect(click('selenium', 'javascript')[0]).toBe(
-      `await driver.switchTo().frame(await driver.executeScript(${js('javascript')}, 1));`
+      'await driver.switchTo().frame(await driver.executeScript(LOCATRA_FRAME_JS, 1));'
     );
     expect(click('selenium', 'python')[0]).toBe(
-      `driver.switch_to.frame(driver.execute_script(${js('python')}, 1))`
+      'driver.switch_to.frame(driver.execute_script(LOCATRA_FRAME_JS, 1))'
     );
     expect(click('selenium', 'java')[0]).toBe(
-      `driver.switchTo().frame((WebElement) ((JavascriptExecutor) driver).executeScript(${JSON.stringify(I.DEEP_IFRAME_JS)}, 1));`
+      'driver.switchTo().frame((WebElement) ((JavascriptExecutor) driver).executeScript(LOCATRA_FRAME_JS, 1));'
     );
     expect(click('selenium', 'csharp')[0]).toBe(
-      `driver.SwitchTo().Frame((IWebElement)((IJavaScriptExecutor)driver).ExecuteScript(${JSON.stringify(I.DEEP_IFRAME_JS)}, 1)!);`
+      'driver.SwitchTo().Frame((IWebElement)((IJavaScriptExecutor)driver).ExecuteScript(LocatraFrameJs, 1)!);'
     );
     expect(click('playwright', 'typescript')[0]).toContain("frameLocator('iframe >> nth=1')");
-    expect(click('cypress', 'javascript').pop()).toContain(
+    expect(click('cypress', 'javascript').join('\n')).toContain(
       'cy.document().then((doc) => locatraFrame(doc, 1))'
     );
     expect(click('webdriverio', 'javascript')[0]).toBe(
-      `await browser.switchFrame($(await browser.execute(${js('javascript')}, 1)));`
+      'await browser.switchFrame($(await browser.execute(LOCATRA_FRAME_JS, 1)));'
     );
     expect(click('webdriverio', 'typescript')[0]).toBe(
-      `await browser.switchFrame($(await browser.execute<HTMLIFrameElement, [number]>(${js('typescript')}, 1)));`
+      'await browser.switchFrame($(await browser.execute<HTMLIFrameElement, [number]>(LOCATRA_FRAME_JS, 1)));'
     );
+    // …and the declaration carries DEEP_IFRAME_JS, once, in every file that switches.
+    const js = (lang) => C.q(I.DEEP_IFRAME_JS, lang);
+    expect(C.testScript([{ action: 'click', target }], 'selenium', 'javascript')).toContain(
+      `const LOCATRA_FRAME_JS = ${js('javascript')};`
+    );
+    expect(C.testScript([{ action: 'click', target }], 'selenium', 'python')).toContain(
+      `LOCATRA_FRAME_JS = ${js('python')}`
+    );
+    expect(C.testScript([{ action: 'click', target }], 'selenium', 'java')).toContain(
+      `private static final String LOCATRA_FRAME_JS = ${JSON.stringify(I.DEEP_IFRAME_JS)};`
+    );
+    expect(C.testScript([{ action: 'click', target }], 'selenium', 'csharp')).toContain(
+      `private const string LocatraFrameJs = ${JSON.stringify(I.DEEP_IFRAME_JS)};`
+    );
+    expect(C.testScript([{ action: 'click', target }], 'webdriverio', 'typescript')).toContain(
+      `const LOCATRA_FRAME_JS = ${js('typescript')};`
+    );
+    for (const [fw, lang] of ALL) {
+      const file = C.testScript(
+        [
+          { action: 'click', target },
+          { action: 'click', target },
+        ],
+        fw,
+        lang
+      );
+      expect(file.split(I.DEEP_IFRAME_JS.slice(0, 40)).length, `${fw}/${lang}`).toBeLessThanOrEqual(2);
+    }
     for (const [fw, lang] of ALL)
       expect(stmt({ action: 'click', target }, fw, lang), `${fw}/${lang}`).not.toMatch(/\b3\b/);
     // A frame with a selector is still entered by its element.
@@ -428,7 +494,8 @@ describe('M6 / C4: numeric target fields never become code', () => {
     );
     // Page objects use the same switch.
     const po = C.pageObject({ elements: [{ name: 'x', kind: 'button', target }] }, 'selenium', 'python');
-    expect(po).toContain(`self.driver.switch_to.frame(self.driver.execute_script(${js('python')}, 1))`);
+    expect(po).toContain('self.driver.switch_to.frame(self.driver.execute_script(LOCATRA_FRAME_JS, 1))');
+    expect(po).toContain(`LOCATRA_FRAME_JS = ${js('python')}`);
   });
 
   it('falls back to the default viewport for anything but a positive finite size', () => {
@@ -800,9 +867,10 @@ describe('C3: open shadow DOM', () => {
       `${C.locatorExpr(inShadow(), 'selenium', 'python')}.click()`,
       'driver.switch_to.default_content()',
     ]);
+    // One frame per line once the chain grows long.
     expect(C.locatorExpr(framed, 'cypress', 'javascript')).toBe(
-      "cy.get('#f').its('0.contentDocument.body').should('not.be.empty').then(cy.wrap)" +
-        ".find('x-app').shadow().find('x-panel[data-k=\"p\"]').shadow().find('button.go')"
+      "cy.get('#f').its('0.contentDocument.body').should('not.be.empty').then(cy.wrap)\n" +
+        "  .find('x-app').shadow().find('x-panel[data-k=\"p\"]').shadow().find('button.go')"
     );
     const chained = { kind: 'chain', parent: testid('row'), child: inShadow() };
     for (const [fw, lang] of ALL) {
@@ -844,8 +912,12 @@ describe('C3: open shadow DOM', () => {
       ],
     };
     const ts = C.pageObject(model, 'selenium', 'typescript');
+    // 'lost' (no shadowCss) keeps its role locator: the helper, whose WebElementPromise is a value.
     expect(ts).toContain(
-      "import { By, type WebDriver, type WebElement, type WebElementPromise } from 'selenium-webdriver';"
+      "import { By, WebElementPromise, type WebDriver, type WebElement } from 'selenium-webdriver';"
+    );
+    expect(ts).toContain(
+      "lost(): WebElementPromise {\n    return locatraFind(this.driver, 'role', 'button', 'Go');"
     );
     expect(ts).toContain(
       'async go(): Promise<WebElement> {\n    return (await (await (await (await this.driver.findElement('

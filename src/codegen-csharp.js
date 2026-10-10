@@ -5,8 +5,10 @@
 //   * Selenium for C#      — Selenium.WebDriver 4 + Selenium.Support + NUnit
 //     (By.XPath / By.CssSelector, Actions, SelectElement, WebDriverWait,
 //     GetShadowRoot(), SwitchTo().Frame())
-// Locators carry exactly the selectors the JavaScript targets emit (the XPath / CSS
-// builders are shared through LLCodegen._internals); only the host syntax differs.
+// Locators carry exactly the selectors the JavaScript targets emit (the CSS builders
+// and the Locatra helper's in-page matcher are shared through LLCodegen._internals);
+// only the host syntax differs. A role / label / text target calls Locatra.Find(),
+// a nested class declared once per file (C9.4).
 // Loaded after codegen.js as a classic script, sharing its global.
 
 (function (global) {
@@ -115,18 +117,15 @@
       case 'role': {
         var nth = I.hasNth(t) ? '.Nth(' + t.nth + ')' : '';
         var enumRole = ariaRole(t.role);
+        var level = I.headingLevel(t.level);
         if (!enumRole) {
           // Not an AriaRole member (Playwright for .NET has no string overload): the
-          // same role XPath the Selenium targets use, narrowed by text when the
-          // recording had a name.
-          var css = root + '.Locator(' + q('xpath=//*[' + I.roleNodeXpath(String(t.role == null ? '' : t.role), t.level) + ']') + ')';
-          if (t.name) css += '.Filter(new() { HasText = ' + q(t.name) + ' })';
-          return css + nth;
+          // selector Playwright's own GetByRole() builds, as the Java target does.
+          return root + '.Locator(' + q(internalRoleSelector(t, level)) + ')' + nth;
         }
         var opts = [];
         if (t.name) opts.push('Name = ' + q(t.name));
         if (t.name && t.exact) opts.push('Exact = true');
-        var level = I.headingLevel(t.level);
         if (level) opts.push('Level = ' + level);
         return root + '.GetByRole(' + enumRole + (opts.length ? ', new() { ' + opts.join(', ') + ' }' : '') + ')' + nth;
       }
@@ -137,8 +136,18 @@
       case 'text': return root + '.GetByText(' + q(t.value) + exactOpt(t) + ')';
       case 'id': return root + '.Locator(' + q('#' + I.cssIdent(t.value)) + ')';
       case 'name': return root + '.Locator(' + q('[name="' + I.attrSel(t.value) + '"]') + ')';
+      case 'xpath': return root + '.Locator(' + q('xpath=' + t.value) + ')';
       case 'css': default: return root + '.Locator(' + q(t.value || 'body') + ')';
     }
+  }
+
+  // The selector Playwright's own GetByRole() builds, for a role AriaRole has no
+  // member for (only reachable with hand-edited or future targets).
+  function internalRoleSelector(t, level) {
+    var sel = 'internal:role=' + String(t.role == null ? '' : t.role);
+    if (t.name) sel += '[name="' + String(t.name).replace(/\\/g, '\\\\').replace(/"/g, '\\"') + '"' + (t.exact ? 's' : 'i') + ']';
+    if (level) sel += '[level=' + level + ']';
+    return sel;
   }
 
   // Frames and chains continue the expression they are scoped to, exactly like the
@@ -168,29 +177,89 @@
     return root + '.FindElement(By.' + BY[by] + '(' + q(selector) + '))';
   }
 
-  // `rel` scopes an XPath to the parent element (the leading dot), as in Selenium JS.
-  function roleXpath(t, rel) {
-    var node = I.roleNodeXpath(t.role, t.level);
-    var axis = rel ? './/*' : '//*';
-    var xp = t.name
-      ? axis + '[(' + node + ') and (' + I.nameXpath(t.name, t.exact, t.role) + ')]'
-      : axis + '[' + node + ']';
-    if (I.hasNth(t)) xp = '(' + xp + ')[' + (t.nth + 1) + ']';
-    return xp;
+  // ── the Locatra helper (C9.4) ──────────────────────────────────────────────
+  // Selenium has no getByRole / getByLabel / getByText: a role, label or text
+  // target calls Locatra.Find(root, kind, value, name?, exact:, level:, nth:), a
+  // nested static class declared once per file (the in-page matcher every target
+  // runs, codegen.js MATCH_JS). It waits up to the driver's implicit wait, as
+  // FindElement does, and throws when several elements match.
+  function helperCall(spec, root) {
+    var args = [root, q(spec.kind), q(spec.value)];
+    if (spec.name != null) args.push(q(spec.name));
+    if (spec.exact) args.push('exact: true');
+    if (spec.level) args.push('level: ' + spec.level);
+    if (spec.nth >= 0) args.push('nth: ' + spec.nth);
+    return 'Locatra.Find(' + args.join(', ') + ')';
+  }
+
+  // #nullable keeps the annotations valid whatever the project's nullable setting.
+  var HELPER_CLASS = [
+    '#nullable enable',
+    '// Locatra: the one element a role / label / text locator matches, found the way Playwright\'s',
+    '// GetByRole / GetByLabel / GetByText find it (Selenium has none of them). It waits up to the',
+    '// driver\'s implicit wait, as FindElement does, and fails when several elements match.',
+    'private static class Locatra',
+    '{',
+    '    private const string Js = @"@@JS@@";',
+    '',
+    '    public static IWebElement Find(ISearchContext root, string kind, string value, string? name = null,',
+    '        bool exact = false, int level = 0, int nth = -1)',
+    '    {',
+    '        var driver = root as IWebDriver ?? ((IWrapsDriver)root).WrappedDriver;',
+    '        object? scope = root is IWebDriver ? null : root;',
+    '        var what = kind + " \\"" + value + "\\"" + (name != null ? " named \\"" + name + "\\"" : "") + (exact ? " (exact)" : "");',
+    '        var end = DateTime.UtcNow + driver.Manage().Timeouts().ImplicitWait;',
+    '        while (true)',
+    '        {',
+    '            var result = ((IJavaScriptExecutor)driver).ExecuteScript(Js, kind, value, name, exact, level, scope);',
+    '            var found = (result as IEnumerable<object> ?? Array.Empty<object>()).OfType<IWebElement>().ToList();',
+    '            if (found.Count > Math.Max(nth, 0))',
+    '            {',
+    '                if (nth < 0 && found.Count > 1)',
+    '                {',
+    '                    throw new WebDriverException("Locatra: " + found.Count + " elements match " + what + "; expected exactly one");',
+    '                }',
+    '                return found[Math.Max(nth, 0)];',
+    '            }',
+    '            if (DateTime.UtcNow >= end) throw new NoSuchElementException("Locatra: no element matches " + what);',
+    '            Thread.Sleep(100);',
+    '        }',
+    '    }',
+    '}',
+    '#nullable restore'
+  ].join('\n');
+
+  var FRAME_JS = 'LocatraFrameJs';
+
+  /** The class members code needs (the frame script, the Locatra class), in order. */
+  function selHelpers(code) {
+    var out = [];
+    if (I.uses(code, FRAME_JS)) out.push('// ' + I.FRAME_JS_NOTE + '\nprivate const string ' + FRAME_JS + ' = ' + q(I.DEEP_IFRAME_JS) + ';');
+    if (I.uses(code, 'LocatraSetValueJs')) {
+      out.push('// ' + I.SET_VALUE_NOTE + '\nprivate const string LocatraSetValueJs = ' + q(I.SET_VALUE_JS) + ';');
+    }
+    if (I.uses(code, 'Locatra')) {
+      // A verbatim string: the script exactly as written, quotes doubled.
+      out.push(HELPER_CLASS.replace('@@JS@@', function () { return I.MATCH_JS.replace(/"/g, '""'); }));
+    }
+    return out;
+  }
+
+  /** The usings the Locatra class needs, when the code declares it. */
+  function helperUsings(code) {
+    return /\bclass Locatra\b/.test(code)
+      ? ['System', 'System.Collections.Generic', 'System.Linq', 'System.Threading', 'OpenQA.Selenium'] : [];
   }
 
   function selLeaf(t, root, rel) {
-    var axis = rel ? './/*' : '//*';
+    var spec = I.helperSpec(t);
+    if (spec) return helperCall(spec, root);
     switch (t.kind) {
       case 'testid': return selFind('css', '[' + I.cssIdent(t.attr) + '="' + I.attrSel(t.value) + '"]', root);
-      case 'role':
-        // XPath, named or not: CSS cannot say which role an element ends up with.
-        return selFind('xpath', roleXpath(t, rel), root);
-      case 'label': return selFind('xpath', axis + '[' + I.labelXpath(t.value, t.exact) + ']', root);
       case 'placeholder': return selFind('css', I.attrMatchSel('placeholder', t.value, t.exact), root);
       case 'altText': return selFind('css', I.attrMatchSel('alt', t.value, t.exact), root);
       case 'title': return selFind('css', I.attrMatchSel('title', t.value, t.exact), root);
-      case 'text': return selFind('xpath', I.textXpath(t.value, t.exact, rel), root);
+      case 'xpath': return selFind('xpath', I.scopedXpath(t.value, rel), root);
       case 'id': return selFind('id', t.value, root);
       case 'name': return selFind('name', t.value, root);
       case 'css': default: return selFind('css', t.value || 'body', root);
@@ -207,8 +276,9 @@
     var sh = I.shadowOf(t);
     if (sh) {
       var driver = /^Driver\b/.test(root) ? 'Driver' : 'driver';
-      return sh.hosts.slice(1).concat(sh.css).reduce(function (el, sel) {
-        return el + '.GetShadowRoot().FindElement(By.CssSelector(' + q(sel) + '))';
+      var hops = sh.hosts.slice(1).concat(sh.css);
+      return hops.reduce(function (el, sel) {
+        return el + hopBreak(hops.length) + '.GetShadowRoot().FindElement(By.CssSelector(' + q(sel) + '))';
       }, selFind('css', sh.hosts[0], driver));
     }
     if (t.kind === 'chain') {
@@ -353,7 +423,8 @@
     }
     var down = mods.map(function (m) { return '.KeyDown(' + m + ')'; }).join('');
     var up = mods.slice().reverse().map(function (m) { return '.KeyUp(' + m + ')'; }).join('');
-    return 'new Actions(driver)' + down + '.SendKeys(' + keyArg + ')' + up + '.Perform();';
+    // Three or four modifiers make a long chain: it continues on a second line.
+    return 'new Actions(driver)' + down + (mods.length > 2 ? '\n    ' : '') + '.SendKeys(' + keyArg + ')' + up + '.Perform();';
   }
 
   // Selected is always false for an ARIA checkbox (div[role=checkbox]), so its
@@ -368,23 +439,28 @@
     return '{\n    var el = ' + loc + ';\n' + lines.map(function (l) { return '    ' + l; }).join('\n') + '\n}';
   }
 
+  // More than two hops go one per line.
+  function hopBreak(hops) { return hops > 2 ? '\n    ' : ''; }
+
   function frameSwitch(frame, root) {
     if (frame.shadowPath) {
       // WebDriver searches a shadow root with CSS only, one tree at a time.
       var host = selFind('css', frame.shadowPath[0], root);
       for (var i = 1; i < frame.shadowPath.length; i++) {
-        host += '.GetShadowRoot().FindElement(By.CssSelector(' + q(frame.shadowPath[i]) + '))';
+        host += hopBreak(frame.shadowPath.length - 1) + '.GetShadowRoot().FindElement(By.CssSelector(' + q(frame.shadowPath[i]) + '))';
       }
       return root + '.SwitchTo().Frame(' + host + ');';
     }
     if (frame.selector) return root + '.SwitchTo().Frame(' + selFind('css', frame.selector, root) + ');';
     // No selector (a cross-origin frame): the frame element, by its position among
-    // the page's <iframe>s, shadow roots included (codegen.js DEEP_IFRAME_JS).
+    // the page's <iframe>s, shadow roots included (codegen.js DEEP_IFRAME_JS, declared
+    // once per file as LocatraFrameJs).
     return root + '.SwitchTo().Frame((IWebElement)((IJavaScriptExecutor)' + root + ').ExecuteScript(' +
-      q(I.DEEP_IFRAME_JS) + ', ' + I.seleniumFrameIndex(frame) + ')!);';
+      FRAME_JS + ', ' + I.seleniumFrameIndex(frame) + ')!);';
   }
 
-  var SET_VALUE = '((IJavaScriptExecutor)driver).ExecuteScript(' + q(I.SET_VALUE_JS);
+  var SET_VALUE_JS = 'LocatraSetValueJs';
+  var SET_VALUE = '((IJavaScriptExecutor)driver).ExecuteScript(' + SET_VALUE_JS;
   // The rendered text, normalised as the recorder normalised it: soft hyphens and
   // zero-width spaces dropped, white space (\s is Unicode-aware in .NET) collapsed.
   var NORM_TEXT = function (loc) {
@@ -554,7 +630,9 @@
     stmts = stmts || [];
     var field = testDataField(steps, opts);
     var code = codeOf(stmts) + (field ? '\nTestData[' : '');
-    var usings = ['NUnit.Framework', 'OpenQA.Selenium', 'OpenQA.Selenium.Chrome', 'System'].concat(systemUsings(code));
+    var decls = selHelpers(stmts.join('\n'));
+    var usings = ['NUnit.Framework', 'OpenQA.Selenium', 'OpenQA.Selenium.Chrome', 'System'].concat(systemUsings(code),
+      helperUsings(decls.join('\n')));
     if (/\bnew Actions\(/.test(code)) usings.push('OpenQA.Selenium.Interactions');
     if (/\bnew (SelectElement|WebDriverWait)\(/.test(code)) usings.push('OpenQA.Selenium.Support.UI');
     return usingBlock(usings) + '\n' +
@@ -577,6 +655,7 @@
       '            driver.Quit();\n' +
       '        }\n' +
       '    }\n' +
+      (decls.length ? '\n' + pad(decls.join('\n\n'), 4) + '\n' : '') +
       '}\n';
   }
 
@@ -594,7 +673,7 @@
   var PO_RESERVED = ['Page', 'Driver', 'Goto', 'GotoAsync', 'Equals', 'GetHashCode', 'GetType', 'ToString',
     'MemberwiseClone', 'Finalize', 'ReferenceEquals', 'By', 'AriaRole', 'Keys', 'SelectElement',
     'IJavaScriptExecutor', 'Actions', 'Task', 'Environment', 'Convert', 'IPage', 'ILocator', 'IWebDriver',
-    'IWebElement', 'String', 'Object'];
+    'IWebElement', 'String', 'Object', 'Locatra', 'LocatraFrameJs', 'LocatraSetValueJs'];
 
   function poPascal(name) {
     var words = I.poWords(name).slice(0, 8);
@@ -671,10 +750,12 @@
 
   function block(lines, spaces) { return pad(lines.join('\n'), spaces); }
 
-  function poClass(model, cls, usings, info, body) {
+  // `decls` are the Locatra members the body uses, appended to the class.
+  function poClass(model, cls, usings, info, body, decls) {
     var code = codeOf(body);
-    return poHeader(model, info.skipped) + usingBlock(usings.concat(systemUsings(code))) + '\n' +
-      'public class ' + cls + '\n{\n' + block(body, 4) + '\n}\n';
+    decls = decls || [];
+    return poHeader(model, info.skipped) + usingBlock(usings.concat(systemUsings(code), helperUsings(decls.join('\n')))) +
+      '\n' + 'public class ' + cls + '\n{\n' + block(decls.length ? body.concat('', decls.join('\n\n')) : body, 4) + '\n}\n';
   }
 
   function poPlaywright(model) {
@@ -737,7 +818,7 @@
         var sig = h.act === 'fill' || h.act === 'select' ? '(string value)' : '()';
         if (h.act === 'fill') {
           lines = I.SET_VALUE_TYPES_SELENIUM.indexOf(m.el.inputType) !== -1
-            ? ['((IJavaScriptExecutor)Driver).ExecuteScript(' + q(I.SET_VALUE_JS) + ', ' + m.id + ', value);']
+            ? ['((IJavaScriptExecutor)Driver).ExecuteScript(' + SET_VALUE_JS + ', ' + m.id + ', value);']
             : ['var el = ' + m.id + ';', 'el.Clear();', 'el.SendKeys(value);'];
         } else if (h.act === 'select') {
           lines = ['new SelectElement(' + m.id + ').SelectByText(value);'];
@@ -751,7 +832,7 @@
     });
     var usings = ['OpenQA.Selenium'];
     if (/\bnew SelectElement\(/.test(codeOf(body))) usings.push('OpenQA.Selenium.Support.UI');
-    return poClass(model, cls, usings, info, body);
+    return poClass(model, cls, usings, info, body, selHelpers(body.join('\n')));
   }
 
   // ════════════════════════════════════════════════════════════════════════════
@@ -777,6 +858,8 @@
     locatorExpr: function (target, lang, rel) { return selExpr(target, 'driver', rel); },
     actionStatement: function (step) { return selStatement(step); },
     wrapScript: selWrap,
+    // The class members a locator expression needs (LLCodegen.locatorSnippet).
+    helpers: function (code) { return selHelpers(code); },
     todo: function (text) { return todo(text); },
     pageObject: function (model) { return poSelenium(model || {}); }
   });

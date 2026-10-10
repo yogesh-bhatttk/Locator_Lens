@@ -789,17 +789,17 @@ describe('rendering in every framework × language', () => {
     ];
     const out = C.testScript(steps, 'cypress', 'typescript', { variables: true });
     expect(out).toContain(
-      "import 'cypress-real-events';\n\nconst testData = {\n  firstName: 'Ada',\n};\n\n// Locatra: match"
+      "import 'cypress-real-events';\n\nconst testData = {\n  firstName: 'Ada',\n};\n\n// Locatra: the elements"
     );
   });
 
   it('references test data in the set-value paths for range / colour / date inputs', () => {
     const step = fill(id('vol'), '50', { inputType: 'range', varRef: 'volume' });
     expect(C.actionStatement(step, 'selenium', 'javascript')).toBe(
-      `await driver.executeScript(${C.q(I.SET_VALUE_JS, 'javascript')}, driver.findElement(By.id('vol')), testData.volume);`
+      `await driver.executeScript(LOCATRA_SET_VALUE_JS, driver.findElement(By.id('vol')), testData.volume);`
     );
     expect(C.actionStatement(step, 'selenium', 'python')).toBe(
-      `driver.execute_script(${C.q(I.SET_VALUE_JS, 'python')}, driver.find_element(By.ID, "vol"), TEST_DATA["volume"])`
+      `driver.execute_script(LOCATRA_SET_VALUE_JS, driver.find_element(By.ID, "vol"), TEST_DATA["volume"])`
     );
     expect(C.actionStatement(step, 'cypress', 'javascript')).toBe(
       "cy.get('#vol').invoke('val', testData.volume).trigger('input').trigger('change');"

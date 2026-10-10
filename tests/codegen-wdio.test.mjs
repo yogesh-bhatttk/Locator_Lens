@@ -15,6 +15,8 @@ import { fileURLToPath } from 'node:url';
 import vm from 'node:vm';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 
+import * as CORPUS from './codegen-corpus.mjs';
+
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const WDIO_MODULES = join(ROOT, 'node_modules/.cache/locatra-e2e/wdio/node_modules');
 const HAS_WDIO_TYPES =
@@ -37,16 +39,22 @@ const FW = 'webdriverio';
 const LANGS = ['typescript', 'javascript'];
 const loc = (t, lang = 'typescript', rel) => C.locatorExpr(t, FW, lang, rel);
 const stmt = (step, lang = 'typescript') => C.actionStatement(step, FW, lang);
-// A selector-less frame: the index-th <iframe>, shadow roots included (codegen.js DEEP_IFRAME_JS).
-// execute() returns a bare element reference; $() turns it into the element
-// switchFrame() takes.
+// A selector-less frame: the index-th <iframe>, shadow roots included (codegen.js
+// DEEP_IFRAME_JS, declared once per file as LOCATRA_FRAME_JS). execute() returns a
+// bare element reference; $() turns it into the element switchFrame() takes.
 const deepFrame = (i, lang = 'typescript') =>
-  `$(await browser.execute${lang === 'typescript' ? '<HTMLIFrameElement, [number]>' : ''}(` +
-  `${C.q(C._internals.DEEP_IFRAME_JS, lang)}, ${i}))`;
+  `$(await browser.execute${lang === 'typescript' ? '<HTMLIFrameElement, [number]>' : ''}(LOCATRA_FRAME_JS, ${i}))`;
 
-/** The Selenium JS locator for a target, rewritten to the WDIO form ($ / .$). */
+/**
+ * The Selenium JS locator for a target, rewritten to the WDIO form: $ / .$ for a
+ * selector, `(await locatraFind(…))` — the same helper arguments, no driver — for a
+ * role / label / text target.
+ */
 function fromSelenium(t, rel) {
-  return C.locatorExpr(t, 'selenium', 'javascript', rel)
+  const sel = C.locatorExpr(t, 'selenium', 'javascript', rel);
+  if (/^locatraFind\(driver, /.test(sel))
+    return `(await ${sel.replace('locatraFind(driver, ', 'locatraFind(')})`;
+  return sel
     .replace(/^driver\.findElement\(By\.(?:css|xpath)\(('(?:[^'\\]|\\.)*')\)\)/, '$$($1)')
     .replace(/\.findElement\(By\.(?:css|xpath)\(('(?:[^'\\]|\\.)*')\)\)/g, '.$$($1)');
 }
@@ -142,10 +150,18 @@ describe('locators', () => {
   it('renders every target kind exactly', () => {
     expect(loc(testid('place-order'))).toBe(`$('[data-testid="place-order"]')`);
     expect(loc(testid('v', 'data:qa'))).toBe(String.raw`$('[data\\:qa="v"]')`);
-    // Role locators are the role XPath, named or not (codegen.js roleNodeXpath).
-    const roleXp = (r, level) => `//*[${C._internals.roleNodeXpath(r, level)}]`;
-    expect(loc(role('button'))).toBe(`$('${roleXp('button')}')`);
-    expect(loc(role('heading', null, { level: 2 }))).toBe(`$('${roleXp('heading', 2)}')`);
+    // Role, label and text locators call the Locatra helper (C9.4), named or not.
+    expect(loc(role('button'))).toBe("(await locatraFind('role', 'button', null, { nth: 0 }))");
+    expect(loc(role('heading', null, { level: 2, matchCount: 1 }))).toBe(
+      "(await locatraFind('role', 'heading', null, { level: 2 }))"
+    );
+    expect(loc(label('Email'))).toBe("(await locatraFind('label', 'Email'))");
+    expect(loc({ kind: 'text', value: 'Hi', exact: true })).toBe(
+      "(await locatraFind('text', 'Hi', null, { exact: true }))"
+    );
+    // An XPath alternative is $()'s own strategy; one $() would not read as XPath gets "xpath:".
+    expect(loc({ kind: 'xpath', value: '//button[@id="go"]' })).toBe(`$('//button[@id="go"]')`);
+    expect(loc({ kind: 'xpath', value: 'id("go")' })).toBe(`$('xpath:id("go")')`);
     expect(loc({ kind: 'placeholder', value: 'Search' })).toBe(`$('[placeholder*="Search"]')`);
     expect(loc({ kind: 'placeholder', value: 'Search', exact: true })).toBe(`$('[placeholder="Search"]')`);
     expect(loc({ kind: 'altText', value: 'Logo' })).toBe(`$('[alt*="Logo"]')`);
@@ -160,7 +176,7 @@ describe('locators', () => {
     expect(loc(null)).toBe('');
   });
 
-  it('uses exactly the Selenium JS XPath / CSS for every kind but id and name', () => {
+  it('uses exactly the Selenium JS CSS / XPath / helper arguments for every kind but id and name', () => {
     const targets = [
       testid('x'),
       testid('v', 'data-qa'),
@@ -181,8 +197,7 @@ describe('locators', () => {
       { kind: 'text', value: 'Hello   world' },
       { kind: 'text', value: 'Hello', exact: true },
       css('table tr:nth-child(2)'),
-      { kind: 'chain', parent: css('table'), child: role('button', 'Delete') },
-      { kind: 'chain', parent: role('row', 'Ada'), child: { kind: 'text', value: 'Edit' } },
+      { kind: 'xpath', value: '//a[normalize-space(.)="Help"]' },
       { kind: 'chain', parent: css('form'), child: css('input') },
     ];
     for (const t of targets) {
@@ -191,27 +206,39 @@ describe('locators', () => {
     }
   });
 
-  it('renders role names, exact, nth and level through the shared XPath', () => {
-    const I = C._internals;
-    const node = I.roleNodeXpath('button');
-    // The XPath is quoted like any literal (its no-break spaces as \xa0 escapes).
-    const $ = (xpath) => `$(${C.q(xpath, 'typescript')})`;
+  it('renders role names, exact, nth and level as helper options', () => {
     expect(loc(role('button', 'Save', { exact: true }))).toBe(
-      $(`//*[(${node}) and (${I.nameXpath('Save', true, 'button')})]`)
+      "(await locatraFind('role', 'button', 'Save', { exact: true }))"
     );
-    expect(loc(role('button', null, { nth: 1 }))).toBe(`$('(//*[${node}])[2]')`);
-    expect(loc(role('button', 'Save', { nth: 0 }), 'typescript', true)).toBe(
-      $(`(.//*[(${node}) and (${I.nameXpath('Save', undefined, 'button')})])[1]`)
+    expect(loc(role('button', null, { nth: 1 }))).toBe(
+      "(await locatraFind('role', 'button', null, { nth: 1 }))"
+    );
+    expect(loc(role('heading', 'T', { level: 3, nth: 0 }))).toBe(
+      "(await locatraFind('role', 'heading', 'T', { level: 3, nth: 0 }))"
     );
   });
 
-  it('scopes a chained child under its parent with a relative XPath', () => {
+  it('searches a chained child within its parent', () => {
     const t = { kind: 'chain', parent: css('tr.b'), child: { kind: 'text', value: 'Row B', exact: true } };
-    const q = (s) => C.q(s, 'typescript');
-    expect(loc(t)).toBe(`$('tr.b').$(${q(C._internals.textXpath('Row B', true, true))})`);
-    expect(loc(t)).toContain(`.$('.//*[`);
-    expect(loc(label('Email'), 'typescript', true)).toBe(
-      `$(${q(`.//*[${C._internals.labelXpath('Email')}]`)})`
+    expect(loc(t)).toBe("(await locatraFind('text', 'Row B', null, { exact: true, within: $('tr.b') }))");
+    // A helper-found parent: a native child continues from it, a helper child searches within it.
+    expect(loc({ kind: 'chain', parent: role('row', 'Ada'), child: css('a.edit') })).toBe(
+      "(await locatraFind('role', 'row', 'Ada')).$('a.edit')"
+    );
+    expect(loc({ kind: 'chain', parent: role('row', 'Ada'), child: { kind: 'text', value: 'Edit' } })).toBe(
+      "(await locatraFind('text', 'Edit', null, { within: (await locatraFind('role', 'row', 'Ada')) }))"
+    );
+    // …through a nested chain too.
+    expect(
+      loc({
+        kind: 'chain',
+        parent: css('table'),
+        child: { kind: 'chain', parent: css('tr.b'), child: label('Qty') },
+      })
+    ).toBe("(await locatraFind('label', 'Qty', null, { within: $('table').$('tr.b') }))");
+    // An XPath child is made relative with a leading dot.
+    expect(loc({ kind: 'chain', parent: css('tr.b'), child: { kind: 'xpath', value: '//td[2]' } })).toBe(
+      "$('tr.b').$('.//td[2]')"
     );
   });
 
@@ -281,7 +308,7 @@ describe('locators', () => {
       `$('css selector:[title="it\\'s <b>bold</b>"]')`
     );
     // XPath strings are never prefixed: they already start with "/", "(" or "./".
-    expect(loc(role('button', 'x.png'))).toMatch(/^\$\('\/\/\*\[/);
+    expect(loc({ kind: 'xpath', value: '(//a)[2]' })).toBe(`$('(//a)[2]')`);
   });
 });
 
@@ -350,7 +377,11 @@ describe('actions', () => {
   });
 
   it('sets dates, times, sliders and colours through the value setter', () => {
-    const js = C.q(C._internals.SET_VALUE_JS, 'typescript');
+    // Declared once per file (LOCATRA_SET_VALUE_JS).
+    const js = 'LOCATRA_SET_VALUE_JS';
+    expect(
+      C.testScript([{ action: 'fill', target: T, value: '42', inputType: 'date' }], FW, 'typescript')
+    ).toContain(`const LOCATRA_SET_VALUE_JS = ${C.q(C._internals.SET_VALUE_JS, 'typescript')};`);
     for (const inputType of ['range', 'color', 'date', 'time', 'datetime-local', 'month', 'week']) {
       expect(stmt({ action: 'fill', target: T, value: '42', inputType })).toBe(
         `await browser.execute(${js}, await ${L}, '42');`
@@ -384,8 +415,7 @@ describe('actions', () => {
       `await browser.url('https://u.example/');`
     );
     expect(stmt({ action: 'goto' })).toBe(`await browser.url('');`);
-    const js =
-      "'return [1280 + window.outerWidth - window.innerWidth, 800 + window.outerHeight - window.innerHeight];'";
+    const js = "'return [1280 + outerWidth - innerWidth, 800 + outerHeight - innerHeight];'";
     expect(stmt({ action: 'viewport', value: '1280x800' }, 'typescript')).toBe(
       `{\n  const [width, height] = await browser.execute<[number, number], []>(${js});\n` +
         '  await browser.setWindowSize(width, height);\n}'
@@ -610,7 +640,9 @@ describe('frames', () => {
       `await browser.switchFrame($('#outer'));`,
       `await browser.switchFrame($('x-a').shadow$('iframe'));`,
     ]);
-    expect(lines[2]).toMatch(/^await \$\('form'\)\.\$\('\.\/\/\*\[/);
+    expect(lines[2]).toBe(
+      "await (await locatraFind('role', 'button', 'Pay', { within: $('form') })).click();"
+    );
     expect(lines[3]).toBe('await browser.switchFrame(null);');
   });
 
@@ -700,11 +732,18 @@ describe('test file', () => {
     ).actions;
     const ts = C.testScript(flow, FW, 'typescript');
     const js = C.testScript(flow, FW, 'javascript');
+    const body = (code) => code.slice(code.indexOf("describe('recorded test'"));
     expect(
-      ts
+      body(ts)
         .replace('browser.execute<[number, number], []>(', 'browser.execute(')
         .replaceAll('browser.execute<HTMLIFrameElement, [number]>(', 'browser.execute(')
-    ).toBe(js);
+    ).toBe(body(js));
+    // The helper declarations differ only in their annotations (one source, $T{…} kept or dropped).
+    const head = (code) => code.slice(0, code.indexOf("describe('recorded test'"));
+    expect(head(ts)).toContain(
+      'async function locatraFind(kind: string, value: string, name: string | null = null'
+    );
+    expect(head(js)).toContain('async function locatraFind(kind, value, name = null, opts = {}) {');
   });
 });
 
@@ -723,10 +762,12 @@ describe('test-data variables', () => {
 
   it('declares testData after the imports and references it from fills and selects', () => {
     const out = C.testScript(steps, FW, 'typescript', { variables: true });
-    expect(out.split('describe(')[0]).toBe(
+    const head = out.split("describe('recorded")[0];
+    // imports, then the Locatra helper the label / role steps call, then the data.
+    expect(head.startsWith("import { browser, $, expect } from '@wdio/globals';\n\n// Locatra: ")).toBe(true);
+    expect(head.indexOf('async function locatraFind(')).toBeLessThan(head.indexOf('const testData = {'));
+    expect(head.slice(head.indexOf('const testData = {'))).toBe(
       [
-        "import { browser, $, expect } from '@wdio/globals';",
-        '',
         'const testData = {',
         "  firstName: 'Ada \\'A\\'',",
         "  country: 'Ireland',",
@@ -936,7 +977,7 @@ describe('page objects', () => {
     };
     const out = po(model);
     const checked = `((await el.isSelected()) || (await el.getAttribute('aria-checked')) === 'true')`;
-    const setter = C.q(C._internals.SET_VALUE_JS, 'typescript');
+    const setter = 'LOCATRA_SET_VALUE_JS';
     for (const part of [
       '  async fillNotes(value: string): Promise<void> {\n    await this.notes.setValue(value);\n  }',
       '  async selectCountry(value: string): Promise<void> {\n    await this.country.selectByVisibleText(value);\n  }',
@@ -986,6 +1027,7 @@ describe('page objects', () => {
     expect(ts).toContain(
       `    await browser.switchFrame(${deepFrame(1)});\n    return $('#go').getElement();`
     );
+    expect(ts).toContain(`const LOCATRA_FRAME_JS = ${C.q(C._internals.DEEP_IFRAME_JS, 'typescript')};`);
     expect(ts).toContain(
       "  async goto(): Promise<void> {\n    await browser.switchFrame(null);\n    await browser.url('https://e.example/');\n  }"
     );
@@ -1062,10 +1104,10 @@ describe('page objects', () => {
       '  // NOTE: this locator was not unique when the page object was generated.\n  get loose() {'
     );
     expect(out).toContain(
-      '  // NOTE: this role locator has no accessible name and may match several elements.\n  get anon() {'
+      '  // NOTE: this role locator has no accessible name and may match several elements.\n  async anon(): Promise<WebdriverIO.Element> {'
     );
     expect(out).toContain(
-      '  // NOTE: this locator matched 2 elements when the page object was generated.\n  get anonCounted() {'
+      '  // NOTE: this locator matched 2 elements when the page object was generated.\n  async anonCounted(): Promise<WebdriverIO.Element> {'
     );
     expect(out).toContain(`await browser.url('https://e.example/a\\'b\\nc');`);
     expect(po({})).toBe(
@@ -1180,6 +1222,11 @@ describe('generated code parses', () => {
       ),
       'po-ts.mjs': stripTypeScriptTypes(C.pageObject(RICH_PO, FW, 'typescript')),
       'po-flat-ts.mjs': stripTypeScriptTypes(C.pageObject(FLAT_PO, FW, 'typescript')),
+      'corpus-js.mjs': C.testScript(CORPUS.STEPS, FW, 'javascript'),
+      'corpus-po-js.mjs': C.pageObject(CORPUS.MODEL, FW, 'javascript'),
+      'corpus-ts.mjs': stripTypeScriptTypes(
+        C.testScript(CORPUS.STEPS, FW, 'typescript', { variables: true })
+      ),
     };
     const files = writeFiles(variants);
     for (const [name, file] of Object.entries(files)) {
@@ -1203,6 +1250,10 @@ describe('generated code parses', () => {
         'FlatPage.ts': C.pageObject({ ...FLAT_PO, className: 'Flat' }, FW, 'typescript'),
         'contract.ts': C.testScript(CONTRACT_STEPS, FW, 'typescript'),
         'ShadowPage.ts': C.pageObject(SHADOW_PO, FW, 'typescript'),
+        // The C9.4 corpus: the Locatra helper (within, nth, level, exact), XPath, deep shadow.
+        'corpus.ts': C.testScript(CORPUS.STEPS, FW, 'typescript'),
+        'corpus-vars.ts': C.testScript(CORPUS.STEPS, FW, 'typescript', { variables: true }),
+        'CorpusPage.ts': C.pageObject({ ...CORPUS.MODEL, className: 'Corpus' }, FW, 'typescript'),
         'uses-po.ts': [
           "import { RichPage } from './RichPage.js';",
           "import { FlatPage } from './FlatPage.js';",
@@ -1215,7 +1266,7 @@ describe('generated code parses', () => {
           "    await card.setValue('1');",
           '    const flat = new FlatPage();',
           "    await flat.fillEmailAddressInput('a@b.c');",
-          '    await flat.emailAddressInput.click();',
+          '    await (await flat.emailAddressInput()).click();',
           '    await flat.checkTermsCheckbox();',
           '  });',
           '});',
@@ -1381,7 +1432,7 @@ describe('generated code runs against WDIO stand-ins', () => {
       const { log } = await runSpec(code);
       expect(log, lang).toEqual([
         'url(https://e.example/)',
-        'execute(return [1000 + w…, )',
+        'execute(return [1000 + o…, )',
         'setWindowSize(1000, 700)',
         '#first.setValue("Ada")',
         '#pw.setValue("from-env")',

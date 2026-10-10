@@ -3,8 +3,9 @@
 // WDIO testrunner (Mocha `describe`/`it`, the `browser` / `$` / `$$` / `expect`
 // globals from @wdio/globals, matchers from expect-webdriverio).
 //
-// WebdriverIO has no getByRole/getByLabel, so every locator uses exactly the XPath /
-// CSS strategy Selenium JS uses (codegen.js _internals): the same selector string,
+// WebdriverIO has no getByRole/getByLabel/getByText: a role, label or text target
+// calls the Locatra helper locatraFind() (declared once per file, see below);
+// every other locator uses the selector Selenium JS uses (codegen.js _internals),
 // handed to `$()` instead of `driver.findElement(By…)`. Two differences:
 //   * id and name become CSS (#id / [name="…"]): WDIO has no By.id / By.name.
 //   * `$()` guesses a strategy from the selector text (XPath when it starts with
@@ -67,29 +68,73 @@
     return '$(' + q(by === 'xpath' ? selector : cssArg(selector), lang) + ')';
   }
 
-  // Same XPath as Selenium's roleXpath(): `rel` scopes it under a parent element.
-  function roleXpath(t, rel) {
-    var node = I.roleNodeXpath(t.role, t.level);
-    var axis = rel ? './/*' : '//*';
-    var xp = t.name
-      ? axis + '[(' + node + ') and (' + I.nameXpath(t.name, t.exact, t.role) + ')]'
-      : axis + '[' + node + ']';
-    if (I.hasNth(t)) xp = '(' + xp + ')[' + (t.nth + 1) + ']';
-    return xp;
+  // ── the Locatra helper (C9.4) ──────────────────────────────────────────────
+  // WebdriverIO has no getByRole / getByLabel / getByText: a role, label or text
+  // target calls locatraFind(), declared once per spec or page object (the same
+  // in-page matcher every target runs, codegen.js MATCH_SRC). It waits with
+  // browser.waitUntil (waitforTimeout, as an element command waits for its element)
+  // and fails when several elements match; a chain passes its parent as `within`.
+  var HELPER_SRC = [
+    '// Locatra: the one element a role / label / text locator matches, found the way Playwright\'s',
+    '// getByRole / getByLabel / getByText find it (WebdriverIO has none of them). It waits up to',
+    '// waitforTimeout and fails when several elements match.',
+    'const LOCATRA_JS = String.raw`@@MATCH_JS@@`;',
+    '',
+    'async function locatraFind(kind$T{: string}, value$T{: string}, name$T{: string | null} = null, opts$T{: any} = {})$T{: Promise<WebdriverIO.Element>} {',
+    '  const nth$T{: number} = typeof opts.nth === \'number\' ? opts.nth : -1;',
+    '  const what = kind + \' \' + JSON.stringify(value) + (name ? \' named \' + JSON.stringify(name) : \'\') + (opts.exact ? \' (exact)\' : \'\');',
+    '  const scope = opts.within ? await opts.within : null;',
+    '  let found$T{: WebdriverIO.Element[]} = [];',
+    '  await browser.waitUntil(async () => {',
+    '    found = await browser.execute$T{<HTMLElement[], [string, string, string | null, boolean, number, any]>}(',
+    '      LOCATRA_JS, kind, value, name, !!opts.exact, opts.level || 0, scope);',
+    '    return found.length > Math.max(nth, 0);',
+    '  }, { timeoutMsg: \'Locatra: no element matches \' + what });',
+    '  if (nth < 0 && found.length > 1) throw new Error(\'Locatra: \' + found.length + \' elements match \' + what + \'; expected exactly one\');',
+    '  return $(found[Math.max(nth, 0)]).getElement();',
+    '}'
+  ].join('\n');
+
+  function helperSource(lang) {
+    return I.tsOnly(HELPER_SRC, lang).replace('@@MATCH_JS@@', function () { return I.MATCH_JS; });
   }
 
-  function baseLocator(t, lang, rel) {
-    var axis = rel ? './/*' : '//*';
+  // A cross-origin frame (no selector) is entered by its position: LOCATRA_FRAME_JS
+  // (codegen.js DEEP_IFRAME_JS) is declared once and run with the frame's index.
+  // So is LOCATRA_SET_VALUE_JS (codegen.js SET_VALUE_JS), which sets a date / range /
+  // colour input's value.
+  function constSource(name, note, js, lang) { return '// ' + note + '\nconst ' + name + ' = ' + q(js, lang) + ';'; }
+
+  /** The declarations code needs, in order (an empty list when none). */
+  function helpers(code, lang) {
+    var out = [];
+    if (I.uses(code, I.FRAME_JS_NAME)) out.push(constSource(I.FRAME_JS_NAME, I.FRAME_JS_NOTE, I.DEEP_IFRAME_JS, lang));
+    if (I.uses(code, I.SET_VALUE_NAME)) out.push(constSource(I.SET_VALUE_NAME, I.SET_VALUE_NOTE, I.SET_VALUE_JS, lang));
+    if (I.uses(code, 'locatraFind')) out.push(helperSource(lang));
+    return out;
+  }
+
+  /** `(await locatraFind(…))`: an element, so a statement continues it like `$()`. */
+  function helperCall(spec, lang, within) {
+    return '(await locatraFind(' + I.jsHelperArgs(spec, lang, within ? ['within: ' + within] : null) + '))';
+  }
+
+  // `$()` reads a selector starting with "/", "(" or "./" as XPath; any other XPath
+  // gets WDIO's explicit "xpath:" prefix. Inside a parent, "//…" is made ".//…".
+  function xpathArg(value, rel) {
+    var v = I.scopedXpath(value, rel);
+    return /^(\/|\(|\.\.?\/)/.test(v) ? v : 'xpath:' + v;
+  }
+
+  function baseLocator(t, lang, rel, within) {
+    var spec = I.helperSpec(t);
+    if (spec) return helperCall(spec, lang, within);
     switch (t.kind) {
       case 'testid': return find('css', '[' + I.cssIdent(t.attr) + '="' + I.attrSel(t.value) + '"]', lang);
-      case 'role':
-        // XPath, named or not: CSS cannot say which role an element ends up with.
-        return find('xpath', roleXpath(t, rel), lang);
-      case 'label': return find('xpath', axis + '[' + I.labelXpath(t.value, t.exact) + ']', lang);
       case 'placeholder': return find('css', I.attrMatchSel('placeholder', t.value, t.exact), lang);
       case 'altText': return find('css', I.attrMatchSel('alt', t.value, t.exact), lang);
       case 'title': return find('css', I.attrMatchSel('title', t.value, t.exact), lang);
-      case 'text': return find('xpath', I.textXpath(t.value, t.exact, rel), lang);
+      case 'xpath': return find('xpath', xpathArg(t.value, rel), lang);
       case 'id': return find('css', '#' + I.cssIdent(t.value), lang);
       case 'name': return find('css', '[name="' + I.attrSel(t.value) + '"]', lang);
       case 'css': default: return find('css', t.value || 'body', lang);
@@ -97,16 +142,18 @@
   }
 
   // A chain continues the parent element's search: `$(parent).$(child)`, the child
-  // rendered relative (a leading "./" XPath) so it stays inside the parent.
-  // A frame renders its innermost target: entering the frame is a statement
-  // (browser.switchFrame), as in Selenium. An element in open shadow DOM is reached
-  // host by host with .shadow$(), ending with its shadowCss (C3): `$()` does not
-  // search shadow roots with XPath or plain CSS.
-  function locatorExpr(target, lang, rel) {
+  // rendered relative (a leading "./" XPath) so it stays inside the parent; a helper
+  // child searches `within` the parent. A frame renders its innermost target:
+  // entering the frame is a statement (browser.switchFrame), as in Selenium. An
+  // element in open shadow DOM is reached host by host with .shadow$(), ending with
+  // its shadowCss (C3): `$()` does not search shadow roots with XPath or plain CSS.
+  function locatorExpr(target, lang, rel) { return expr(target, lang, rel, null); }
+
+  function expr(target, lang, rel, within) {
     if (!target) return '';
     if (target.kind === 'frame') {
       var inner = I.unwrapFrames(target).inner;
-      return inner ? locatorExpr(inner, lang, rel) : '';
+      return inner ? expr(inner, lang, rel, null) : '';
     }
     var sh = I.shadowOf(target);
     if (sh) {
@@ -115,15 +162,20 @@
       }).join('');
     }
     if (target.kind === 'chain') {
-      var parent = locatorExpr(target.parent, lang, rel);
+      var parent = expr(target.parent, lang, rel, within);
       if (!target.child) return parent;
-      var child = locatorExpr(target.child, lang, true);
       // A child reached through shadow roots starts from the document.
-      if (!parent || I.shadowOf(target.child)) return child;
+      if (!parent || I.shadowOf(target.child)) return expr(target.child, lang, true, null);
+      if (I.helperSpec(target.child) || (target.child.kind === 'chain' && I.needsHelper(target.child))) {
+        return expr(target.child, lang, true, parent);
+      }
+      var child = expr(target.child, lang, true, null);
       // A child that is no element search (an empty frame) cannot narrow the parent.
       return /^\$\(/.test(child) ? parent + '.' + child : parent;
     }
-    return baseLocator(target, lang, rel);
+    var base = baseLocator(target, lang, rel, within);
+    // A native locator inside a helper-found parent continues from that element.
+    return within && /^\$\(/.test(base) ? within + '.' + base : base;
   }
 
   // ── frames ─────────────────────────────────────────────────────────────────
@@ -139,10 +191,11 @@
     if (frame.selector) return find('css', frame.selector, lang);
     // A cross-origin frame has no readable selector: address it by its position
     // among the page's <iframe>s, shadow roots included ($$('iframe') sees only the
-    // document's own), as codegen.js DEEP_IFRAME_JS counts them. execute() hands back
-    // a bare element reference, which switchFrame() refuses; $() makes it an element.
+    // document's own), as codegen.js DEEP_IFRAME_JS (LOCATRA_FRAME_JS) counts them.
+    // execute() hands back a bare element reference, which switchFrame() refuses;
+    // $() makes it an element.
     return '$(await browser.execute' + (lang === 'typescript' ? '<HTMLIFrameElement, [number]>' : '') + '(' +
-      q(I.DEEP_IFRAME_JS, lang) + ', ' + frame.index + '))';
+      I.FRAME_JS_NAME + ', ' + frame.index + '))';
   }
 
   function frameSwitch(frame, lang) {
@@ -287,7 +340,7 @@
         // Dates, times, sliders and colours cannot be typed reliably: set the value
         // through the prototype setter and fire input/change, as Selenium does.
         if (I.SET_VALUE_TYPES_SELENIUM.indexOf(step.inputType) !== -1) {
-          return 'await browser.execute(' + q(I.SET_VALUE_JS, lang) + ', await ' + loc + ', ' + val + ');';
+          return 'await browser.execute(' + I.SET_VALUE_NAME + ', await ' + loc + ', ' + val + ');';
         }
         if (!step.sensitive && !varRefName(step) && (step.value == null || step.value === '')) {
           return 'await ' + loc + '.clearValue();';
@@ -326,8 +379,7 @@
       // The recorded size is the viewport (innerWidth x innerHeight);
       // setWindowSize() sizes the whole window, so add the browser chrome measured
       // at run time (works with and without WebDriver BiDi).
-      var js = 'return [' + I.vpW(step) + ' + window.outerWidth - window.innerWidth, ' +
-        I.vpH(step) + ' + window.outerHeight - window.innerHeight];';
+      var js = 'return [' + I.vpW(step) + ' + outerWidth - innerWidth, ' + I.vpH(step) + ' + outerHeight - innerHeight];';
       var generic = lang === 'typescript' ? '<[number, number], []>' : '';
       return '{\n  const [width, height] = await browser.execute' + generic + '(' + q(js, lang) + ');\n' +
         '  await browser.setWindowSize(width, height);\n}';
@@ -390,9 +442,11 @@
 
   function wrapScript(stmts, lang, steps, opts) {
     stmts = stmts || [];
-    var imports = importsFor(codeOnly(stmts.join('\n')));
+    var decls = helpers(stmts.join('\n'), lang);
+    var imports = importsFor(codeOnly(stmts.concat(decls).join('\n')));
     var data = testDataDecl(opts && opts.variables, lang);
-    var head = (imports.length ? imports.join('\n') + '\n\n' : '') + (data ? data + '\n' : '');
+    var head = (imports.length ? imports.join('\n') + '\n\n' : '') + (decls.length ? decls.join('\n\n') + '\n\n' : '') +
+      (data ? data + '\n' : '');
     return head +
       "describe('recorded test', () => {\n" +
       "  it('replays the recorded flow', async () => {\n" +
@@ -473,14 +527,22 @@
     var ret = ts ? ': Promise<void>' : '';
     var body = [];
 
+    // A member found by the helper (an await) is an async method, as is every member
+    // once any element lives in a frame; the rest are getters.
     members.forEach(function (m, i) {
       if (i) body.push('');
       body = body.concat(poNote(m.el));
       var loc = locatorExpr(m.el.target, lang);
-      if (anyFrames) {
-        var lines = ['await browser.switchFrame(null);'];
-        I.unwrapFrames(m.el.target).frames.forEach(function (f) { lines.push(frameSwitch(f, lang)); });
-        lines.push('return ' + loc + '.getElement();');
+      var found = /^\(await (locatraFind\([^\n]*\))\)$/.exec(loc);
+      m.async = anyFrames || I.uses(loc, 'locatraFind');
+      if (m.async) {
+        var lines = [];
+        if (anyFrames) {
+          lines.push('await browser.switchFrame(null);');
+          I.unwrapFrames(m.el.target).frames.forEach(function (f) { lines.push(frameSwitch(f, lang)); });
+        }
+        if (found) lines.push('return ' + found[1] + ';');
+        else lines.push('return ' + loc + (I.uses(loc, 'locatraFind') ? ';' : '.getElement();'));
         body.push('async ' + m.id + '()' + (ts ? ': Promise<WebdriverIO.Element>' : '') + ' {', I.indent(lines, '  '), '}');
       } else {
         body.push('get ' + m.id + '() {', '  return ' + loc + ';', '}');
@@ -493,33 +555,36 @@
       body.push('  await browser.url(' + q(url, lang) + ');', '}');
     }
     members.forEach(function (m) {
-      var get = anyFrames ? 'await this.' + m.id + '()' : 'this.' + m.id;
+      var awaited = m.async;
+      var get = awaited ? 'await this.' + m.id + '()' : 'this.' + m.id;
       m.helpers.forEach(function (h) {
         var sig = h.act === 'fill' || h.act === 'select' ? '(value' + (ts ? ': string' : '') + ')' : '()';
         var lines;
         if (h.act === 'fill') {
           lines = I.SET_VALUE_TYPES_SELENIUM.indexOf(m.el.inputType) !== -1
-            ? ['await browser.execute(' + q(I.SET_VALUE_JS, lang) + ', ' + (anyFrames ? get : 'await ' + get) + ', value);']
-            : [anyFrames ? 'await (' + get + ').setValue(value);' : 'await ' + get + '.setValue(value);'];
+            ? ['await browser.execute(' + I.SET_VALUE_NAME + ', ' + (awaited ? get : 'await ' + get) + ', value);']
+            : [awaited ? 'await (' + get + ').setValue(value);' : 'await ' + get + '.setValue(value);'];
         } else if (h.act === 'select') {
-          lines = [anyFrames ? 'await (' + get + ').selectByVisibleText(value);' : 'await ' + get + '.selectByVisibleText(value);'];
+          lines = [awaited ? 'await (' + get + ').selectByVisibleText(value);' : 'await ' + get + '.selectByVisibleText(value);'];
         } else if (h.act === 'check' || h.act === 'uncheck') {
-          lines = ['const el = ' + (anyFrames ? get : 'await ' + get) + ';',
+          lines = ['const el = ' + (awaited ? get : 'await ' + get) + ';',
             'if (' + (h.act === 'check' ? '!' : '') + checkedExpr('el') + ') await el.click();'];
         } else {
-          lines = [anyFrames ? 'await (' + get + ').click();' : 'await ' + get + '.click();'];
+          lines = [awaited ? 'await (' + get + ').click();' : 'await ' + get + '.click();'];
         }
         if (body.length) body.push('');
         body.push('async ' + h.id + sig + ret + ' {', I.indent(lines, '  '), '}');
       });
     });
 
-    var imports = importsFor(codeOnly(body.join('\n')));
+    var decls = helpers(body.join('\n'), lang);
+    var imports = importsFor(codeOnly(body.concat(decls).join('\n')));
     var head = imports.length ? imports.join('\n') + '\n\n' : '';
     if (!ts) {
       var inst = cls.charAt(0).toLowerCase() + cls.slice(1);
       head += comment('Usage: const ' + inst + ' = new ' + cls + '();') + '\n\n';
     }
+    if (decls.length) head += decls.join('\n\n') + '\n\n';
     return poHeader(model, info.skipped) + head + 'export class ' + cls + ' {\n' + I.indent(body, '  ') + '\n}\n';
   }
 
@@ -533,6 +598,8 @@
     actionStatement: actionStatement,
     wrapScript: wrapScript,
     pageObject: pageObject,
+    // The declarations a locator expression needs (LLCodegen.locatorSnippet).
+    helpers: helpers,
     // codegen.js writes its own TODOs (unknown action, no locator) through this.
     todo: function (text) { return todo(text); }
   });

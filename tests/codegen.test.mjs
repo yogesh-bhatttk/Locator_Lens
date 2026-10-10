@@ -9,14 +9,13 @@ import vm from 'node:vm';
 import { JSDOM } from 'jsdom';
 import { beforeAll, describe, expect, it } from 'vitest';
 
+import { helperCallOf, runCypress, runHelper, runSeleniumJs, seleniumJs } from './codegen-helper-calls.mjs';
+
 let C;
 beforeAll(async () => {
   await import('../src/codegen.js');
   C = globalThis.LLCodegen;
 });
-
-/** The value of a single-quoted JS string literal's body, escapes (\\xa0, \\u200b, …) decoded. */
-const jsString = (body) => new Function(`return '${body}';`)();
 
 const FRAMEWORKS = ['playwright', 'selenium', 'cypress'];
 const LANGUAGES = ['typescript', 'javascript', 'python'];
@@ -120,34 +119,23 @@ describe('escaping of hostile values', () => {
     expect(expr).toContain('\\\\');
   });
 
-  it('keeps quotes in an accessible name instead of deleting them (Selenium xpath)', () => {
+  it('keeps quotes in an accessible name instead of deleting them (the Selenium helper)', () => {
     const expr = C.locatorExpr(
       { kind: 'role', role: 'button', name: 'Delete "row"' },
       'selenium',
       'javascript'
     );
-    // Previously every " was stripped, so the xpath searched for `Delete row` and
-    // quietly matched a different button.
-    expect(expr).toContain('Delete "row"');
-    expect(expr).not.toContain('Delete row"');
+    // An older XPath form stripped every ", so it searched for `Delete row` and
+    // quietly matched a different button. The name is now a plain string literal.
+    expect(expr).toBe("locatraFind(driver, 'role', 'button', 'Delete \"row\"')");
   });
 
-  it('switches xpath literal quoting to whichever quote the value lacks', () => {
-    // Only a double quote present -> wrap in single quotes, no concat needed.
-    const dbl = C.locatorExpr({ kind: 'text', value: 'say "hi"' }, 'selenium', 'javascript');
-    expect(dbl).not.toContain('concat(');
-    expect(dbl).toContain('say "hi"');
-
-    // Only a single quote present -> wrap in double quotes.
-    const sgl = C.locatorExpr({ kind: 'text', value: "it's here" }, 'selenium', 'javascript');
-    expect(sgl).not.toContain('concat(');
-    expect(sgl).toContain("it\\'s here");
-  });
-
-  it('builds a concat() xpath when both quote kinds are present', () => {
-    // XPath 1.0 has no escape syntax, so this is the only correct encoding.
-    const both = C.locatorExpr({ kind: 'text', value: `mix "d" and 'q'` }, 'selenium', 'javascript');
-    expect(both).toContain('concat(');
+  it('escapes only the host language quote in a helper argument, whatever quotes the value holds', () => {
+    const lit = (value, lang) => C.locatorExpr({ kind: 'text', value }, 'selenium', lang);
+    expect(lit('say "hi"', 'javascript')).toBe("locatraFind(driver, 'text', 'say \"hi\"')");
+    expect(lit("it's here", 'javascript')).toBe("locatraFind(driver, 'text', 'it\\'s here')");
+    expect(lit(`mix "d" and 'q'`, 'javascript')).toBe("locatraFind(driver, 'text', 'mix \"d\" and \\'q\\'')");
+    expect(lit(`mix "d" and 'q'`, 'python')).toBe('locatra_find(driver, "text", "mix \\"d\\" and \'q\'")');
   });
 
   it('escapes ids that contain CSS-special characters', () => {
@@ -370,38 +358,48 @@ describe('chained locators', () => {
     expect(C.locatorExpr(chain, 'playwright', 'python')).toBe(
       'page.get_by_test_id("row-7").get_by_role("button", name="Delete")'
     );
-    const cy = C.locatorExpr(chain, 'cypress', 'javascript');
-    expect(cy.startsWith("cy.get('[data-testid=\"row-7\"]').find('button, ")).toBe(true);
-    expect(
-      cy.endsWith(".filter((_, el) => locatraRole(el) === 'button' && locatraMatch(el, 'name', 'Delete'))")
-    ).toBe(true);
+    expect(C.locatorExpr(chain, 'cypress', 'javascript')).toBe(
+      "cy.get('[data-testid=\"row-7\"]').then(($el) => locatraGet('role', 'button', 'Delete', { within: $el }))"
+    );
   });
 
-  it('scopes the Selenium child XPath to the parent with a leading dot', () => {
-    // Selenium's element.find_element(By.XPATH, "//…") still searches the whole
-    // document — the dot is the entire difference between scoped and not.
-    const js = C.locatorExpr(chain, 'selenium', 'javascript');
-    expect(js).toContain('row-7');
-    expect(js).toMatch(/By\.xpath\('\.\/\//);
-    expect(js).not.toMatch(/By\.xpath\('\/\//);
-
-    const py = C.locatorExpr(chain, 'selenium', 'python');
-    expect(py).toMatch(/By\.XPATH, "\.\/\//);
+  it('roots the Selenium child lookup at the parent element', () => {
+    // A lookup rooted at the driver searches the whole document — rooting the helper
+    // at the parent element is the entire difference between scoped and not.
+    expect(C.locatorExpr(chain, 'selenium', 'javascript')).toBe(
+      "locatraFind(driver.findElement(By.css('[data-testid=\"row-7\"]')), 'role', 'button', 'Delete')"
+    );
+    expect(C.locatorExpr(chain, 'selenium', 'python')).toBe(
+      'locatra_find(driver.find_element(By.CSS_SELECTOR, "[data-testid=\\"row-7\\"]"), "role", "button", "Delete")'
+    );
   });
 
-  it('leaves an unchained role locator absolute', () => {
+  it('leaves an unchained role locator rooted at the driver', () => {
     const plain = C.locatorExpr({ kind: 'role', role: 'button', name: 'Delete' }, 'selenium', 'javascript');
-    expect(plain).toMatch(/By\.xpath\('\/\//);
+    expect(plain).toBe("locatraFind(driver, 'role', 'button', 'Delete')");
   });
 
-  it('scopes a chained text child too', () => {
+  it('scopes a chained text child too, and an XPath child with a leading dot', () => {
     const textChain = {
       kind: 'chain',
       parent: { kind: 'id', value: 'cart' },
       child: { kind: 'text', value: 'Remove' },
     };
-    expect(C.locatorExpr(textChain, 'selenium', 'python')).toMatch(/By\.XPATH, "\.\/\//);
-    expect(C.locatorExpr(textChain, 'cypress', 'javascript')).toBe("cy.get('#cart').contains('Remove')");
+    expect(C.locatorExpr(textChain, 'selenium', 'python')).toBe(
+      'locatra_find(driver.find_element(By.ID, "cart"), "text", "Remove")'
+    );
+    expect(C.locatorExpr(textChain, 'cypress', 'javascript')).toBe(
+      "cy.get('#cart').then(($el) => locatraGet('text', 'Remove', null, { within: $el }))"
+    );
+    // Selenium's element.find_element(By.XPATH, "//…") still searches the whole
+    // document — the dot is the entire difference between scoped and not.
+    const xpathChain = { ...textChain, child: { kind: 'xpath', value: '//button[@title="x"]' } };
+    expect(C.locatorExpr(xpathChain, 'selenium', 'python')).toBe(
+      'driver.find_element(By.ID, "cart").find_element(By.XPATH, ".//button[@title=\\"x\\"]")'
+    );
+    expect(C.locatorExpr(xpathChain.child, 'selenium', 'javascript')).toBe(
+      'driver.findElement(By.xpath(\'//button[@title="x"]\'))'
+    );
   });
 
   it('drives a full action statement through the chain', () => {
@@ -457,10 +455,14 @@ describe('frames', () => {
   });
 
   it('reaches through contentDocument for Cypress', () => {
-    const expr = C.locatorExpr(inFrame, 'cypress', 'javascript');
-    expect(expr).toContain("cy.get('#payment')");
-    expect(expr).toContain("its('0.contentDocument.body')");
-    expect(expr).toContain('.find(');
+    // The helper searches inside the frame's body; a long chain goes one frame per line.
+    expect(C.locatorExpr(inFrame, 'cypress', 'javascript')).toBe(
+      "cy.get('#payment').its('0.contentDocument.body').should('not.be.empty').then(cy.wrap)\n" +
+        "  .then(($el) => locatraGet('role', 'textbox', 'Card number', { within: $el }))"
+    );
+    expect(C.locatorExpr({ ...inFrame, child: { kind: 'id', value: 'cc' } }, 'cypress', 'javascript')).toBe(
+      "cy.get('#payment').its('0.contentDocument.body').should('not.be.empty').then(cy.wrap).find('#cc')"
+    );
   });
 
   it('switches the Selenium driver in and back out again', () => {
@@ -485,7 +487,7 @@ describe('frames', () => {
       'cy.document().then((doc) => locatraFrame(doc, 2))'
     );
     expect(C.actionStatement({ action: 'click', target: xo }, 'selenium', 'python')).toContain(
-      `driver.switch_to.frame(driver.execute_script(${C.q(C._internals.DEEP_IFRAME_JS, 'python')}, 2))`
+      'driver.switch_to.frame(driver.execute_script(LOCATRA_FRAME_JS, 2))'
     );
   });
 
@@ -579,27 +581,27 @@ describe('frames inside shadow DOM', () => {
     }
   });
 
-  it('walks each shadow root with .shadow_root in Selenium Python', () => {
+  it('walks each shadow root with .shadow_root in Selenium Python, one hop per line', () => {
     const lines = fill(SHADOW, 'selenium', 'python').split('\n');
-    expect(lines[0]).toBe(
-      'driver.switch_to.frame(driver.find_element(By.CSS_SELECTOR, "#shell")' +
-        '.shadow_root.find_element(By.CSS_SELECTOR, "x-pay")' +
-        '.shadow_root.find_element(By.CSS_SELECTOR, "iframe:nth-of-type(2)"))'
-    );
+    expect(lines.slice(0, 3)).toEqual([
+      'shadow_host = driver.find_element(By.CSS_SELECTOR, "#shell")',
+      'shadow_host = shadow_host.shadow_root.find_element(By.CSS_SELECTOR, "x-pay")',
+      'driver.switch_to.frame(shadow_host.shadow_root.find_element(By.CSS_SELECTOR, "iframe:nth-of-type(2)"))',
+    ]);
     expect(lines[lines.length - 1]).toBe('driver.switch_to.default_content()');
   });
 
   it('steps through .shadow() in Cypress before entering the frame body', () => {
     expect(C.locatorExpr(SHADOW, 'cypress', 'javascript')).toBe(
       "cy.get('#shell').shadow().find('x-pay').shadow().find('iframe:nth-of-type(2)')" +
-        ".its('0.contentDocument.body').should('not.be.empty').then(cy.wrap).find('#card')"
+        ".its('0.contentDocument.body').should('not.be.empty').then(cy.wrap)\n  .find('#card')"
     );
   });
 
   it('nests under an outer frame in every framework', () => {
     const py = fill(NESTED, 'selenium', 'python').split('\n');
     expect(py[0]).toBe('driver.switch_to.frame(driver.find_element(By.CSS_SELECTOR, "#outer"))');
-    expect(py[1]).toContain('.shadow_root.find_element(By.CSS_SELECTOR, "x-pay")');
+    expect(py[2]).toContain('.shadow_root.find_element(By.CSS_SELECTOR, "x-pay")');
     expect(py[py.length - 1]).toBe('driver.switch_to.default_content()');
 
     const js = fill(NESTED, 'selenium', 'javascript').split('\n');
@@ -607,10 +609,11 @@ describe('frames inside shadow DOM', () => {
     expect(js[1]).toBe('{');
     expect(js.filter((l) => l.includes('switchTo().frame('))).toHaveLength(2);
 
+    // A long chain goes one frame per line.
     expect(C.locatorExpr(NESTED, 'cypress', 'typescript')).toBe(
-      "cy.get('#outer').its('0.contentDocument.body').should('not.be.empty').then(cy.wrap)" +
-        ".find('#shell').shadow().find('x-pay').shadow().find('iframe:nth-of-type(2)')" +
-        ".its('0.contentDocument.body').should('not.be.empty').then(cy.wrap).find('#card')"
+      "cy.get('#outer').its('0.contentDocument.body').should('not.be.empty').then(cy.wrap)\n" +
+        "  .find('#shell').shadow().find('x-pay').shadow().find('iframe:nth-of-type(2)')" +
+        ".its('0.contentDocument.body').should('not.be.empty').then(cy.wrap)\n  .find('#card')"
     );
   });
 
@@ -639,7 +642,7 @@ describe('frames inside shadow DOM', () => {
       child: SHADOW.child,
     };
     expect(fill(xo, 'selenium', 'python')).toContain(
-      `driver.switch_to.frame(driver.execute_script(${C.q(C._internals.DEEP_IFRAME_JS, 'python')}, 2))`
+      'driver.switch_to.frame(driver.execute_script(LOCATRA_FRAME_JS, 2))'
     );
   });
 
@@ -698,8 +701,8 @@ describe('frames inside shadow DOM', () => {
 // Role-with-name and label locators used to match text content only
 // (contains(normalize-space(.), name) / .contains(name)), so they never found a form
 // control: its name comes from <label for>, a wrapping <label>, aria-labelledby,
-// aria-label, title, placeholder or (buttons) value. These tests evaluate the
-// generated XPath / Cypress helper against a real DOM.
+// aria-label, title, placeholder or (buttons) value. These tests run the generated
+// expression and its Locatra helper (C9.4) against a real DOM.
 describe('Selenium/Cypress accessible-name matching (DOM)', () => {
   const HTML = `
     <label for="e">Email</label><input id="e" type="email" data-k="email">
@@ -725,40 +728,29 @@ describe('Selenium/Cypress accessible-name matching (DOM)', () => {
     ).window.document;
   });
 
-  /** Extract the selector string from a Selenium JS expression and evaluate it. */
-  function selenium(target) {
-    const expr = C.locatorExpr(target, 'selenium', 'javascript');
-    const re = /\.findElement\(By\.(css|xpath)\('((?:[^'\\]|\\.)*)'\)\)/g;
-    let m;
-    let ctx = doc;
-    let all = [];
-    while ((m = re.exec(expr))) {
-      const sel = jsString(m[2]);
-      if (m[1] === 'css') all = [...ctx.querySelectorAll(sel)];
-      else {
-        const it = doc.evaluate(sel, ctx, null, 7, null);
-        all = Array.from({ length: it.snapshotLength }, (_, i) => it.snapshotItem(i));
-      }
-      if (!all.length) return null;
-      ctx = all[0];
+  /**
+   * Run the Selenium JS expression — and the locatraFind() helper it calls — against
+   * a fake driver on the DOM: data-k of the element it resolves to, or null when it
+   * throws (no match, or several).
+   */
+  async function selenium(target) {
+    try {
+      const el = await runSeleniumJs(C, doc, C.locatorExpr(target, 'selenium', 'javascript'));
+      return el.getAttribute('data-k');
+    } catch {
+      return null;
     }
-    return all[0] ? all[0].getAttribute('data-k') : null;
   }
 
-  /** Run a Cypress role/label expression with a minimal cy.get/find/filter stand-in. */
+  /** Run the Cypress expression and its locatraGet() helper with a one-shot cy stand-in. */
   function cypress(target) {
-    const expr = C.locatorExpr(target, 'cypress', 'javascript');
-    const helper = C.wrapScript([expr], 'cypress', 'javascript').split('describe(')[0];
-    const wrap = (els) => ({
-      els,
-      find: (s) => wrap(els.flatMap((e) => [...e.querySelectorAll(s)])),
-      filter: (fn) => wrap(els.filter((e, i) => fn(i, e))),
-      first: () => wrap(els.slice(0, 1)),
-      eq: (n) => wrap(els.slice(n, n + 1)),
-    });
-    const cy = { get: (s) => wrap([...doc.querySelectorAll(s)]) };
-    const res = new Function('cy', `${helper}\nreturn ${expr};`)(cy);
-    return res.els.map((e) => e.getAttribute('data-k'));
+    try {
+      return runCypress(C, doc, C.locatorExpr(target, 'cypress', 'javascript'), expect).map((e) =>
+        e.getAttribute('data-k')
+      );
+    } catch {
+      return [];
+    }
   }
 
   it.each([
@@ -773,8 +765,8 @@ describe('Selenium/Cypress accessible-name matching (DOM)', () => {
     [{ kind: 'role', role: 'button', name: 'Custom' }, 'custom'],
     [{ kind: 'role', role: 'menuitem', name: 'Menu thing' }, 'menuitem'],
     [{ kind: 'role', role: 'button', name: 'Delete "row" it\'s' }, 'hostile'],
-  ])('finds role %j by its accessible name', (target, want) => {
-    expect(selenium(target)).toBe(want);
+  ])('finds role %j by its accessible name', async (target, want) => {
+    expect(await selenium(target)).toBe(want);
     expect(cypress(target)).toEqual([want]);
   });
 
@@ -783,91 +775,116 @@ describe('Selenium/Cypress accessible-name matching (DOM)', () => {
     [{ kind: 'label', value: 'I Agree to terms', exact: true }, 'agree'],
     [{ kind: 'label', value: 'Country' }, 'country'],
     [{ kind: 'label', value: 'Billing address' }, 'billing'],
-  ])('finds label %j via <label for>, wrapping label, aria-label and aria-labelledby', (target, want) => {
-    expect(selenium(target)).toBe(want);
-    expect(cypress(target)).toEqual([want]);
-  });
+  ])(
+    'finds label %j via <label for>, wrapping label, aria-label and aria-labelledby',
+    async (target, want) => {
+      expect(await selenium(target)).toBe(want);
+      expect(cypress(target)).toEqual([want]);
+    }
+  );
 
-  it('honours exact for a role name (Save vs Save draft)', () => {
+  it('honours exact for a role name (Save vs Save draft)', async () => {
     const t = { kind: 'role', role: 'button', name: 'Save', exact: true };
-    expect(selenium(t)).toBe('save');
+    expect(await selenium(t)).toBe('save');
     expect(cypress(t)).toEqual(['save']);
-    // Without exact, substring semantics match both — exactly why the engine sets it.
-    expect(cypress({ kind: 'role', role: 'button', name: 'Save' })).toEqual(['save', 'savedraft']);
+    // Without exact, substring semantics match both — exactly why the engine sets it —
+    // and the helpers refuse to pick one of two.
+    const loose = { kind: 'role', role: 'button', name: 'Save' };
+    expect(await selenium(loose)).toBe(null);
+    await expect(runSeleniumJs(C, doc, C.locatorExpr(loose, 'selenium', 'javascript'))).rejects.toThrow(
+      'Locatra: 2 elements match role "button" named "Save"; expected exactly one'
+    );
+    expect(() => runCypress(C, doc, C.locatorExpr(loose, 'cypress', 'javascript'), expect)).toThrow(
+      'elements matching role "button" named "Save": expected 2 to equal 1'
+    );
   });
 
-  it('does not let a native element keep its implicit role under an explicit role', () => {
+  it('does not let a native element keep its implicit role under an explicit role', async () => {
     // <li role="menuitem"> is not a listitem (Playwright semantics).
-    expect(selenium({ kind: 'role', role: 'listitem', name: 'Menu thing' })).toBe(null);
+    expect(await selenium({ kind: 'role', role: 'listitem', name: 'Menu thing' })).toBe(null);
+    await expect(
+      runSeleniumJs(
+        C,
+        doc,
+        C.locatorExpr({ kind: 'role', role: 'listitem', name: 'Menu thing' }, 'selenium', 'javascript')
+      )
+    ).rejects.toThrow('Locatra: no element matches role "listitem" named "Menu thing"');
   });
 
-  it('chains from a named parent so .find() continues from the row, not a text node', () => {
+  it('chains from a named parent so the child is searched inside the row', async () => {
     const chain = {
       kind: 'chain',
       parent: { kind: 'role', role: 'row', name: 'Row two' },
       child: { kind: 'role', role: 'button', name: 'Delete' },
     };
-    expect(selenium(chain)).toBe('d2');
+    expect(await selenium(chain)).toBe('d2');
     expect(cypress(chain)).toEqual(['d2']);
   });
 
-  it('matches the deepest element for a Selenium text locator, not <html> or <title>', () => {
-    expect(selenium({ kind: 'text', value: 'Welcome back' })).toBe('wb');
-    expect(selenium({ kind: 'text', value: 'Welcome back', exact: true })).toBe('wb');
+  it('matches the deepest element for a text locator, not <html> or <title>', async () => {
+    expect(await selenium({ kind: 'text', value: 'Welcome back' })).toBe('wb');
+    expect(await selenium({ kind: 'text', value: 'Welcome back', exact: true })).toBe('wb');
     const chained = {
       kind: 'chain',
       parent: { kind: 'testid', attr: 'data-k', value: 'r2' },
       child: { kind: 'text', value: 'Delete' },
     };
-    expect(selenium(chained)).toBe('d2');
+    expect(await selenium(chained)).toBe('d2');
+    expect(cypress(chained)).toEqual(['d2']);
   });
 
-  it('honours target.nth positionally in every framework', () => {
+  it('honours target.nth positionally in every framework', async () => {
     const t = { kind: 'role', role: 'button', name: 'Delete', nth: 1 };
-    expect(selenium(t)).toBe('d2');
+    expect(await selenium(t)).toBe('d2');
     expect(cypress(t)).toEqual(['d2']);
+    expect(C.locatorExpr(t, 'selenium', 'javascript')).toBe(
+      "locatraFind(driver, 'role', 'button', 'Delete', { nth: 1 })"
+    );
     expect(C.locatorExpr(t, 'playwright', 'typescript')).toBe(
       "page.getByRole('button', { name: 'Delete' }).nth(1)"
     );
   });
+
+  it('waits up to the implicit wait before giving up, polling the page', async () => {
+    const t = { kind: 'text', value: 'Appears later', exact: true };
+    const { driver, By, WebElementPromise } = seleniumJs(doc, { implicit: 250 });
+    const expr = C.locatorExpr(t, 'selenium', 'javascript');
+    const run = new Function(
+      'driver',
+      'By',
+      'WebElementPromise',
+      `${C._internals.selHelperSource('javascript')}\nreturn ${expr};`
+    );
+    const p = run(driver, By, WebElementPromise);
+    setTimeout(() => doc.body.insertAdjacentHTML('beforeend', '<i data-k="late">Appears later</i>'), 30);
+    expect((await p).el.getAttribute('data-k')).toBe('late');
+    expect(driver.calls.sleeps).toBeGreaterThan(0);
+    doc.querySelector('[data-k="late"]').remove();
+  });
 });
 
-describe('role selector tables', () => {
-  it('keeps the CSS and XPath forms consistent with Playwright implicit roles', () => {
-    const css = (role) => C.locatorExpr({ kind: 'role', role }, 'cypress', 'javascript');
-    const xp = (role) => C.locatorExpr({ kind: 'role', role, name: 'x' }, 'selenium', 'python');
-    for (const [role, tag] of [
-      ['textbox', 'textarea'],
-      ['searchbox', 'input[type="search"]'],
-      ['spinbutton', 'input[type="number"]'],
-      ['slider', 'input[type="range"]'],
-      ['list', 'ul'],
-      ['listitem', 'li'],
-      ['table', 'table'],
-      ['row', 'tr'],
-      ['cell', 'td'],
-      ['navigation', 'nav'],
-      ['main', 'main'],
-      ['dialog', 'dialog'],
-      ['banner', 'header'],
-      ['contentinfo', 'footer'],
-      ['complementary', 'aside'],
-      ['option', 'option'],
-    ]) {
-      expect(css(role), role).toContain(tag);
-      expect(xp(role), role).toContain('self::' + tag.split('[')[0]);
-    }
-    // number is a spinbutton and search a searchbox, never a textbox.
-    expect(css('textbox')).toContain(':not([type="number"])');
-    expect(css('textbox')).toContain(':not([type="search"])');
-  });
-
-  it('narrows a heading to its level', () => {
+describe('role, label and text lookups outside Playwright', () => {
+  it('call the Locatra helper with the role, the name and only the options that are set', () => {
     const h = { kind: 'role', role: 'heading', name: 'T', level: 2 };
-    expect(C.locatorExpr(h, 'cypress', 'javascript')).toContain(
-      'h2, [role~="heading"][aria-level="2"]:not(h1, h2, h3, h4, h5, h6)'
+    expect(C.locatorExpr(h, 'cypress', 'javascript')).toBe(
+      "locatraGet('role', 'heading', 'T', { level: 2 })"
     );
-    expect(C.locatorExpr(h, 'cypress', 'javascript').startsWith("cy.get('h2, [role~=")).toBe(true);
+    expect(C.locatorExpr(h, 'selenium', 'python')).toBe(
+      'locatra_find(driver, "role", "heading", "T", level=2)'
+    );
+    expect(C.locatorExpr({ ...h, exact: true }, 'selenium', 'javascript')).toBe(
+      "locatraFind(driver, 'role', 'heading', 'T', { exact: true, level: 2 })"
+    );
+    expect(C.locatorExpr({ kind: 'role', role: 'main', matchCount: 1 }, 'selenium', 'typescript')).toBe(
+      "locatraFind(driver, 'role', 'main')"
+    );
+    expect(C.locatorExpr({ kind: 'label', value: 'Email', exact: true }, 'selenium', 'python')).toBe(
+      'locatra_find(driver, "label", "Email", exact=True)'
+    );
+    // `exact` means nothing for a role without a name.
+    expect(
+      C.locatorExpr({ kind: 'role', role: 'main', exact: true, matchCount: 1 }, 'cypress', 'typescript')
+    ).toBe("locatraGet('role', 'main')");
   });
 });
 
@@ -892,15 +909,10 @@ describe('exact matching (C5)', () => {
     );
   });
 
-  it('anchors an exact Cypress text match with an escaped regex', () => {
+  it('passes an exact text match to the Cypress helper', () => {
     expect(
       C.locatorExpr({ kind: 'text', value: 'Price (USD) $5 / unit', exact: true }, 'cypress', 'javascript')
-    ).toBe('cy.contains(/^\\s*Price\\s+\\(USD\\)\\s+\\$5\\s+\\/\\s+unit\\s*$/)');
-    const re = new Function(
-      `return ${C.locatorExpr({ kind: 'text', value: 'a.b', exact: true }, 'cypress', 'javascript').slice(12, -1)};`
-    )();
-    expect(re.test(' a.b ')).toBe(true);
-    expect(re.test('axb')).toBe(false);
+    ).toBe("locatraGet('text', 'Price (USD) $5 / unit', null, { exact: true })");
   });
 });
 
@@ -1145,10 +1157,13 @@ describe('fill', () => {
     expect(C.actionStatement(step, 'cypress', 'javascript')).toBe(
       "cy.get('#vol').invoke('val', '42').trigger('input').trigger('change');"
     );
+    // The value-setting script is declared once per file (LOCATRA_SET_VALUE_JS).
     const sel = C.actionStatement(step, 'selenium', 'python');
-    expect(sel).toMatch(/^driver\.execute_script\(/);
-    expect(sel).toContain("dispatchEvent(new Event('input'");
-    expect(sel).toContain("dispatchEvent(new Event('change'");
+    expect(sel).toBe('driver.execute_script(LOCATRA_SET_VALUE_JS, driver.find_element(By.ID, "vol"), "42")');
+    const file = C.testScript([step, step], 'selenium', 'python');
+    expect(file.match(/^LOCATRA_SET_VALUE_JS = /gm)).toHaveLength(1);
+    expect(file).toContain("dispatchEvent(new Event('input'");
+    expect(file).toContain("dispatchEvent(new Event('change'");
     expect(C.actionStatement(step, 'playwright', 'typescript')).toBe(
       "await page.locator('#vol').fill('42');"
     );
@@ -1208,9 +1223,14 @@ describe('Selenium check/uncheck and viewport', () => {
     expect(py).toBe(
       'driver.set_window_size(*driver.execute_script("return [390 + window.outerWidth - window.innerWidth, 844 + window.outerHeight - window.innerHeight];"))'
     );
-    expect(
-      C.actionStatement({ action: 'viewport', width: 390, height: 844 }, 'selenium', 'typescript')
-    ).toContain('executeScript<{ width: number; height: number }>(');
+    expect(C.actionStatement({ action: 'viewport', width: 390, height: 844 }, 'selenium', 'typescript')).toBe(
+      [
+        '{',
+        "  const chrome: number[] = await driver.executeScript('return [window.outerWidth - window.innerWidth, window.outerHeight - window.innerHeight];');",
+        '  await driver.manage().window().setRect({ width: 390 + chrome[0], height: 844 + chrome[1] });',
+        '}',
+      ].join('\n')
+    );
   });
 });
 
@@ -1265,8 +1285,8 @@ describe('ambiguous and unsupported steps', () => {
       'cypress',
       'javascript'
     );
-    expect(out.split('\n')[0]).toMatch(/^\/\/ NOTE: .*several elements/);
-    expect(out).toMatch(/\.first\(\)\.click\(\);$/);
+    expect(out.split('\n')[0]).toMatch(/^\/\/ NOTE: .*several elements; the first match is used\.$/);
+    expect(out).toMatch(/locatraGet\('role', 'button', null, \{ nth: 0 \}\)\.click\(\);$/);
     expect(
       C.actionStatement({ action: 'click', target: { kind: 'role', role: 'button' } }, 'selenium', 'python')
     ).toMatch(/^# NOTE: /);
@@ -1279,7 +1299,7 @@ describe('ambiguous and unsupported steps', () => {
       'javascript'
     );
     expect(out).not.toContain('NOTE');
-    expect(out).not.toContain('.first()');
+    expect(out).toBe("locatraGet('role', 'main').click();");
   });
 
   it('emits a TODO comment for an unknown action instead of clicking or throwing', () => {
@@ -1349,13 +1369,16 @@ describe('Cypress cross-origin', () => {
     ];
     const ts = C.testScript(steps, 'cypress', 'typescript');
     expect(ts.match(/function locatraMatch\(/g)).toHaveLength(2);
-    expect(ts.match(/function locatraRole\(/g)).toHaveLength(2);
-    expect(ts.startsWith('// Locatra: the ARIA role')).toBe(true);
+    expect(ts.match(/function locatraGet\(/g)).toHaveLength(2);
+    expect(ts.startsWith('// Locatra: the elements a role / label / text locator matches')).toBe(true);
     expect(ts).toContain(
-      'function locatraMatch(el: HTMLElement, kind: string, text: string, exact?: boolean): boolean {'
+      'function locatraMatch(kind: string, value: string, name: string | null, exact: boolean, level: number, scope: any): any[] {'
+    );
+    expect(ts).toContain(
+      'function locatraGet(kind: string, value: string, name: string | null = null, opts: any = {}): Cypress.Chainable<JQuery<HTMLElement>> {'
     );
     expect(C.testScript(steps, 'cypress', 'javascript')).toContain(
-      'function locatraMatch(el, kind, text, exact) {'
+      'function locatraGet(kind, value, name = null, opts = {}) {'
     );
     expect(C.testScript([{ action: 'goto', value: '/' }], 'cypress', 'javascript')).not.toContain(
       'locatraMatch'
@@ -1376,7 +1399,8 @@ describe('press combos recorded by the content script', () => {
       'Control+Alt+Shift+Meta+Enter',
       'Control+Alt+Shift+Meta+Enter',
       "cy.realPress(['Control', 'Alt', 'Shift', 'Meta', 'Enter']);",
-      'key_down(Keys.CONTROL).key_down(Keys.ALT).key_down(Keys.SHIFT).key_down(Keys.META).send_keys(Keys.ENTER).key_up(Keys.META).key_up(Keys.SHIFT).key_up(Keys.ALT).key_up(Keys.CONTROL)',
+      // Three or more modifiers continue on a second line (inside parentheses).
+      'key_down(Keys.CONTROL).key_down(Keys.ALT).key_down(Keys.SHIFT).key_down(Keys.META)\n    .send_keys(Keys.ENTER).key_up(Keys.META).key_up(Keys.SHIFT).key_up(Keys.ALT).key_up(Keys.CONTROL)',
     ],
   ])('maps %s in every framework', (value, pw, cy, sel) => {
     expect(C.actionStatement({ action: 'press', value }, 'playwright', 'typescript')).toBe(
@@ -1388,19 +1412,27 @@ describe('press combos recorded by the content script', () => {
 });
 
 describe('Cypress check/uncheck on native and ARIA controls', () => {
-  // Executes the generated statement against jsdom with a minimal cy/jQuery stand-in.
+  // Executes the generated statement — and its locatraGet() helper — against jsdom
+  // with a minimal cy/jQuery stand-in.
   function run(stmt, doc) {
     const $ = (el) => ({
+      0: el,
       el,
       is: (sel) => el.matches(sel),
       attr: (n) => el.getAttribute(n) ?? undefined,
     });
-    const chain = (els) => ({
-      filter: (fn) => chain(els.filter((e, i) => fn(i, e))),
-      then: (fn) => fn($(els[0])),
+    const chain = (subject) => ({
+      should: (cb) => {
+        cb(subject);
+        return chain(subject);
+      },
+      then: (fn) => {
+        const r = fn(subject);
+        return r && r.should ? r : chain(r);
+      },
     });
     const cy = {
-      get: (s) => chain([...doc.querySelectorAll(s)]),
+      document: () => chain(doc),
       wrap: ($el) => ({
         check: () => {
           $el.el.checked = true;
@@ -1412,7 +1444,7 @@ describe('Cypress check/uncheck on native and ARIA controls', () => {
       }),
     };
     const helper = C.wrapScript([stmt], 'cypress', 'javascript').split('describe(')[0];
-    new Function('cy', `${helper}\n${stmt}`)(cy);
+    new Function('cy', 'Cypress', 'expect', `${helper}\n${stmt}`)(cy, { $ }, expect);
   }
 
   function page() {
@@ -1457,10 +1489,10 @@ describe('Selenium accessible-name precedence', () => {
     <label for="z">Zip</label><input id="z" placeholder="Postal" title="Code">
     <button title="Settings" id="g">Gear</button>`).window.document;
 
+  /** How many elements the Selenium helper call finds, decoded from its literals. */
   function count(target) {
-    const m = /By\.xpath\('((?:[^'\\]|\\.)*)'\)/.exec(C.locatorExpr(target, 'selenium', 'javascript'));
-    const d = doc();
-    return d.evaluate(jsString(m[1]), d, null, 7, null).snapshotLength;
+    const call = helperCallOf(C.locatorExpr(target, 'selenium', 'javascript'), 'javascript');
+    return runHelper(C._internals, doc(), call).length;
   }
 
   it('lets the first present name source decide, like Playwright', () => {
@@ -1649,15 +1681,23 @@ describe('remaining edge cases', () => {
     }
   });
 
-  it('maps img roles to non-empty alt and SVG by local name', () => {
+  it('finds img roles by non-empty alt and SVG, as the engine does', () => {
     expect(C.locatorExpr({ kind: 'role', role: 'img' }, 'cypress', 'javascript')).toBe(
-      "cy.get('img, svg, [role~=\"img\"]').filter((_, el) => locatraRole(el) === 'img').first()"
+      "locatraGet('role', 'img', null, { nth: 0 })"
     );
-    const xp = C.locatorExpr({ kind: 'role', role: 'img', name: 'Logo' }, 'selenium', 'javascript');
-    expect(xp).toContain(
-      '(self::img and (not(@alt) or string-length(@alt) > 0 or string-length(@title) > 0 or '
-    );
-    expect(xp).toContain('(local-name(.)="svg")');
+    const doc = new JSDOM('<img alt="Logo" id="l"><img alt="" id="d"><svg id="s"><title>Chart</title></svg>')
+      .window.document;
+    const found = (name) =>
+      runHelper(
+        C._internals,
+        doc,
+        helperCallOf(
+          C.locatorExpr({ kind: 'role', role: 'img', name }, 'selenium', 'javascript'),
+          'javascript'
+        )
+      ).map((e) => e.id);
+    expect(found('Logo')).toEqual(['l']);
+    expect(found('Chart')).toEqual(['s']);
   });
 
   it('chains without a parent fall back to the child; frames without one render nothing', () => {
@@ -1704,9 +1744,7 @@ describe('remaining edge cases', () => {
         'selenium',
         'javascript'
       )
-    ).toMatch(
-      /^await driver\.executeScript\('const el = arguments\[0\];.*', driver\.findElement\(By\.id\('f'\)\), '2024-01-31'\);$/
-    );
+    ).toBe("await driver.executeScript(LOCATRA_SET_VALUE_JS, driver.findElement(By.id('f')), '2024-01-31');");
     expect(
       C.actionStatement(
         { action: 'assert', assertType: 'toContainText', target, value: ' a \n b ' },
@@ -1857,7 +1895,7 @@ describe('Selenium frame-wrapped chains', () => {
     expect(C.actionStatement({ action: 'click', target: nested }, 'selenium', 'javascript')).toBe(
       [
         "await driver.switchTo().frame(driver.findElement(By.css('#outer')));",
-        `await driver.switchTo().frame(await driver.executeScript(${C.q(C._internals.DEEP_IFRAME_JS, 'javascript')}, 1));`,
+        'await driver.switchTo().frame(await driver.executeScript(LOCATRA_FRAME_JS, 1));',
         "await driver.findElement(By.css('form.card')).findElement(By.id('num')).click();",
         'await driver.switchTo().defaultContent();',
       ].join('\n')
