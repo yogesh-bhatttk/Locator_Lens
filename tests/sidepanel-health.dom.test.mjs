@@ -1060,6 +1060,36 @@ describe('export and import', () => {
     expect($('healthStatus').hidden).toBe(true);
   });
 
+  it('keeps up to three sanitised altTargets on watched locators (C9)', async () => {
+    const file = {
+      version: 1,
+      sites: {
+        'https://shop.example/': [
+          {
+            id: 'u',
+            target: { kind: 'role', role: 'textbox', name: 'Username' },
+            altTargets: [
+              { kind: 'id', value: 'username' },
+              'junk',
+              { value: 'no kind' },
+              { kind: 'name', value: 'user' },
+              { kind: 'css', value: '#username' },
+              { kind: 'xpath', value: '//input[@id="username"]' },
+            ],
+          },
+        ],
+      },
+    };
+    boot();
+    await importText(JSON.stringify(file));
+    const [u] = site('https://shop.example/');
+    expect(u.altTargets).toEqual([
+      { kind: 'id', value: 'username' },
+      { kind: 'name', value: 'user' },
+      { kind: 'css', value: '#username' },
+    ]);
+  });
+
   it('rebuilds imported code from the target and drops non-integer numeric target fields', async () => {
     const file = {
       version: 1,

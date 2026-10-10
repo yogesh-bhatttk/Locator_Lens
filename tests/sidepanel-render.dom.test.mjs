@@ -1,3 +1,4 @@
+/* global LLCodegen */
 // @vitest-environment jsdom
 //
 // sidepanel.js is a classic script, not a module — it declares its helpers at top
@@ -356,6 +357,72 @@ describe('renderResults resilience', () => {
     expect(document.getElementById('cardsContainer').textContent).toContain('getByRole');
     expect(document.getElementById('proTip').textContent).toContain('add a test id');
     expect(document.getElementById('resultsState').style.display).toBe('');
+  });
+
+  describe('per-framework order and long code (C9)', () => {
+    const setOut = (fw, lang) =>
+      vm.runInThisContext(`outFramework = ${JSON.stringify(fw)}; outLanguage = ${JSON.stringify(lang)};`);
+    afterEach(() => setOut('playwright', 'typescript'));
+    const role = {
+      rank: 1,
+      method: 'getByRole()',
+      stability: 'BEST',
+      code: "page.getByRole('textbox', { name: 'Username or Email' })",
+      target: { kind: 'role', role: 'textbox', name: 'Username or Email' },
+      matchCount: 1,
+      unique: true,
+    };
+    const id = {
+      rank: 2,
+      method: 'locator(#id)',
+      stability: 'GOOD',
+      code: "page.locator('#username')",
+      target: { kind: 'id', value: 'username' },
+      matchCount: 1,
+      unique: true,
+    };
+    const cardCodes = () =>
+      [...document.querySelectorAll('#cardsContainer .code-txt')].map((n) => n.textContent);
+
+    it('keeps the engine order for Playwright', () => {
+      renderResults({ elementData: { tag: 'input' }, locators: [role, id], avoidList: [], a11y: [] });
+      expect(cardCodes()[0]).toContain('getByRole');
+    });
+
+    it('puts a short, helper-free unique locator first for Selenium, and numbers cards in that order', () => {
+      setOut('selenium', 'typescript');
+      renderResults({ elementData: { tag: 'input' }, locators: [role, id], avoidList: [], a11y: [] });
+      expect(cardCodes()[0]).toContain("By.id('username')");
+      expect([...document.querySelectorAll('#cardsContainer .rank-num')].map((n) => n.textContent)).toEqual([
+        '1',
+        '2',
+      ]);
+      // Watch still acts on the locator the card shows.
+      expect(document.querySelector('#cardsContainer .watch-btn').getAttribute('data-index')).toBe('1');
+    });
+
+    it('collapses a long locator behind "Show full locator", and copy includes any helper', () => {
+      setOut('selenium', 'typescript');
+      const real = LLCodegen.locatorSnippet;
+      LLCodegen.locatorSnippet = () => ({ expr: 'x'.repeat(400), helpers: 'function helper() {}' });
+      try {
+        renderResults({ elementData: { tag: 'input' }, locators: [role], avoidList: [], a11y: [] });
+      } finally {
+        LLCodegen.locatorSnippet = real;
+      }
+      const code = document.querySelector('#cardsContainer .code-txt');
+      const btn = document.querySelector('#cardsContainer .code-expand');
+      expect(code.classList.contains('code-long')).toBe(true);
+      expect(btn.textContent).toBe('Show full locator');
+      toggleLongCode(btn);
+      expect(code.classList.contains('code-long')).toBe(false);
+      expect(btn.getAttribute('aria-expanded')).toBe('true');
+      toggleLongCode(btn);
+      expect(code.classList.contains('code-long')).toBe(true);
+      const copy = document.querySelector('#cardsContainer .copy-btn').getAttribute('data-code');
+      expect(copy.startsWith('function helper() {}')).toBe(true);
+      expect(document.querySelector('#cardsContainer .code-note')).not.toBeNull();
+    });
   });
 
   it('escapes an unknown stability and a non-numeric rank instead of rendering them as markup', () => {

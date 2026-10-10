@@ -106,6 +106,7 @@ export default [
         strategyLabel: 'readonly',
         buildActionCode: 'readonly',
         renderResults: 'readonly',
+        toggleLongCode: 'readonly',
         recordedActions: 'writable',
         lastSyncedPreviewScript: 'writable',
         updateCodePreview: 'readonly',

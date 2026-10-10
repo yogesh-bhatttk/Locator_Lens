@@ -438,6 +438,26 @@
       word-break: break-all;
       padding-right: 8px;
     }
+    /* A locator too long to read at a glance shows its first lines only. */
+    .code-txt.code-long {
+      max-height: 4.6em;
+      overflow: hidden;
+      -webkit-mask-image: linear-gradient(to bottom, #000 60%, transparent);
+      mask-image: linear-gradient(to bottom, #000 60%, transparent);
+    }
+    .code-expand, .code-note {
+      flex-basis: 100%;
+      font-size: 10.5px;
+      color: var(--muted);
+    }
+    .code-expand {
+      background: none;
+      border: 0;
+      padding: 0;
+      text-align: left;
+      cursor: pointer;
+      text-decoration: underline;
+    }
     .kw { color: var(--kw-c); }
     .fn { color: var(--fn-c); }
     .str { color: var(--str-c); }

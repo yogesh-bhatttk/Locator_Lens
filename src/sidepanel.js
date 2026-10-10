@@ -372,16 +372,62 @@ function updateInspectUI() {
 // is translated from the structured `loc.target` via codegen.
 function formatLocator(loc, suggestedAction) {
   if (isPlaywrightJsTs()) {
-    return { code: loc.code || '', fullCode: loc.fullCode || '' };
+    return { code: loc.code || '', fullCode: loc.fullCode || '', helpers: '' };
   }
   if (typeof LLCodegen !== 'undefined' && loc.target) {
-    const expr = LLCodegen.locatorExpr(loc.target, outFramework, outLanguage);
+    // Frameworks without a role engine call a small helper for role/label/text
+    // lookups (emitted once per exported script); a copied line needs it too.
+    let expr = '';
+    let helpers = '';
+    if (typeof LLCodegen.locatorSnippet === 'function') {
+      const snip = LLCodegen.locatorSnippet(loc.target, outFramework, outLanguage) || {};
+      expr = String(snip.expr || '');
+      helpers = String(snip.helpers || '');
+    } else {
+      expr = LLCodegen.locatorExpr(loc.target, outFramework, outLanguage);
+    }
     const act = suggestedAction || 'click';
     const value = act === 'fill' ? 'your value' : (act === 'selectOption' ? 'option text' : '');
     const stmt = LLCodegen.actionStatement({ action: act, target: loc.target, value: value }, outFramework, outLanguage);
-    return { code: expr || (loc.code || ''), fullCode: stmt || (loc.fullCode || '') };
+    return { code: expr || (loc.code || ''), fullCode: stmt || (loc.fullCode || ''), helpers: helpers };
   }
-  return { code: loc.code || '', fullCode: loc.fullCode || '' };
+  return { code: loc.code || '', fullCode: loc.fullCode || '', helpers: '' };
+}
+
+/** "Show full locator" / "Show less" on a card whose code is collapsed. */
+function toggleLongCode(btn) {
+  const code = document.getElementById(btn.getAttribute('aria-controls'));
+  if (!code) return;
+  const open = btn.getAttribute('aria-expanded') !== 'true';
+  code.classList.toggle('code-long', !open);
+  btn.setAttribute('aria-expanded', String(open));
+  btn.textContent = open ? 'Show less' : 'Show full locator';
+}
+
+// Above this many characters a locator's code is collapsed behind "Show full
+// locator": a card must stay readable whatever a framework makes of a target.
+const LONG_LOCATOR_CHARS = 300;
+
+/**
+ * The cards in the order to show them for the current output. Playwright keeps
+ * the engine's ranking (it has a native API for every strategy). Elsewhere a
+ * unique locator that needs no helper and reads short comes first — `By.id(…)`
+ * before a role lookup — so the first card is the one worth copying.
+ * Returns [{ loc, index }] where index is the position in `locators`.
+ */
+function orderLocatorsForOutput(locators, suggestedAction) {
+  const rows = locators.map((loc, index) => ({ loc, index }));
+  if (outFramework === 'playwright') return rows;
+  const scored = rows.map((row) => {
+    const f = formatLocator(row.loc, suggestedAction);
+    const unique = row.loc.unique !== false;
+    return { row, key: [unique ? 0 : 1, f.helpers ? 1 : 0, String(f.code || '').length, row.index] };
+  });
+  scored.sort((a, b) => {
+    for (let i = 0; i < a.key.length; i++) if (a.key[i] !== b.key[i]) return a.key[i] - b.key[i];
+    return 0;
+  });
+  return scored.map((x) => x.row);
 }
 
 // Card heading: keep Playwright's native API name; use a neutral strategy label
@@ -896,11 +942,14 @@ function renderResults(data) {
 
   // ── Locator cards ──
   const container = document.getElementById('cardsContainer');
-  safeRender(container, locators.map((loc, i) => {
-    const rc = rankClass(loc.rank);
-    const delayStyle = `animation-delay:${i * 0.06}s`;
+  const ordered = orderLocatorsForOutput(locators, el.suggestedAction);
+  safeRender(container, ordered.map(({ loc, index: i }, pos) => {
+    const rc = rankClass(outFramework === 'playwright' ? loc.rank : pos + 1);
+    const delayStyle = `animation-delay:${pos * 0.06}s`;
     
-    const { code, fullCode } = formatLocator(loc, el.suggestedAction);
+    const { code, fullCode, helpers } = formatLocator(loc, el.suggestedAction);
+    const longCode = String(code || '').length > LONG_LOCATOR_CHARS;
+    const copyText = helpers ? `${helpers}\n\n${fullCode}` : fullCode;
 
     const uniqChip = (typeof loc.matchCount === 'number')
       ? (loc.unique
@@ -912,7 +961,7 @@ function renderResults(data) {
       <div class="card ${rc}" style="${delayStyle}">
         <div class="card-head">
           <div class="card-left">
-            <div class="rank-num">${esc(loc.rank)}</div>
+            <div class="rank-num">${esc(outFramework === 'playwright' ? loc.rank : pos + 1)}</div>
             <div>
               <div class="method-name">${esc(strategyLabel(loc))}</div>
               <div class="match-attr" title="${esc(loc.matchedAttr)}">${esc(loc.matchedAttr)}</div>
@@ -924,9 +973,11 @@ function renderResults(data) {
           </div>
         </div>
         <div class="card-code">
-          <div class="code-txt">${hl(code)}</div>
+          <div class="code-txt${longCode ? ' code-long' : ''}" id="ll-code-${i}">${hl(code)}</div>
+          ${longCode ? `<button type="button" class="code-expand" aria-expanded="false" aria-controls="ll-code-${i}">Show full locator</button>` : ''}
+          ${helpers ? '<div class="code-note">Uses a small helper; Copy includes it.</div>' : ''}
           <div class="card-actions">
-            <button type="button" class="copy-btn" data-code="${esc(fullCode)}" aria-label="Copy locator ${i + 1}: ${esc(strategyLabel(loc))}">Copy</button>
+            <button type="button" class="copy-btn" data-code="${esc(copyText)}" aria-label="Copy locator ${i + 1}: ${esc(strategyLabel(loc))}">Copy</button>
             ${loc.target && typeof loc.target === 'object'
               ? `<button type="button" class="watch-btn" data-index="${i}" aria-pressed="false" aria-label="Watch locator ${i + 1}: ${esc(strategyLabel(loc))}" title="Keep an eye on this locator in the Health tab">☆ Watch</button>`
               : ''}
@@ -1287,6 +1338,8 @@ document.addEventListener('DOMContentLoaded', () => {
       handleCopy(e.target);
     } else if (e.target.classList.contains('toggle-explain')) {
       toggleExplain(e.target);
+    } else if (e.target.classList.contains('code-expand')) {
+      toggleLongCode(e.target);
     }
   });
 
@@ -4213,6 +4266,8 @@ function sanitizeWatchedItem(raw, takenIds) {
   };
   const lc = sanitizeLastCheck(raw.lastCheck);
   if (lc) item.lastCheck = lc;
+  const alts = sanitizeAltTargets(raw.altTargets);
+  if (alts.length) item.altTargets = alts;
   return item;
 }
 
@@ -4381,11 +4436,21 @@ function pickFingerprint(el) {
   });
 }
 
-function makeWatched(target, code, fp, label, takenIds) {
+/**
+ * The element's simpler equivalents (C9: testid / id / name / short css / short
+ * xpath), kept so frameworks without a role engine export `By.id(…)` rather than
+ * spelling an accessible-name lookup out. Each one is sanitised like a target.
+ */
+function sanitizeAltTargets(list) {
+  if (!Array.isArray(list)) return [];
+  return list.map(sanitizeTarget).filter(Boolean).slice(0, 3);
+}
+
+function makeWatched(target, code, fp, label, takenIds, altTargets) {
   const t = sanitizeTarget(target);
   if (!t) return null;
   const c = cleanText(code, 2000) || codeForTarget(t);
-  return {
+  const item = {
     id: newWatchId(takenIds),
     label: cleanText(label, 200) || watchLabel(fp, c),
     target: t,
@@ -4393,6 +4458,9 @@ function makeWatched(target, code, fp, label, takenIds) {
     fingerprint: fp,
     savedAt: Date.now()
   };
+  const alts = sanitizeAltTargets(altTargets);
+  if (alts.length) item.altTargets = alts;
+  return item;
 }
 
 function allWatchedIds(state) {
@@ -4449,7 +4517,10 @@ function toggleWatchLocator(index) {
       }
       const cap = capProblem(state, key);
       if (cap) return { changed: false, error: cap };
-      const item = makeWatched(loc.target, loc.code, fp, '', allWatchedIds(state));
+      // The pick's simpler equivalents describe the same element, whichever of its
+      // locators is the one watched.
+      const alts = lastResultData && Array.isArray(lastResultData.altTargets) ? lastResultData.altTargets : null;
+      const item = makeWatched(loc.target, loc.code, fp, '', allWatchedIds(state), alts);
       if (!item) return { changed: false, error: "This locator can't be watched." };
       site.push(item);
       state.sites[key] = site;
@@ -4497,7 +4568,7 @@ function watchAllPom() {
         const fp = sanitizeFingerprint(isPlainObject(e.fingerprint) ? e.fingerprint : { role: e.role });
         const name = String(e.name || '').trim();
         const label = name ? `${name} (${String(e.kind || 'element')})` : '';
-        const item = makeWatched(e.target, e.code, fp, label, ids);
+        const item = makeWatched(e.target, e.code, fp, label, ids, e.altTargets);
         if (!item) { over++; return; }
         seen.add(tk);
         ids.add(item.id);
@@ -4715,7 +4786,10 @@ function healthMetaText(item) {
 function watchedCodeForOutput(item) {
   if (typeof LLCodegen === 'undefined') return item.code;
   try {
-    return String(LLCodegen.locatorExpr(item.target, outFramework, outLanguage) || item.code);
+    const target = typeof LLCodegen.preferredTarget === 'function'
+      ? LLCodegen.preferredTarget(item.target, item.altTargets, outFramework)
+      : item.target;
+    return String(LLCodegen.locatorExpr(target, outFramework, outLanguage) || item.code);
   } catch (e) {
     return item.code;
   }
