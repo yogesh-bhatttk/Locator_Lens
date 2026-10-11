@@ -56,6 +56,18 @@ describe('INSPECT_HOVERED relay', () => {
     ]);
   });
 
+  it('passes on when the hover happened (a finite number only), so the newest hover wins', () => {
+    const w = startWorker();
+    w.fromTab({ type: 'INSPECT_HOVERED', token: 't1', at: 1234 }, TAB, { frameId: 4 });
+    w.fromTab({ type: 'INSPECT_HOVERED', token: 't2', at: 'soon' }, TAB, { frameId: 4 });
+    w.fromTab({ type: 'INSPECT_HOVERED', token: 't3', at: Infinity }, TAB, { frameId: 4 });
+    expect(w.sent.filter((s) => s.msg.type === 'HIDE_HOVER_UI').map((s) => s.msg)).toEqual([
+      { type: 'HIDE_HOVER_UI', token: 't1', at: 1234 },
+      { type: 'HIDE_HOVER_UI', token: 't2' },
+      { type: 'HIDE_HOVER_UI', token: 't3' },
+    ]);
+  });
+
   it('is ignored from extension pages and without a token', () => {
     const w = startWorker();
     w.send({ type: 'INSPECT_HOVERED', token: 't1' });

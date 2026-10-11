@@ -959,7 +959,9 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
   // a cross-origin iframe gives the parent document no mouse event to do it by.
   if (msg.type === 'INSPECT_HOVERED') {
     if (!fromTab || typeof msg.token !== 'string') return;
-    sendToFrame(fromTab.id, { type: 'HIDE_HOVER_UI', token: msg.token });
+    const relay = { type: 'HIDE_HOVER_UI', token: msg.token };
+    if (typeof msg.at === 'number' && Number.isFinite(msg.at)) relay.at = msg.at; // newest hover wins
+    sendToFrame(fromTab.id, relay);
     return;
   }
 

@@ -2264,26 +2264,49 @@
       : 'Click or Enter to analyze · ▲/▼ to navigate · Esc to stop';
     tooltip.appendChild(ttHint);
 
-    // Position tooltip: prefer below, fall back to above
-    const TH = 64, TW = 300; // TH allows for the hint wrapping onto a second line
-    let ty = r.bottom + 8;
-    let tx = r.left;
-    if (ty + TH > window.innerHeight) ty = r.top - TH - 8;
-    if (tx + TW > window.innerWidth) tx = window.innerWidth - TW - 8;
-    tx = Math.max(4, tx);
-    ty = Math.max(4, ty);
-
-    // The bar covered the tooltip's "Esc to stop" hint wherever the two met (a
-    // flipped tooltip above the element, a bar beside a short one). Move the tooltip
-    // clear of the bar: above the bar, else below it.
+    // Position the tooltip clear of both the hovered element and the traversal bar:
+    // below, above, beside the bar, then right / left of the element — the first
+    // spot that fits the window. A short frame (a payment iframe) may have no such
+    // spot for the full tooltip: drop the hint line and look again. Only if even the
+    // one-line tooltip has nowhere to go may it cover the bar — never the element.
+    const TW = 300;
     const bar = traversalBar ? traversalBarPosition(r) : null;
-    const hitsBar = (y) => tx < bar.x + bar.w && tx + TW > bar.x && y < bar.y + bar.h && y + TH > bar.y;
-    if (bar && hitsBar(ty)) {
-      const aboveBar = bar.y - TH - 6;
-      const belowBar = bar.y + bar.h + 6;
-      if (aboveBar >= 4) ty = aboveBar;
-      else if (belowBar + TH <= window.innerHeight) ty = belowBar;
+    const vw = window.innerWidth, vh = window.innerHeight;
+    const overlaps = (x, y, w, h, b) => b && x < b.x + b.w && x + w > b.x && y < b.y + b.h && y + h > b.y;
+    const elBox = { x: r.left, y: r.top, w: r.width, h: r.height };
+    const spotFor = (TH, W, allowBar) => {
+      const clampX = (x) => Math.max(4, Math.min(x, vw - W - 8));
+      const cands = [
+        [clampX(r.left), r.bottom + 8],
+        [clampX(r.left), r.top - TH - 8]
+      ];
+      if (bar) {
+        cands.push([clampX(bar.x), bar.y + bar.h + 6], [clampX(bar.x), bar.y - TH - 6]);
+        // Level with the bar, beside it: where a short frame still has room.
+        const level = bar.y + Math.max(0, (bar.h - TH) / 2);
+        cands.push([bar.x + bar.w + 6, level], [bar.x - W - 6, level]);
+      }
+      cands.push([r.right + 8, Math.max(4, r.top)], [r.left - W - 8, Math.max(4, r.top)]);
+      for (const [x, y] of cands) {
+        if (x < 4 || y < 4 || x + W > vw - 4 || y + TH > vh - 4) continue;
+        if (overlaps(x, y, W, TH, elBox)) continue;
+        if (!allowBar && overlaps(x, y, W, TH, bar)) continue;
+        return [x, y];
+      }
+      return null;
+    };
+    let spot = spotFor(64, TW, false); // 64 allows for the hint wrapping onto a second line
+    if (!spot) {
+      // One line holds just the tag: about 7.5px a character in the 12px mono font.
+      const CW = Math.min(TW, Math.ceil(ttTag.textContent.length * 7.5) + 26);
+      const compact = spotFor(28, CW, false) || spotFor(28, CW, true);
+      if (compact) {
+        ttHint.remove(); // too tight for the hint: the element's name is what matters
+        spot = compact;
+      }
     }
+    if (!spot) spot = [Math.max(4, Math.min(r.left, vw - TW - 8)), Math.max(4, r.bottom + 8)];
+    const [tx, ty] = spot;
 
     tooltip.style.cssText = `
       position: fixed !important;
@@ -4974,12 +4997,25 @@
   // mouseout or mouseover at all, so the frame that starts showing a hover says so
   // — once per stretch of hovering — and BACKGROUND tells every other frame of the
   // tab to hide theirs (HIDE_HOVER_UI). The token tells this frame's own echo apart.
+  // Announcements travel through BACKGROUND and can arrive out of order: a frame's
+  // hover from a moment ago (the parent re-hit-testing after a scroll) must not hide
+  // the frame the pointer has since moved into. Each carries when it happened, and a
+  // frame hides only for a hover newer than its own.
   const _hoverToken = Math.random().toString(36).slice(2) + Date.now().toString(36);
   let _hoverShown = false;
+  let _hoverShownAt = 0;
   function announceHover() {
     if (_hoverShown) return;
     _hoverShown = true;
-    safeSend({ type: 'INSPECT_HOVERED', token: _hoverToken });
+    _hoverShownAt = Date.now();
+    safeSend({ type: 'INSPECT_HOVERED', token: _hoverToken, at: _hoverShownAt });
+  }
+
+  // A frame told to hide while the pointer is in fact over it shows its hover again
+  // at the pointer's next move here (no mouseover fires while it stays on one element).
+  function onInspectMouseMove(e) {
+    if (!isInspecting || _hoverShown || !isUserEvent(e)) return;
+    onMouseOver(e);
   }
 
   function onInspectMouseOut(e) {
@@ -5036,6 +5072,7 @@
     document.body.classList.add('ll-inspecting');
     document.addEventListener('mouseover', onMouseOver, true);
     document.addEventListener('mouseout', onInspectMouseOut, true);
+    document.addEventListener('mousemove', onInspectMouseMove, true);
     // Window capture runs before any listener the page registers on document.
     window.addEventListener('click', onClick, true);
     INSPECT_SWALLOWED_EVENTS.forEach((t) => window.addEventListener(t, onInspectSwallow, true));
@@ -5052,6 +5089,7 @@
     // Total Decommission: Remove all tracking listeners
     document.removeEventListener('mouseover', onMouseOver, true);
     document.removeEventListener('mouseout', onInspectMouseOut, true);
+    document.removeEventListener('mousemove', onInspectMouseMove, true);
     window.removeEventListener('click', onClick, true);
     INSPECT_SWALLOWED_EVENTS.forEach((t) => window.removeEventListener(t, onInspectSwallow, true));
     document.removeEventListener('keydown', onKeyDown, true);
@@ -5265,7 +5303,8 @@
     }
 
     else if (msg.type === 'HIDE_HOVER_UI') {
-      if (isInspecting && msg.token !== _hoverToken) hideHoverUi();
+      const stale = typeof msg.at === 'number' && msg.at < _hoverShownAt;
+      if (isInspecting && msg.token !== _hoverToken && !stale) hideHoverUi();
       return false;
     }
 

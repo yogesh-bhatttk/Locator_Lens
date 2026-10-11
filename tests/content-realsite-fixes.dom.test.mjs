@@ -442,6 +442,47 @@ describe('#5 · the traversal bar never covers the element or the next field bel
     expect(bar.y + bar.h).toBe(user.y); // flush: reaching it crosses nothing else
   });
 
+  it('the tooltip never covers the hovered element, even in a short frame (it drops the hint there)', () => {
+    const tip = () => {
+      const t = document.getElementById('ll-tooltip');
+      return {
+        x: parseFloat(t.style.left),
+        y: parseFloat(t.style.top),
+        w: 300,
+        h: t.querySelector('.ll-hint') ? 64 : 28,
+      };
+    };
+    const size = (w, h) => {
+      Object.defineProperty(window, 'innerWidth', { configurable: true, value: w });
+      Object.defineProperty(window, 'innerHeight', { configurable: true, value: h });
+    };
+    const [w0, h0] = [window.innerWidth, window.innerHeight];
+    try {
+      // A roomy page: the full tooltip, clear of the field and of the bar.
+      document.body.innerHTML = '<input id="card" aria-label="Card number">';
+      const card = document.getElementById('card');
+      const field = { x: 12, y: 300, w: 434, h: 40 };
+      rect(card, field);
+      send({ type: 'START_INSPECT' });
+      pointAt(card);
+      mouseover(card);
+      expect(document.querySelector('#ll-tooltip .ll-hint')).not.toBeNull();
+      expect(overlaps(tip(), field)).toBe(false);
+      expect(overlaps(tip(), barRect())).toBe(false);
+      // A 478×150 payment iframe: no room for the hint, but the field stays visible.
+      size(478, 150);
+      rect(card, { x: 12, y: 37, w: 434, h: 40 });
+      mouseover(card);
+      expect(document.querySelector('#ll-tooltip .ll-hint')).toBeNull();
+      const t = tip();
+      const compact = { ...t, w: Math.ceil('<input#card>'.length * 7.5) + 26 };
+      expect(overlaps(compact, { x: 12, y: 37, w: 434, h: 40 })).toBe(false);
+      expect(overlaps(compact, barRect())).toBe(false); // beside the bar, not under it
+    } finally {
+      size(w0, h0);
+    }
+  });
+
   it('entering a field whose edge is on a fraction of a pixel selects the field, not its wrapper', () => {
     document.body.innerHTML =
       '<div class="large-6"><label for="password">Password</label><input id="password"></div>';
@@ -714,6 +755,33 @@ describe('#10 · the top frame’s hover UI goes when the pointer goes into a ch
     mouseover(b);
     expect(shown('ll-traversal-bar')).toBe(true);
     expect(sent.filter((m) => m.type === 'INSPECT_HOVERED')).toHaveLength(2);
+  });
+
+  it('an older hover from another frame (arriving late) does not hide this newer one', () => {
+    document.body.innerHTML = '<button id="b">B</button>';
+    const b = document.getElementById('b');
+    send({ type: 'START_INSPECT' });
+    pointAt(b);
+    mouseover(b);
+    const said = sent.filter((m) => m.type === 'INSPECT_HOVERED');
+    expect(typeof said[0].at).toBe('number');
+    send({ type: 'HIDE_HOVER_UI', token: 'parent-frame', at: said[0].at - 50 }); // happened before ours
+    expect(shown('ll-traversal-bar')).toBe(true);
+    send({ type: 'HIDE_HOVER_UI', token: 'parent-frame', at: said[0].at + 50 }); // a newer one does hide it
+    expect(shown('ll-traversal-bar')).toBe(false);
+  });
+
+  it('told to hide while the pointer is still here, the next pointer move shows the hover again', () => {
+    document.body.innerHTML = '<button id="b">B</button>';
+    const b = document.getElementById('b');
+    send({ type: 'START_INSPECT' });
+    pointAt(b);
+    mouseover(b);
+    send({ type: 'HIDE_HOVER_UI', token: 'another-frame' });
+    expect(shown('ll-traversal-bar')).toBe(false);
+    b.dispatchEvent(new window.MouseEvent('mousemove', { bubbles: true, clientX: 10, clientY: 10 }));
+    expect(['ll-overlay', 'll-tooltip', 'll-traversal-bar'].every(shown)).toBe(true);
+    expect(document.getElementById('ll-tooltip').textContent).toContain('<button#b>');
   });
 
   it('a child frame hides its own when the pointer leaves its document', () => {
