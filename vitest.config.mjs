@@ -16,6 +16,10 @@ export default defineConfig({
     // Default to node; *.dom.test.mjs files opt into jsdom with a
     // `// @vitest-environment jsdom` docblock, which keeps the fast suite fast.
     environment: 'node',
+    // Shared CI runners under coverage instrumentation run jsdom-heavy tests about
+    // four times slower than a dev machine; 5 s (vitest's default) failed a 1.3 s
+    // test there. Tests that genuinely need longer (compilers) still set their own.
+    testTimeout: 20_000,
     env: { [CLASSIC_DIR_ENV]: DEFAULT_CLASSIC_DIR },
     setupFiles: ['tests/support/vm-coverage.mjs'],
     coverage: {

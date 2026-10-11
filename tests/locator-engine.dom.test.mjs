@@ -639,18 +639,31 @@ describe('#2 counts use Playwright default matching (substring, case-insensitive
 describe('#3 no scan cap: every element on the page is counted', () => {
   const filler = '<span>f</span>'.repeat(4500);
 
-  it('finds a unique element that comes after the first 4000 nodes', () => {
-    document.body.innerHTML = `<div>${filler}</div><button id="subject">Tail button</button>`;
-    const result = analyse(document.getElementById('subject'));
-    expect(card(result, 'role').matchCount).toBe(1);
-    expect(card(result, 'text').matchCount).toBe(1);
-  });
+  // A whole-page analysis of 4000+ jsdom nodes: about 1.3 s locally, but four times
+  // that on a shared CI runner under coverage instrumentation. These check that
+  // nothing is capped, not speed, so they get room beyond vitest's 5 s default.
+  const BIG_PAGE_MS = 30_000;
 
-  it('counts a duplicate that lives past the cap and inside a shadow root', () => {
-    document.body.innerHTML = `<p id="subject">Dup</p><div>${filler}</div><p>Dup</p><div id="host"></div>`;
-    document.getElementById('host').attachShadow({ mode: 'open' }).innerHTML = '<p>Dup</p>';
-    expect(card(analyse(document.getElementById('subject')), 'text').matchCount).toBe(3);
-  });
+  it(
+    'finds a unique element that comes after the first 4000 nodes',
+    () => {
+      document.body.innerHTML = `<div>${filler}</div><button id="subject">Tail button</button>`;
+      const result = analyse(document.getElementById('subject'));
+      expect(card(result, 'role').matchCount).toBe(1);
+      expect(card(result, 'text').matchCount).toBe(1);
+    },
+    BIG_PAGE_MS
+  );
+
+  it(
+    'counts a duplicate that lives past the cap and inside a shadow root',
+    () => {
+      document.body.innerHTML = `<p id="subject">Dup</p><div>${filler}</div><p>Dup</p><div id="host"></div>`;
+      document.getElementById('host').attachShadow({ mode: 'open' }).innerHTML = '<p>Dup</p>';
+      expect(card(analyse(document.getElementById('subject')), 'text').matchCount).toBe(3);
+    },
+    BIG_PAGE_MS
+  );
 });
 
 describe('#4 ranking prefers unique locators', () => {
