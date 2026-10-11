@@ -120,9 +120,41 @@ byte-identical to the one in the manifest — a listing that describes something
 manifest does not is a review finding, and the two drift the moment they are
 maintained separately.
 
-**Short description** (112 chars, limit 132)
+**Short description** (132 chars, limit 132). The Chrome Web Store summary, the AMO
+summary and the Edge short description; the manifests ship the same text.
 
-> Inspect elements for ranked Playwright locators and record flows into test scripts—runs locally in your browser.
+> Inspect elements for ranked, unique locators and record flows into Playwright, Selenium, Cypress or WebdriverIO tests. Runs locally.
+
+**Detailed description** (1840 characters; plain text, as all three stores show it).
+The Chrome Web Store description, the AMO description and the Edge description
+(which must be 250–10,000 characters):
+
+> Locatra helps QA engineers and developers write end-to-end tests faster. Point at any element to get locators that are ranked, checked for uniqueness against the live page, and ready to paste, or record a flow and get a runnable test.
+>
+> INSPECT ANY ELEMENT
+> • Hover and click an element to see ranked locators: test id, role and accessible name, label, placeholder, text, CSS and XPath.
+> • Every locator is checked against the page, so you can see whether it matches exactly one element.
+> • Works inside iframes (including cross-origin payment frames) and open shadow DOM.
+> • Move to the parent or child element with ▲ / ▼, or press Alt+Shift+E on any page.
+>
+> YOUR FRAMEWORK, YOUR LANGUAGE
+> • Playwright, Selenium, Cypress and WebdriverIO, in TypeScript, JavaScript, Python, Java and C#.
+> • Locators read naturally in each framework. Selenium gets By.id("email") when the element has an id, instead of a long XPath.
+>
+> RECORD AND REPLAY
+> • Record clicks, typing, selects, checkboxes, keys and assertions into a complete test script (Alt+Shift+K).
+> • Replay the flow in the page step by step to check it before you export it.
+> • Passwords, one-time codes and card numbers are never recorded: the test reads them from environment variables.
+> • Typed values can become test data, and suggested assertions (page changed, message shown) are one click away.
+>
+> PAGE OBJECTS, SELECTOR LAB AND HEALTH CHECK
+> • Export a Page Object class for a form or a whole page.
+> • Selector Lab: paste a CSS selector, XPath or Playwright locator and see what it matches.
+> • Watch the locators your tests rely on and re-check them with one click when the page changes.
+>
+> PRIVATE BY DESIGN
+> • Everything runs locally in your browser. No account, no server, no analytics.
+> • The extension contains no network code, and its source is public: https://github.com/yogesh-bhatttk/Locator_Lens
 
 **Single purpose**
 
@@ -301,28 +333,17 @@ existing item → **Update**). Every field, in the order Partner Center asks:
 | Field                  | Value                                                                                                                                        |
 | ---------------------- | -------------------------------------------------------------------------------------------------------------------------------------------- |
 | Display name           | Locatra – Smart Locator Automation (from the manifest)                                                                                       |
-| Description            | The short description from §3b, then the paragraph below — Partner Center wants 250–10,000 characters                                        |
+| Description            | The detailed description from §3b, verbatim (Partner Center wants 250–10,000 characters)                                                     |
 | Store logo             | `icons/icon128.png` meets the 128×128 minimum; a 300×300 rendering of the same mark is recommended (not generated yet)                       |
 | Small promotional tile | `screenshots/store/promo-small-440x280.png` (optional)                                                                                       |
 | Large promotional tile | `screenshots/store/promo-marquee-1400x560.png` (optional)                                                                                    |
 | Screenshots            | the five `screenshots/store/store-*.png` images from §5 (1280×800, real captures of the Chromium build — Edge renders the panel identically) |
 | YouTube video URL      | leave empty                                                                                                                                  |
-| Search terms           | `playwright`, `selenium`, `cypress`, `locator`, `test recorder`, `xpath`, `qa automation` (7 terms, each ≤ 30 characters)                    |
-
-Description, pasted after the short description:
-
-> Locatra is a test-authoring tool for QA engineers. Hover any element to get
-> ranked, uniqueness-checked locators (role, label, test id, text, CSS, XPath),
-> validate selectors in the Selector Lab, and record a flow into a runnable
-> Playwright, Selenium, Cypress or WebdriverIO test in TypeScript, JavaScript,
-> Python, Java or C#. Replay a recording in the page, export Page Objects, and
-> keep an eye on the locators you rely on with the locator health check. Keyboard
-> shortcuts (Alt+Shift+E to inspect, Alt+Shift+K to record) work on any page.
-> Everything runs locally in your browser: no account, no server, no telemetry.
+| Search terms           | `playwright`, `selenium`, `cypress`, `webdriverio`, `locator`, `test recorder`, `qa automation` (7 terms, each ≤ 30 characters)              |
 
 The short description, verbatim from the manifest:
 
-> Inspect elements for ranked Playwright locators and record flows into test scripts—runs locally in your browser.
+> Inspect elements for ranked, unique locators and record flows into Playwright, Selenium, Cypress or WebdriverIO tests. Runs locally.
 
 **Permissions.** Partner Center has no per-permission form; reviewers read the
 justification from the notes below. Same set, same reasons as §4:
