@@ -139,8 +139,8 @@ function marqueeTile() {
          <div class="word" style="font-size:104px">Locatra</div>
          <div class="rule" style="width:232px;height:5px;margin:26px 0 24px"></div>
          <div class="tag" style="font-size:31px;max-width:830px">
-           Inspect any element. Get ranked, uniqueness-checked locators for
-           Playwright, Selenium&nbsp;&amp; Cypress.
+           Ranked, uniqueness-checked locators for<br />
+           Playwright, Selenium, Cypress&nbsp;&amp;&nbsp;WebdriverIO.
          </div>
          <div style="margin-top:34px;display:inline-flex;align-items:center;gap:13px;
                      padding:15px 24px;border-radius:11px;

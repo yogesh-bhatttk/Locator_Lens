@@ -105,7 +105,11 @@ async function main() {
     await page.waitForTimeout(400);
 
     const email = page.locator('#email');
-    await email.hover();
+    // A plain pointer move, not hover(): hover() scrolls the page when anything
+    // covers the target — Locatra's own bar, here — and the header slid out of shot.
+    await page.evaluate(() => globalThis.scrollTo(0, 0));
+    const eb = await email.boundingBox();
+    await page.mouse.move(eb.x + eb.width / 2, eb.y + eb.height / 2, { steps: 4 });
     await page.waitForTimeout(600);
     await shot(page, '01-inspect-overlay.png', 'inspector overlay + traversal bar on a live form');
 
@@ -196,6 +200,11 @@ async function main() {
 
     const cardField = page.frameLocator('#payment-frame').locator('#card');
     await cardField.hover();
+    // hover() scrolls first, and the parent page re-hit-tests the pointer's old spot
+    // after the scroll: its late hover can win. A real pointer keeps moving, and the
+    // frame it is in then takes the hover back — so move it a little, as a hand does.
+    const cb = await cardField.boundingBox();
+    await page.mouse.move(cb.x + cb.width / 2 + 6, cb.y + cb.height / 2, { steps: 3 });
     await page.waitForTimeout(500);
     await shot(page, '10-iframe-overlay.png', 'inspecting a field inside a payment iframe');
 
