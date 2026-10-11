@@ -191,6 +191,11 @@ mdn-search-button` instead of an `html > body > …` path), and an element
     the pointer shows its hover UI;
   - copying from a frame where the Clipboard API is blocked goes through the top
     frame, with no console errors.
+  - the inspect tooltip never covers the element it describes: it takes the first
+    free spot clear of the element and the traversal bar, and in a short frame
+    (a payment iframe) shows just the element's name beside the bar;
+  - only the frame under the pointer shows hover UI, even when another frame's
+    hover notice arrives late (the newest hover wins; a pointer move re-shows it).
 - WebdriverIO: a script whose only text check was a "contains" one used
   `LOCATRA_TEXT` without declaring it.
 
@@ -230,6 +235,8 @@ mdn-search-button` instead of an `html > body > …` path), and an element
 
 ### Tests
 
+- Store screenshots and promo tiles regenerated from the current build (the Health
+  tab, settings and Watch button were missing; the promo lists WebdriverIO).
 - The step-screenshots smoke blocks desktop input that does not come from the
   script: a real click landing in its visible window was recorded (correctly) and
   failed the run about one time in forty.
